@@ -98,6 +98,41 @@ def test_main_status_command_uses_current_project_root(
     assert "已写章节: 1" in info_messages
 
 
+def test_main_status_command_accepts_explicit_project_root_from_any_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from tools.init_project import init_project
+
+    project_root = tmp_path / "explicit-project"
+    project_root.mkdir()
+    init_project(project_root, "demo")
+    manuscript_dir = (
+        project_root
+        / "data"
+        / "novels"
+        / "demo"
+        / "data"
+        / "manuscript"
+        / "arc_001"
+    )
+    manuscript_dir.mkdir(parents=True, exist_ok=True)
+    (manuscript_dir / "ch_001.md").write_text("# 第一章\n\n正文", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["openwrite", "status", "--project", str(project_root)],
+    )
+    info_messages: list[str] = []
+    monkeypatch.setattr(cli_module.logger, "info", info_messages.append)
+    original_root = Path.cwd()
+
+    assert cli_module.main() == 0
+    assert Path.cwd() == original_root
+    assert "项目: demo" in info_messages
+    assert "已写章节: 1" in info_messages
+
+
 def test_cmd_status_counts_unique_final_chapters_across_arcs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

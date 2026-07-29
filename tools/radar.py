@@ -323,26 +323,70 @@ class RadarAgent:
     def _parse_recommendations(self, content: str) -> list[PlatformRecommendation]:
         """解析 LLM 输出"""
         recommendations = []
+        json_text = self._extract_json_array(content)
+        if not json_text:
+            return recommendations
 
         try:
-            json_match = re.search(r"\[.*\]", content, re.DOTALL)
-            if json_match:
-                items = json.loads(json_match.group(0))
-                for item in items:
-                    recommendations.append(
-                        PlatformRecommendation(
-                            platform=item.get("platform", ""),
-                            genre=item.get("genre", "unknown"),
-                            confidence=item.get("confidence", 0.5),
-                            concept=item.get("concept", ""),
-                            reasoning=item.get("reasoning", ""),
-                            benchmarks=item.get("benchmarks", []),
-                        )
-                    )
+            items = json.loads(json_text)
         except json.JSONDecodeError as e:
             self.log.warning(f"Failed to parse JSON: {e}")
+            return recommendations
+
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            recommendations.append(
+                PlatformRecommendation(
+                    platform=item.get("platform", ""),
+                    genre=item.get("genre", "unknown"),
+                    confidence=item.get("confidence", 0.5),
+                    concept=item.get("concept", ""),
+                    reasoning=item.get("reasoning", ""),
+                    benchmarks=item.get("benchmarks", []),
+                )
+            )
 
         return recommendations
+
+    @staticmethod
+    def _extract_json_array(content: str) -> str:
+        """Extract the first valid JSON array from markdown-ish model output."""
+        text = str(content or "").strip()
+        fenced = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", text, re.DOTALL | re.IGNORECASE)
+        candidates = [fenced.group(1)] if fenced else []
+        starts = [index for index, char in enumerate(text) if char == "["]
+        for start in starts:
+            depth = 0
+            in_string = False
+            escaped = False
+            for index in range(start, len(text)):
+                char = text[index]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        in_string = False
+                    continue
+                if char == '"':
+                    in_string = True
+                elif char == "[":
+                    depth += 1
+                elif char == "]":
+                    depth -= 1
+                    if depth == 0:
+                        candidates.append(text[start : index + 1])
+                        break
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, list):
+                return candidate
+        return ""
 
     def _extract_trends(self, recommendations: list[PlatformRecommendation]) -> list[str]:
         """提取趋势"""

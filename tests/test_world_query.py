@@ -25,6 +25,8 @@ from tools.world_query import (
     get_relations_graph,
     get_relations_topology,
     edit_world_relation,
+    search_relation_targets,
+    edit_world_relations,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -639,6 +641,149 @@ name = "苏遥"
             edge["source"] == "hero" and edge["target"] == "partner"
             for edge in topology["edges"]
         )
+
+    def test_search_relation_targets_finds_characters_and_world_entities(
+        self, relation_project
+    ):
+        entities = (
+            relation_project
+            / "data"
+            / "novels"
+            / "test"
+            / "src"
+            / "world"
+            / "entities"
+        )
+        entities.mkdir(parents=True)
+        (entities / "birth_city.md").write_text(
+            """+++
+id = "birth_city"
+name = "雾都转轮府"
+type = "地点"
+subtype = "出身地"
+summary = "林舟的出身地点，旧案线索最早在这里断裂。"
++++
+
+# 雾都转轮府
+
+林舟在这里长大，掌握了第一批关于旧案的线索。
+""",
+            encoding="utf-8",
+        )
+
+        result = search_relation_targets(
+            "test",
+            "林舟 出身 雾都",
+            project_root=relation_project,
+            limit=10,
+        )
+        ids = {candidate["id"] for candidate in result["candidates"]}
+
+        assert result["count"] >= 2
+        assert {"hero", "birth_city"}.issubset(ids)
+        birth_city = next(
+            candidate
+            for candidate in result["candidates"]
+            if candidate["id"] == "birth_city"
+        )
+        assert birth_city["type"] == "地点"
+        assert "出身" in birth_city["matched_terms"]
+
+    def test_batch_relation_preview_and_confirm_writes_multiple_edges(
+        self, relation_project
+    ):
+        entities = (
+            relation_project
+            / "data"
+            / "novels"
+            / "test"
+            / "src"
+            / "world"
+            / "entities"
+        )
+        entities.mkdir(parents=True)
+        (entities / "birth_city.md").write_text(
+            """+++
+id = "birth_city"
+name = "雾都转轮府"
+type = "地点"
+summary = "林舟的出身地点。"
++++
+
+# 雾都转轮府
+""",
+            encoding="utf-8",
+        )
+        (entities / "echo_ability.md").write_text(
+            """+++
+id = "echo_ability"
+name = "回响感知"
+type = "能力"
+summary = "能够察觉旧案残留的异常回响。"
++++
+
+# 回响感知
+""",
+            encoding="utf-8",
+        )
+        source = (
+            relation_project
+            / "data"
+            / "novels"
+            / "test"
+            / "src"
+            / "characters"
+            / "hero.md"
+        )
+        original = source.read_text(encoding="utf-8")
+        relations = [
+            {
+                "source_id": "hero",
+                "target_id": "birth_city",
+                "description": "出身地",
+            },
+            {
+                "source_id": "hero",
+                "target_id": "echo_ability",
+                "description": "核心能力",
+            },
+        ]
+
+        preview = edit_world_relations(
+            "test",
+            relations,
+            project_root=relation_project,
+        )
+
+        assert preview["ok"] is True
+        assert preview["applied"] is False
+        assert preview["changed_sources"] == 1
+        assert "[[related]]" in preview["diff"]
+        assert 'target = "birth_city"' in preview["diff"]
+        assert 'target = "echo_ability"' in preview["diff"]
+        assert preview["source_revisions"]["hero"]
+        assert source.read_text(encoding="utf-8") == original
+
+        applied = edit_world_relations(
+            "test",
+            relations,
+            project_root=relation_project,
+            base_revisions=preview["source_revisions"],
+            confirm=True,
+        )
+
+        assert applied["ok"] is True
+        assert applied["applied"] is True
+        updated = source.read_text(encoding="utf-8")
+        assert 'target = "birth_city"' in updated
+        assert 'target = "echo_ability"' in updated
+        topology = get_relations_topology("test", project_root=relation_project)
+        edges = {
+            (edge["source"], edge["target"])
+            for edge in topology["edges"]
+        }
+        assert ("hero", "birth_city") in edges
+        assert ("hero", "echo_ability") in edges
 
     def test_confirmation_rejects_stale_revision(self, relation_project):
         source = (

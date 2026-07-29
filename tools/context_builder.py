@@ -32,6 +32,7 @@ from models.context_package import (
     GenerationContext,
     ForeshadowingState,
     WorldRules,
+    estimate_text_tokens,
 )
 from .truth_manager import TruthFilesManager
 from .resources import resolve_craft_dir
@@ -57,7 +58,8 @@ class ContextBuilder:
         prompt_context = context.to_prompt_context()
     """
 
-    # Token 预算分配
+    # Token 总预算。具体内容不再使用固定槽位硬切，而是在超限时按
+    # 记忆 -> 大纲 -> 运行态 -> 硬适配四级渐进压缩。
     # Internal prompt budget.  This is deliberately below the provider's full
     # context window and can be raised for long-context models such as DeepSeek.
     # Keep the output budget separate via LLM_MAX_TOKENS.
@@ -65,12 +67,7 @@ class ContextBuilder:
         MAX_TOKENS = max(12000, min(512000, int(os.getenv("OPENWRITE_CONTEXT_TOKENS", "64000"))))
     except ValueError:
         MAX_TOKENS = 64000
-    BUDGET_OUTLINE = 5000
-    BUDGET_CHARACTERS = 3000
-    BUDGET_FORESHADOWING = 2000
-    BUDGET_STYLE = 8000
-    BUDGET_WORLD = 3000
-    BUDGET_RECENT = 3000
+    COMPRESSION_STRATEGY = "tiered-hierarchical-v2"
 
     def __init__(self, project_root: Path, novel_id: str, reference_style: str = ""):
         """初始化构建器
@@ -83,6 +80,16 @@ class ContextBuilder:
         self.project_root = project_root.resolve()
         self.novel_id = novel_id
         self.reference_style = reference_style
+        # Studio can update this environment value while the server is
+        # running.  Read it per builder instance so the next request observes
+        # the new budget without restarting Python.
+        try:
+            self.MAX_TOKENS = max(
+                12000,
+                min(512000, int(os.getenv("OPENWRITE_CONTEXT_TOKENS", "64000"))),
+            )
+        except ValueError:
+            self.MAX_TOKENS = 64000
 
         # 数据路径（仅支持新布局）
         self.novel_dir = project_root / "data" / "novels" / novel_id
@@ -843,37 +850,380 @@ class ContextBuilder:
         return "\n\n...\n\n".join(texts)
 
     def _compress_if_needed(self, context: GenerationContext) -> GenerationContext:
-        """动态压缩上下文
+        """按信息层级渐进压缩，并保证最终估算值不超过总预算。
 
-        如果 token 超限，按优先级压缩：
-        1. 截断 recent_text
-        2. 压缩 style_profile
-        3. 减少角色历史
+        L1 先压可从正文重建的历史章节记忆；L2 缩减大纲细节但始终
+        保留以当前章为中心的窗口；L3 才压缩运行态、人物与精确上文；
+        L4 是提供商请求前的确定性硬适配。作者意图、创作罗盘和当前章
+        在前三层中不会被删除。
         """
-        estimated_tokens = context.estimate_tokens()
-
-        if estimated_tokens <= self.MAX_TOKENS:
+        original_tokens = context.estimate_tokens()
+        if original_tokens <= self.MAX_TOKENS:
+            context.compression = self._compression_report(
+                applied=False,
+                level=0,
+                original_tokens=original_tokens,
+                final_tokens=original_tokens,
+                actions=[],
+            )
             return context
 
-        # 1. 截断 recent_text
-        if len(context.recent_text) > 300:
-            context.recent_text = context.recent_text[-300:]
-            estimated_tokens = context.estimate_tokens()
-            if estimated_tokens <= self.MAX_TOKENS:
-                return context
+        # Deep copy is important: outline nodes are also held by the hierarchy
+        # cache.  Compressing a request must never rewrite cached/source truth.
+        compressed = context.model_copy(deep=True)
+        actions: List[str] = []
 
-        # 2. 减少大纲窗口
-        if len(context.outline_window) > 3:
-            context.outline_window = context.outline_window[-3:]
-            estimated_tokens = context.estimate_tokens()
-            if estimated_tokens <= self.MAX_TOKENS:
-                return context
+        # L1 — old/rebuildable memory.  Keep recent prose exact at this level.
+        memory_target = self._token_share_as_chars(0.12, minimum=1200)
+        if self._compress_text_field(
+            compressed, "chapter_summaries", memory_target, prefer_tail=True
+        ):
+            actions.append("L1: 压缩较旧章节记忆")
+        if self._fits(compressed):
+            return self._finish_compression(compressed, 1, original_tokens, actions)
 
-        # 3. 减少角色数量
-        if len(context.active_characters) > 3:
-            context.active_characters = context.active_characters[:3]
+        # L2 — structural summaries.  Preserve current chapter and neighbours.
+        if self._compress_outline(compressed, window=7, summary_chars=600):
+            actions.append("L2: 大纲缩为当前章居中的 7 节点窗口并压缩摘要")
+        if self._fits(compressed):
+            return self._finish_compression(compressed, 2, original_tokens, actions)
 
+        if self._compress_outline(compressed, window=5, summary_chars=320):
+            actions.append("L2: 大纲进一步缩为 5 节点窗口")
+        if self._fits(compressed):
+            return self._finish_compression(compressed, 2, original_tokens, actions)
+
+        # L3 — live working set.  Truth files are summarized, not silently
+        # dropped; the exact prose keeps its tail because continuity is local.
+        live_targets = {
+            "current_state": self._token_share_as_chars(0.08, minimum=800),
+            "relationships": self._token_share_as_chars(0.08, minimum=800),
+            "ledger": self._token_share_as_chars(0.05, minimum=500),
+            "foreshadowing_summary": self._token_share_as_chars(0.05, minimum=500),
+        }
+        changed_live = False
+        for field, target in live_targets.items():
+            changed_live |= self._compress_text_field(compressed, field, target)
+        if changed_live:
+            actions.append("L3: 压缩真相状态、关系、账本和伏笔摘要")
+        if len(compressed.recent_text) > 2000:
+            compressed.recent_text = self._fit_text(
+                compressed.recent_text, 2000, prefer_tail=True
+            )
+            actions.append("L3: 精确上文仅保留最近 2000 字符")
+        if len(compressed.active_characters) > 5:
+            compressed.active_characters = self._prioritize_characters(
+                compressed.active_characters, 5
+            )
+            actions.append("L3: 活跃人物缩为最高相关的 5 人")
+        if self._fits(compressed):
+            return self._finish_compression(compressed, 3, original_tokens, actions)
+
+        # L4 — deterministic provider guard.  This pass intentionally becomes
+        # terse, but still keeps the current chapter identity and core controls.
+        self._compress_outline(compressed, window=3, summary_chars=160)
+        compressed.active_characters = self._prioritize_characters(
+            compressed.active_characters, 3
+        )
+        compressed.recent_text = self._fit_text(
+            compressed.recent_text, 600, prefer_tail=True
+        )
+        compressed.chapter_summaries = self._fit_text(
+            compressed.chapter_summaries, 900, prefer_tail=True
+        )
+        for field, target in (
+            ("current_state", 700),
+            ("relationships", 700),
+            ("ledger", 400),
+            ("foreshadowing_summary", 400),
+        ):
+            setattr(compressed, field, self._fit_text(getattr(compressed, field), target))
+        actions.append("L4: 应用最小工作集硬适配")
+        self._force_fit(compressed, actions)
+        return self._finish_compression(compressed, 4, original_tokens, actions)
+
+    def _compression_report(
+        self,
+        *,
+        applied: bool,
+        level: int,
+        original_tokens: int,
+        final_tokens: int,
+        actions: List[str],
+    ) -> Dict[str, Any]:
+        return {
+            "strategy": self.COMPRESSION_STRATEGY,
+            "applied": applied,
+            "level": level,
+            "budget_tokens": self.MAX_TOKENS,
+            "original_estimated_tokens": original_tokens,
+            "final_estimated_tokens": final_tokens,
+            "actions": list(actions),
+        }
+
+    def _finish_compression(
+        self,
+        context: GenerationContext,
+        level: int,
+        original_tokens: int,
+        actions: List[str],
+    ) -> GenerationContext:
+        final_tokens = context.estimate_tokens()
+        context.compression = self._compression_report(
+            applied=True,
+            level=level,
+            original_tokens=original_tokens,
+            final_tokens=final_tokens,
+            actions=actions,
+        )
+        logger.info(
+            "上下文分级压缩 L%s: %s -> %s tokens (budget=%s)",
+            level,
+            original_tokens,
+            final_tokens,
+            self.MAX_TOKENS,
+        )
         return context
+
+    def _fits(self, context: GenerationContext) -> bool:
+        return context.estimate_tokens() <= self.MAX_TOKENS
+
+    def _token_share_as_chars(self, share: float, *, minimum: int) -> int:
+        # A Chinese-heavy target is the conservative case: ~1.5 tokens/char.
+        return max(minimum, int(self.MAX_TOKENS * share / 1.5))
+
+    def _compress_text_field(
+        self,
+        context: GenerationContext,
+        field: str,
+        max_chars: int,
+        *,
+        prefer_tail: bool = False,
+    ) -> bool:
+        original = str(getattr(context, field, "") or "")
+        fitted = self._fit_text(original, max_chars, prefer_tail=prefer_tail)
+        if fitted == original:
+            return False
+        setattr(context, field, fitted)
+        return True
+
+    def _compress_outline(
+        self,
+        context: GenerationContext,
+        *,
+        window: int,
+        summary_chars: int,
+    ) -> bool:
+        nodes = list(context.outline_window)
+        selected = self._centered_nodes(nodes, context.chapter_id, window)
+        changed = len(selected) != len(nodes)
+        for node in selected:
+            summary = str(getattr(node, "summary", "") or "")
+            fitted = self._fit_text(summary, summary_chars)
+            if fitted != summary:
+                node.summary = fitted
+                changed = True
+        context.outline_window = selected
+        if context.current_chapter is not None:
+            summary = str(getattr(context.current_chapter, "summary", "") or "")
+            fitted = self._fit_text(summary, max(summary_chars, 320))
+            if fitted != summary:
+                context.current_chapter.summary = fitted
+                changed = True
+        return changed
+
+    @staticmethod
+    def _centered_nodes(nodes: List[Any], chapter_id: str, limit: int) -> List[Any]:
+        if len(nodes) <= limit:
+            return nodes
+        center = next(
+            (
+                index
+                for index, node in enumerate(nodes)
+                if getattr(node, "node_id", "") == chapter_id
+            ),
+            len(nodes) // 2,
+        )
+        start = max(0, center - limit // 2)
+        start = min(start, len(nodes) - limit)
+        return nodes[start : start + limit]
+
+    @staticmethod
+    def _prioritize_characters(characters: List[Any], limit: int) -> List[Any]:
+        if len(characters) <= limit:
+            return characters
+        tier_rank = {"主角": 0, "重要配角": 1, "普通配角": 2, "炮灰": 3}
+        indexed = list(enumerate(characters))
+
+        def rank(item: tuple[int, Any]) -> tuple[int, int]:
+            tier = getattr(item[1], "tier", "普通配角")
+            tier_value = str(getattr(tier, "value", tier))
+            return tier_rank.get(tier_value, 2), item[0]
+
+        ranked = sorted(
+            indexed,
+            key=rank,
+        )[:limit]
+        keep_indexes = {index for index, _ in ranked}
+        return [item for index, item in indexed if index in keep_indexes]
+
+    @staticmethod
+    def _fit_text(text: str, max_chars: int, *, prefer_tail: bool = False) -> str:
+        """Extract high-signal sentences while preserving chronological order."""
+        value = str(text or "").strip()
+        if not value or max_chars <= 0:
+            return ""
+        if len(value) <= max_chars:
+            return value
+        if prefer_tail:
+            tail = value[-max_chars:]
+            boundary = re.search(r"[。！？!?\n]", tail[: max(1, max_chars // 3)])
+            return tail[boundary.end() :].strip() if boundary else tail.strip()
+
+        units = [
+            unit.strip()
+            for unit in re.split(r"(?<=[。！？!?；;])|\n+", value)
+            if unit.strip()
+        ]
+        if len(units) <= 1:
+            head = max(1, int(max_chars * 0.65))
+            tail = max_chars - head - 1
+            return (value[:head] + "…" + (value[-tail:] if tail > 0 else ""))[:max_chars]
+
+        keywords = (
+            "决定", "发现", "转折", "变化", "死亡", "受伤", "突破", "失败",
+            "伏笔", "回收", "真相", "身份", "关系", "目标", "状态", "限制",
+            "必须", "禁止", "代价", "承诺", "冲突", "揭示",
+        )
+        scored: List[tuple[int, int, str]] = []
+        for index, unit in enumerate(units):
+            score = 0
+            if index == 0:
+                score += 8
+            if index == len(units) - 1:
+                score += 7
+            if unit.startswith(("#", "|", "- ", "* ")):
+                score += 3
+            score += sum(3 for keyword in keywords if keyword in unit)
+            scored.append((score, index, unit))
+        selected: set[int] = set()
+        used = 0
+        for _, index, unit in sorted(scored, key=lambda item: (-item[0], item[1])):
+            cost = len(unit) + (1 if selected else 0)
+            if used + cost > max_chars and selected:
+                continue
+            selected.add(index)
+            used += cost
+            if used >= max_chars:
+                break
+        result = "\n".join(units[index] for index in sorted(selected))
+        if len(result) > max_chars:
+            result = result[:max_chars]
+        return result.strip()
+
+    def _force_fit(self, context: GenerationContext, actions: List[str]) -> None:
+        """Last-resort loop that makes the configured cap an actual invariant."""
+        optional_fields = [
+            "chapter_summaries",
+            "relationships",
+            "current_state",
+            "ledger",
+            "foreshadowing_summary",
+            "recent_text",
+            "emotion_arc",
+        ]
+        iterations = 0
+        while not self._fits(context) and iterations < 80:
+            iterations += 1
+            candidates = [
+                (estimate_text_tokens(str(getattr(context, field, "") or "")), field)
+                for field in optional_fields
+                if getattr(context, field, "")
+            ]
+            if candidates:
+                _, field = max(candidates)
+                value = str(getattr(context, field))
+                target = max(0, int(len(value) * 0.65) - 1)
+                setattr(
+                    context,
+                    field,
+                    self._fit_text(
+                        value,
+                        target,
+                        prefer_tail=field in {"recent_text", "chapter_summaries"},
+                    ),
+                )
+                continue
+
+            # Optional text is exhausted: reduce rendered structural details.
+            if context.outline_window:
+                context.outline_window = []
+                continue
+            if context.active_characters:
+                context.active_characters = []
+                continue
+            if context.style_profile is not None:
+                context.style_profile = None
+                continue
+            if context.world_rules.constraints or context.world_rules.entities:
+                context.world_rules = WorldRules()
+                continue
+            if context.foreshadowing.pending or context.foreshadowing.planted:
+                context.foreshadowing = ForeshadowingState()
+                continue
+
+            # Core controls are shortened only when the configured budget is
+            # too small to hold even the minimum working set.
+            core_candidates = [
+                (estimate_text_tokens(str(getattr(context, field, "") or "")), field)
+                for field in ("author_intent", "creative_focus")
+                if getattr(context, field, "")
+            ]
+            if core_candidates:
+                _, field = max(core_candidates)
+                value = str(getattr(context, field))
+                setattr(context, field, self._fit_text(value, max(64, int(len(value) * 0.65))))
+                continue
+            if context.current_chapter is not None and getattr(
+                context.current_chapter, "summary", ""
+            ):
+                context.current_chapter.summary = ""
+                continue
+            if context.chapter_goals:
+                context.chapter_goals = context.chapter_goals[:1]
+                context.chapter_goals[0] = self._fit_text(context.chapter_goals[0], 80)
+                continue
+            if context.dramatic_context:
+                context.dramatic_context = {}
+                continue
+            break
+        # This branch is normally unreachable because the public setting is
+        # clamped to at least 12K.  Keep it for tests/custom callers that set a
+        # smaller instance budget: the provider cap remains a hard invariant.
+        if not self._fits(context):
+            context.chapter_summaries = ""
+            context.relationships = ""
+            context.current_state = ""
+            context.ledger = ""
+            context.foreshadowing_summary = ""
+            context.recent_text = ""
+            context.emotion_arc = ""
+            context.outline_window = []
+            context.active_characters = []
+            context.style_profile = None
+            context.world_rules = WorldRules()
+            context.foreshadowing = ForeshadowingState()
+            context.author_intent = ""
+            context.creative_focus = ""
+            context.chapter_goals = []
+            context.dramatic_context = {}
+            if context.current_chapter is not None:
+                context.current_chapter.summary = ""
+                title = str(getattr(context.current_chapter, "title", "") or "")
+                context.current_chapter.title = self._fit_text(title, 80)
+            if not self._fits(context):
+                context.current_chapter = None
+        actions.append(f"L4: 最终适配循环 {iterations} 次，确认不超过预算")
 
     def _estimate_tokens(self, text: str) -> int:
         """估算文本 token 数
@@ -882,13 +1232,7 @@ class ContextBuilder:
         英文/数字约 1 token ≈ 4 字符。
         混合文本维持偏保守估算以避免超限。
         """
-        if not text:
-            return 0
-        # 统计中文字符和非中文字符
-        chinese_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
-        other_chars = len(text) - chinese_chars
-        # 中文: ~1.5 token/字; 英文: ~0.25 token/字符
-        return int(chinese_chars * 1.5 + other_chars * 0.25)
+        return estimate_text_tokens(text)
 
     def _load_yaml(self, path: Path) -> Dict[str, Any]:
         """安全加载 YAML 文件"""

@@ -35,6 +35,8 @@ OpenWrite 不覆盖短篇、翻译、剧本或互动游戏。它把产品能力�
 - **完整交付闭环**：支持 TXT / Markdown 旧稿导入、写作进度与资产就绪度工作台、Markdown / TXT 整书导出。
 - **小说 Studio**：`openwrite studio` 覆盖模型连接、Goethe / Dante 长会话、小说资产编辑与新建、旧稿导入、同步、上下文检查、写章、37 维审稿、连续性/伏笔、来源提取晋升和整书导出。
 - **分层长会话**：Goethe / Dante 的滚动状态保存在 `data/workflows/*session.yaml`，完整对话追加保存在对应的 `*session.jsonl`；运行时只注入摘要与最近窗口，旧历史不会丢失。
+- **真实活动可视化**：Studio 的 `AI WORKING` 读取后端 ReAct 事件，显示模型思考、工具调用、结果校验与回复落盘阶段；长时提示会带上最后一个真实步骤。
+- **统一写入确认门**：Goethe / Dante 对大纲、人物、世界关系和其他正式资产的修改都先预览 diff；只有本轮用户明确确认后，`confirm=true` 才能真正落盘。
 
 ### 一个小说内核，四个入口
 
@@ -102,6 +104,16 @@ pip install -e .
 
 ### 2. 配置模型
 
+使用网页端时，直接点击 Studio 顶栏常驻的 **模型设置**，可以即时填写或切换
+DeepSeek V4 Pro / V4 Flash、OpenAI 格式接口、Anthropic 格式接口或自定义接口，
+并设置 API Key、上下文预算和最大输出。接口预设只是协议格式，Base URL 与模型名
+仍可自由填写。可先做最小连接测试，点击“立即应用”后下一次对话或写章生效，无需重启。
+API Key 默认只保存在当前 Studio 进程；若勾选“重启后自动恢复”，会写入本机用户私有目录
+（macOS: `~/Library/Application Support/OpenWrite/`，其他: `~/.config/openwrite/`）的
+`0600` 凭据文件，不写入作品、Git 或浏览器存储。
+
+CLI 或服务器部署仍可使用环境变量：
+
 ```bash
 export LLM_API_KEY=your-key
 export LLM_MODEL=glm-5
@@ -161,9 +173,36 @@ openwrite dante
 openwrite studio
 ```
 
+如果还没有把 CLI 安装到当前 shell，可以先用仓库内 Python 直接启动：
+
+```bash
+cd /path/to/Openwrite
+.venv/bin/python -m tools.cli studio --project ~/my_novel --debug
+```
+
+所有顶层命令都支持 `--project`，因此无需先切换到作品目录：
+
+```bash
+cd /path/to/Openwrite
+.venv/bin/python -m tools.cli status --project ~/my_novel
+.venv/bin/python -m tools.cli sync --project ~/my_novel --check
+.venv/bin/python -m tools.cli doctor --project ~/my_novel
+```
+
+想让 `openwrite` 在任意目录可用，可先执行：
+
+```bash
+cd /path/to/Openwrite
+source .venv/bin/activate
+python -m pip install -e .
+openwrite studio --project ~/my_novel --debug
+```
+
 如果当前目录还没有项目，Studio 会直接显示“创建第一本小说”页面；填写书名和小说 ID 后即可生成完整目录，无需先运行 `openwrite init`。
 
 Studio 默认只绑定 `127.0.0.1`，不会把作品文件暴露到局域网。它和 CLI 使用同一个项目目录、同一个 `src/` 真源和同一套章节写作管线；浏览器中保存的文档会做版本冲突检查，避免覆盖其他编辑器刚写入的内容。章节审稿结果保存在 `data/reviews/ch_*.json`，分数和问题明细可在 Studio 中回看；工作台同时汇总累计 token 与已审章节均分。
+
+排查 Agent 后台行为时可用 `openwrite studio --debug`，或设置 `OPENWRITE_DEBUG=1`。Debug 日志会写入当前作品的 `data/logs/studio-debug.log`，包含 Studio 请求、会话状态、Dante/Goethe 工具调用摘要和错误原因；API Key、Token、密钥类字段会脱敏。
 
 写章不是一次模型调用后直接保存。默认链路会依次生成正文、提取客观事实、结算运行态，并把三阶段 token 合计写入章节记忆。作品级锁覆盖上下文读取、模型调用和最终提交；如果真相文件或记忆保存失败，系统会恢复旧正文与写前状态。
 
@@ -172,12 +211,12 @@ Studio 的主要前端工作区：
 | 工作区 | 可完成的真实流程 |
 |---|---|
 | 总览 / 编辑器 | 进度、资产就绪度、章节/人物/故事/世界文档编辑、版本冲突保护 |
-| AI 协作 | Goethe 规划会话、Dante 正文会话，复用持久化 session 与工具调用 |
+| AI 协作 | Goethe 规划会话、Dante 正文会话，复用持久化 session 与工具调用；后台实时显示模型、工具、校验和落盘阶段；AI 回复支持安全 CommonMark 渲染 |
 | 连续性 | 写前/写后状态、资源账本、人物关系、伏笔 DAG、章节 workflow |
 | 首次启动 / 工具箱 | 前端建书、模型连接、`src → data` 同步、canonical packet 预览、TXT/Markdown 导入、人物/设定新建、来源提取/审阅/晋升/风格合成 |
 | 写作闭环 | 写下一章、章节记忆与 truth 结算、37 维审稿、Markdown/TXT 导出 |
 
-模型连接可以直接在 Studio 顶部点击模型状态进行配置。API Key 只保存在当前 Studio 服务进程，不写入项目文件，也不会返回给浏览器。
+模型连接可以直接在 Studio 顶部点击模型状态进行配置。API Key 默认只在当前 Studio 服务进程中使用；勾选记住后写入本机私有凭据文件，不写入项目文件，也不会返回给浏览器。
 
 ## 最推荐的工作流
 
@@ -271,6 +310,17 @@ $ openwrite dante
 - 风格合成结果和 craft 规则
 
 Dante 也会接收 Goethe 交接过来的 handoff 摘要和当前可写窗口，不需要你从头重新解释前情。
+
+当组装结果超过 `OPENWRITE_CONTEXT_TOKENS` 时，发送前使用四级渐进压缩：
+
+1. 先压缩可从正文重建的旧章节记忆；
+2. 再压缩大纲摘要，并始终保留以当前章为中心的窗口；
+3. 然后压缩真相状态、人物数量和精确上文；
+4. 最后才启用提供商硬适配，并重新估算以保证不超过预算。
+
+作者意图、创作罗盘和当前章在前三层不会被删除。每次组装都会产生
+`tiered-hierarchical-v2` 压缩报告，记录原始/最终估算 token、触发级别和动作。
+完整原文、JSONL 会话历史和 `src/` 真源不会因发送前压缩而被改写。
 
 所以更好的提问方式是给目标和约束，而不是直接指挥它去改某个缓存文件。
 
@@ -475,6 +525,7 @@ openwrite sync
 | `OPENWRITE_SESSION_STATE_BYTES` | 滚动会话状态上限（字节） | `131072` |
 | `OPENWRITE_SESSION_SUMMARY_BYTES` | 压缩摘要上限（字节） | `16384` |
 | `OPENWRITE_SESSION_TURN_BYTES` | 单轮进入滚动状态的上限（字节） | `2048` |
+| `OPENWRITE_DEBUG` | Studio 后台 debug 日志开关 | 未开启 |
 | `LLM_TIMEOUT_SECONDS` | 请求超时秒数 | SDK 默认 |
 | `LLM_MAX_RETRIES` | 重试次数 | SDK 默认 |
 

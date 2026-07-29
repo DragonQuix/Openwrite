@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-import hashlib
-import json
-import tempfile
 from typing import Any, Literal, cast
 
 import yaml
@@ -16,11 +17,12 @@ from .session_limits import (
     MAX_COMPRESSION_MARKERS,
     MAX_RECENT_TURNS,
     MAX_SESSION_BYTES,
-    MAX_SUMMARY_BYTES,
     MAX_STRUCTURAL_TEXT_BYTES,
+    MAX_SUMMARY_BYTES,
     MAX_TURN_CONTENT_BYTES,
     MAX_WORKING_MEMORY_KEYS,
 )
+
 DEFAULT_ACTIVE_AGENT = "goethe"
 
 
@@ -53,24 +55,33 @@ class GoetheSessionState:
 
 
 class GoetheSessionStateStore:
-    def __init__(self, project_root: Path, novel_id: str):
+    def __init__(
+        self,
+        project_root: Path,
+        novel_id: str,
+        session_id: str | None = None,
+    ):
         self.project_root = Path(project_root).resolve()
         self.novel_id = novel_id
-        self.path = (
-            self.project_root
-            / "data"
-            / "novels"
-            / novel_id
-            / "data"
-            / "workflows"
-            / "goethe_session.yaml"
+        self.session_id = (
+            self._normalize_identifier_scalar(session_id, self.novel_id)
+            if str(session_id or "").strip()
+            else self.novel_id
         )
-        self.transcript_path = self.path.with_name("goethe_session.jsonl")
+        workflow_root = (
+            self.project_root / "data" / "novels" / novel_id / "data" / "workflows"
+        )
+        if str(session_id or "").strip():
+            session_stem = self._session_file_stem(self.session_id)
+            self.path = workflow_root / "sessions" / DEFAULT_ACTIVE_AGENT / f"{session_stem}.yaml"
+        else:
+            self.path = workflow_root / "goethe_session.yaml"
+        self.transcript_path = self.path.with_suffix(".jsonl")
 
     def append_turn(self, role: str, content: str) -> None:
         """Archive the full turn; the rolling YAML state remains bounded."""
         record = {
-            "session_id": self.novel_id,
+            "session_id": self.session_id,
             "agent": DEFAULT_ACTIVE_AGENT,
             "role": str(role),
             "content": str(content),
@@ -131,7 +142,18 @@ class GoetheSessionStateStore:
         temp_path.replace(self.path)
 
     def _default_state(self) -> GoetheSessionState:
-        return GoetheSessionState(session_id=self.novel_id)
+        return GoetheSessionState(session_id=self.session_id)
+
+    @staticmethod
+    def _session_file_stem(session_id: str) -> str:
+        raw = str(session_id or "").strip()
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip(".-")
+        if not safe:
+            safe = "session"
+        if len(safe.encode("utf-8")) <= 80:
+            return safe
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+        return f"{safe[:56].rstrip('.-')}-{digest}"
 
     def _stamp_updated_at(self, state: GoetheSessionState) -> None:
         state.updated_at = datetime.now().isoformat()
@@ -395,7 +417,7 @@ class GoetheSessionStateStore:
         return any(key not in data for key in ("active_agent", "compression_markers"))
 
     def _normalize_state_for_persistence(self, state: GoetheSessionState) -> None:
-        state.session_id = self._normalize_identifier_scalar(state.session_id, self.novel_id)
+        state.session_id = self._normalize_identifier_scalar(state.session_id, self.session_id)
         state.active_agent = self._normalize_structural_scalar(
             state.active_agent, DEFAULT_ACTIVE_AGENT
         )
@@ -407,7 +429,9 @@ class GoetheSessionStateStore:
         state.last_action = self._normalize_scalar(state.last_action, "")
         state.compression_markers = self._coerce_marker_list(state.compression_markers)
         if len(state.working_memory) > MAX_WORKING_MEMORY_KEYS:
-            state.working_memory = dict(list(state.working_memory.items())[:MAX_WORKING_MEMORY_KEYS])
+            state.working_memory = dict(
+                list(state.working_memory.items())[:MAX_WORKING_MEMORY_KEYS]
+            )
 
     def _to_dict(self, state: GoetheSessionState) -> dict[str, Any]:
         return asdict(state)
@@ -417,7 +441,7 @@ class GoetheSessionStateStore:
         compression_markers = self._coerce_marker_list(data.get("compression_markers", []))
         return GoetheSessionState(
             session_id=self._normalize_identifier_scalar(
-                data.get("session_id"), self.novel_id
+                data.get("session_id"), self.session_id
             ),
             active_agent=self._normalize_structural_scalar(
                 data.get("active_agent"), DEFAULT_ACTIVE_AGENT
@@ -463,7 +487,7 @@ class GoetheSessionStateStore:
 
         attempt = 0
         while True:
-            digest = hashlib.sha1(f"{raw}:{attempt}".encode("utf-8")).hexdigest()[:10]
+            digest = hashlib.sha1(f"{raw}:{attempt}".encode()).hexdigest()[:10]
             suffix = f"~{digest}"
             limit = MAX_STRUCTURAL_TEXT_BYTES - len(suffix.encode("utf-8"))
             prefix = self._truncate_text(raw, max(limit, 0), keep_tail=False)

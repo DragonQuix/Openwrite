@@ -87,6 +87,7 @@ def mutate_outline_structure(
     revision: str,
     node_id: str = "",
     title: str = "",
+    summary: str = "",
     kind: str = "",
 ) -> dict[str, Any]:
     """Prepare one revision-checked, local structural edit to ``outline.md``.
@@ -132,6 +133,18 @@ def mutate_outline_structure(
         lines[line_index] = f"{marker} {clean_title}{ending}"
         selection_hint = {"kind": target["kind"], "title": clean_title, "line": line_index + 1}
         message = f"已将{target['label']}重命名为“{clean_title}”"
+    elif operation == "update_summary":
+        target = _editable_target(target)
+        clean_summary = _validate_summary(summary)
+        start = int(target["line"])
+        end = _direct_body_end(lines, start)
+        lines[start:end] = _summary_block(clean_summary, has_following=end < len(lines))
+        selection_hint = {
+            "kind": target["kind"],
+            "title": target["title"],
+            "line": int(target["line"]),
+        }
+        message = f"已更新{target['label']}“{target['title']}”的内容"
     elif operation in {"add_child", "add_after"}:
         if operation == "add_child" and not node_id:
             expected_kind = "volume"
@@ -231,6 +244,7 @@ def _parse_tree(body: str, drafted: set[str]) -> tuple[list[dict[str, Any]], lis
                 "line": index + 1,
                 "end_line": index + 1,
                 "level": level,
+                "content": "",
                 "summary": "",
                 "status": "drafted" if node_id in drafted else "planned",
                 "children": [],
@@ -243,7 +257,9 @@ def _parse_tree(body: str, drafted: set[str]) -> tuple[list[dict[str, Any]], lis
     stack: list[dict[str, Any]] = []
     for position, node in enumerate(headings):
         next_line = headings[position + 1]["line"] - 1 if position + 1 < len(headings) else len(lines)
-        node["summary"] = _summarize_block(lines[node["line"] : next_line])
+        body_lines = lines[node["line"] : next_line]
+        node["content"] = _body_block(body_lines)
+        node["summary"] = _summarize_block(body_lines)
         subtree_end = len(lines)
         for candidate in headings[position + 1 :]:
             if candidate["level"] <= node["level"]:
@@ -416,6 +432,33 @@ def _validate_title(title: str, kind: str) -> str:
     return clean
 
 
+def _validate_summary(summary: str) -> str:
+    clean = str(summary or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(clean) > 20000:
+        raise OutlineEditError("节点内容不能超过 20000 字")
+    for line in clean.splitlines():
+        if HEADING_RE.match(line.strip()):
+            raise OutlineEditError("节点内容不能包含 Markdown 标题，请用新增或改名调整大纲层级")
+    return clean
+
+
+def _direct_body_end(lines: list[str], start: int) -> int:
+    for index in range(start, len(lines)):
+        if HEADING_RE.match(lines[index].strip()):
+            return index
+    return len(lines)
+
+
+def _summary_block(summary: str, *, has_following: bool) -> list[str]:
+    if not summary:
+        return ["\n"] if has_following else []
+    block = ["\n"]
+    for line in summary.splitlines():
+        block.append(f"{line.rstrip()}\n" if line.strip() else "\n")
+    block.append("\n")
+    return block
+
+
 def _heading_block(
     lines: list[str], insert_index: int, level: int, title: str
 ) -> tuple[list[str], int]:
@@ -473,6 +516,16 @@ def _summarize_block(lines: list[str], limit: int = 720) -> str:
             break
     summary = "\n".join(content).strip()
     return summary[:limit]
+
+
+def _body_block(lines: list[str]) -> str:
+    start = 0
+    end = len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return "\n".join(lines[start:end]).rstrip("\n")
 
 
 def _recommend_chapter(

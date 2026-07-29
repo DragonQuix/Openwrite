@@ -105,16 +105,21 @@ class BookStateStore:
                 if not isinstance(raw_stage, BookStage)
                 else raw_stage
             )
-        except ValueError:
+        except (TypeError, ValueError):
             stage = BookStage.DISCOVERY
+        text = self._text_value
         return BookState(
-            novel_id=data.get("novel_id", self.novel_id),
+            novel_id=text(data.get("novel_id", self.novel_id)) or self.novel_id,
             stage=stage,
-            current_arc=data.get("current_arc", ""),
-            current_section=data.get("current_section", ""),
-            current_chapter=data.get("current_chapter", ""),
-            pending_confirmation=data.get("pending_confirmation", ""),
-            blocking_reason=data.get("blocking_reason", ""),
-            last_agent_action=data.get("last_agent_action", ""),
-            last_handoff_from=data.get("last_handoff_from", ""),
+            current_arc=text(data.get("current_arc", "")),
+            current_section=text(data.get("current_section", "")),
+            current_chapter=text(data.get("current_chapter", "")),
+            pending_confirmation=text(data.get("pending_confirmation", "")),
+            blocking_reason=text(data.get("blocking_reason", "")),
+            last_agent_action=text(data.get("last_agent_action", "")),
+            last_handoff_from=text(data.get("last_handoff_from", "")),
         )
+
+    @staticmethod
+    def _text_value(value: Any) -> str:
+        return "" if value is None else str(value)

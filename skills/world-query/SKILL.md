@@ -11,6 +11,8 @@ description: Use when querying or maintaining novel world entities, character re
 
 - 用 `query_world` 查询实体列表或详情。
 - 用 `get_world_relations` 读取与 Studio 连续性页面同源的节点和边。
+- Studio 关系拓扑支持按节点名称、ID、类型、摘要和关系文字搜索；命中节点会保留一跳相邻节点和连线作为上下文。
+- ReAct 没有第二套拓扑搜索索引；需要搜索时读取 `get_world_relations` 后在同一份节点/边结果中按上述字段过滤。
 - 先用 ID 定位；用户只提供名称时允许按 front matter 名称或 Markdown H1 定位。
 
 兼容读取以下关系来源：

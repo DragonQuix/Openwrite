@@ -387,6 +387,28 @@ class TestForeshadowingDAGManager:
         assert is_valid is False
         assert any("ghost" in e for e in errors)
 
+    def test_validate_dag_flags_overdue_foreshadowing(self, manager, tmp_path):
+        manager.create_node(
+            node_id="f_overdue",
+            content="应在 ch_002 回收",
+            created_at="ch_001",
+            target_chapter="ch_002",
+        )
+        manager.update_node_status("f_overdue", "埋伏")
+        (tmp_path / "novel_config.yaml").write_text(
+            "novel_id: test_novel\ncurrent_chapter: ch_005\n",
+            encoding="utf-8",
+        )
+        manuscript = (
+            tmp_path / "data" / "novels" / "test_novel" / "data" / "manuscript" / "arc_001"
+        )
+        manuscript.mkdir(parents=True, exist_ok=True)
+        (manuscript / "ch_005.md").write_text("# 第五章\n\n正文", encoding="utf-8")
+
+        is_valid, errors = manager.validate_dag()
+        assert is_valid is False
+        assert any("超期未回收" in error and "f_overdue" in error for error in errors)
+
     def test_statistics(self, manager):
         manager.create_node(node_id="f001", content="A", weight=3, layer="支线")
         manager.create_node(node_id="f002", content="B", weight=8, layer="主线")

@@ -16,6 +16,12 @@ OpenWrite 是一个面向长篇小说创作的技能集合。当前口径已经�
 - `write` / `multi-write` / `review` 也会推进同一套 runtime state
 - 每章摘要、观察与三阶段 token 用量保存在 `data/memory/chapters/`
 - `write` 使用跨进程作品锁，并对正文、truth、memory 做失败回滚
+- Studio 顶栏“模型设置”可在当前进程中即时切换模型、API 端点和 token 预算；
+  DeepSeek 快速预设仅包含 V4 Pro / V4 Flash，OpenAI / Anthropic 表示接口格式，
+  Base URL 与模型名保持可编辑；
+  API Key 不得写入项目、Git、浏览器存储或 Agent 上下文
+- Studio 的 `AI WORKING` 必须来自 ReAct 后端活动事件，不得用前端计时伪造阶段
+- Goethe / Dante 的正式资产写入共用确认门：先预览 diff，本轮用户明确确认后才允许应用
 
 ## 子技能导航
 
@@ -155,17 +161,25 @@ packet 典型包含：
 - `openwrite import existing-novel.txt`
 - `openwrite export --format md`
 
+所有顶层命令均可附加 `--project <作品目录>`；省略时使用当前目录。
+
 ### 当前约束
 
 - `write` / `multi-write` / `review` 现在都会复用 canonical packet 语义
 - direct CLI 也会推进 `book_state.yaml` 与 `wf_ch_*.yaml`
 - CLI 与 Studio 共用同一套写章锁、事务提交、审稿存储和生命周期
 - Studio 前端覆盖模型会话配置、Goethe/Dante 对话、导入、同步、上下文预览、资产新建、连续性、伏笔和 source pack 全流程
+- Goethe / Dante 的 AI 回复按 CommonMark 渲染标题、列表、引用、链接与代码块；
+  原始 HTML 被转义，用户消息与错误消息保持纯文本
 - Studio 左侧“大纲”直接打开 `src/outline.md`；“故事”不混入大纲，搜索可单独限定大纲
 - Studio 与 ReAct 通过 `get_outline_structure` 共用卷/幕/节/章树；按最早未写章纲智能选章，并用 outline revision 防止写错目标
 - Studio 与 ReAct 通过 `edit_outline_structure` 做最小增量改名、增删卷幕节章；删除子树时，后续同类卷/幕/节/章在同一次原子写入中连续补位，附录不参与。ReAct 先以 `confirm=false` 预览完整级联 diff，再在用户确认后写入。禁止用整份 `create_outline` 覆盖已有大纲；删除包含正文的节点，或补位会改变已有正文 `ch_XXX` 的操作必须阻止
-- Studio 关系拓扑与 ReAct 的 `get_world_relations` 共用人物和世界实体真源；不维护 `graph.yaml`
+- Studio 关系拓扑与 ReAct 的 `get_world_relations` 共用人物和世界实体真源；不维护 `graph.yaml`。
+  拓扑搜索按节点名称、ID、摘要、类型和关系文字匹配，并保留一跳相邻上下文；ReAct 在同一结果集中过滤，不维护第二套索引
 - Agent 修改正式关系时必须先预览 diff，再用同一 `base_revision` 和明确确认写入 `[[related]]`；revision 冲突时重新预览
+- Agent 对大纲、人物、故事、世界实体和关系的应用操作共用不可绕过的明确确认门；工具参数中的 `confirm=true` 不能代替用户本轮确认
+- Studio 的 AI 活动面板轮询 `/api/agent/activity`，展示后端模型/工具/校验/回复事件；长时与疑似卡住提示保留最后一个真实步骤
+- CLI 顶层入口统一接受 `--project`，从框架目录即可操作独立作品目录
 - 空目录运行 `openwrite studio` 会进入前端建书页，不再要求先执行 `openwrite init`
 - `current_state / ledger / relationships` 是公开 canonical 命名
 

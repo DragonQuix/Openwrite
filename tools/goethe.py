@@ -5,11 +5,20 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
-from .agent.goethe_session_state import GoetheSessionState, GoetheSessionStateStore, GoetheSessionTurn
+from .agent.goethe_session_state import (
+    GoetheSessionState,
+    GoetheSessionStateStore,
+    GoetheSessionTurn,
+)
+from .agent.confirmation import (
+    guard_confirmable_executors,
+    is_explicit_mutation_confirmation,
+)
 from .agent.react import OPENWRITE_TOOLS, ReActAgent, ToolDefinition
 from .agent.toolkits import GOETHE_DIRECT_TOOLKIT
 
@@ -26,7 +35,10 @@ GOETHE_TOOL_DESCRIPTIONS: dict[str, str] = {
     "get_world_relations": "查询世界关系与关联。",
     "edit_world_relation": "预览或确认一个带 revision 校验的增量关系修改。",
     "get_outline_structure": "读取卷、幕、节、章树和下一章建议，不修改文件。",
-    "edit_outline_structure": "按 revision 增量修改卷、幕、节、章；confirm=false 预览 diff，用户明确确认后才以 confirm=true 写入。",
+    "edit_outline_structure": (
+        "按 revision 增量修改卷、幕、节、章；confirm=false 预览 diff，"
+        "用户明确确认后才以 confirm=true 写入。"
+    ),
     "summarize_ideation": "汇总当前灵感与讨论，形成共识摘要。",
     "generate_foundation_draft": "生成背景与基础设定草案。",
     "generate_character_draft": "生成角色草案。",
@@ -82,9 +94,9 @@ class GoetheResult:
     """Goethe 运行结果。"""
 
     success: bool
-    project_path: Optional[Path] = None
-    novel_id: Optional[str] = None
-    error: Optional[str] = None
+    project_path: Path | None = None
+    novel_id: str | None = None
+    error: str | None = None
     exit_reason: str = ""
     turns_processed: int = 0
     startup: object | None = None
@@ -99,7 +111,15 @@ class GoetheStartupSnapshot:
 DEFAULT_GOETHE_SYSTEM_PROMPT = """你是 OpenWrite 的 Goethe，长期会话规划 Agent。
 
 你的职责是汇总灵感、提出建议、收敛人物/设定/大纲，并把确认后的资产整理成可写内容。
-正文推进交给 Dante。
+正文推进交给 Dante。项目目录通常已由 Studio 或 `openwrite init` 创建，你不负责建目录。
+
+首次冷启动时，按这个顺序引导用户（可合并提问，但不要跳过）：
+1. 书名、题材/类型、一句话核心冲突
+2. 想要的基调与风格（克制/热血/悬疑等）与必须避免的套路
+3. 作者意图与背景（可先草案）
+4. 主要人物（至少主角）
+5. 当前可写范围大纲（至少到章级）
+6. 资产成熟后调用 prepare_dante_handoff，再提示用户切换 Dante
 
 大纲修改必须遵守以下 ReAct 流程：
 1. 普通问答、讨论、分析和征求建议只回复用户，不调用任何会修改大纲的工具。
@@ -113,9 +133,18 @@ DEFAULT_GOETHE_SYSTEM_PROMPT = """你是 OpenWrite 的 Goethe，长期会话规�
 6. 用户说取消、不要这版或放弃修改时，调用 discard_outline_edits。
 7. 工具返回 revision 冲突或 old_text 不唯一时，重新 read_outline；不得退回整篇生成覆盖。
 8. 判断卷/幕/节/章位置或下一章时使用 get_outline_structure；它只读，不替代 src/outline.md。
+9. 最终回复必须面向用户总结结果、diff 摘要和下一步，不要输出“old_text、扩大块、
+   清理残留、重试补丁”等内部工具调试或补丁策略碎片。
 
 关系修改遵守同样的确认边界：先调用 edit_world_relation 且 confirm=false 展示 diff；只有用户明确
 确认后，才可使用预览返回的 base_revision 再次调用并设置 confirm=true。普通讨论不得写入关系。
+当用户要求把人物与出身地点、能力设定、组织、物品或概念联系起来时，先用
+search_relation_targets/get_world_relations 定位候选，再用 edit_world_relations(confirm=false)
+批量预览；只有用户明确确认后才传回 source_revisions 并 confirm=true 写入。
+修改已有角色、地点、能力设定、故事资料或正文时，先 read_project_document 读取 revision，
+再 edit_project_document(confirm=false) 预览 diff；只有用户明确确认后才写入。
+草案工具（generate_foundation_draft / generate_character_draft / generate_outline_draft）
+只写 planning 草案，不直接当作最终 src 真源；晋升或确认前必须让用户过目。
 """
 
 
@@ -298,6 +327,7 @@ class GoetheChatAgent:
         llm_client_factory: Callable[[], Any] | None = None,
         react_agent: Any | None = None,
         tool_layer_factory: Callable[[Path], dict[str, object]] | None = None,
+        activity_callback: Callable[[dict[str, Any]], None] | None = None,
         prompt_text: str = "\n🌿 Goethe> ",
     ):
         self.project_root = Path(project_root or Path.cwd()).resolve()
@@ -311,6 +341,7 @@ class GoetheChatAgent:
         )
         self.llm_client_factory = llm_client_factory or self._build_default_llm_client
         self.tool_layer_factory = tool_layer_factory or build_goethe_tool_layers
+        self.activity_callback = activity_callback
         self.prompt_text = prompt_text
         self._react_agent = react_agent
         self._react_agent_factory = (
@@ -337,11 +368,28 @@ class GoetheChatAgent:
 
     def build_recovery_prompt(self) -> str:
         session_state = self._require_session_state()
+        onboarding = self._load_onboarding_snapshot()
+        is_first_run = not (
+            session_state.conversation_summary
+            or session_state.recent_turns
+            or session_state.last_action
+        )
 
-        lines = [
-            "Goethe 已恢复，可以继续上次的长期规划会话。",
-            f"会话: {session_state.session_id} / active_agent={session_state.active_agent}",
-        ]
+        if is_first_run:
+            lines = [
+                "Goethe 首次规划会话。",
+                "建议顺序：1) 书名与题材 2) 一句话冲突 3) 风格与禁忌 4) 背景/人物/大纲 5) 交接 Dante",
+            ]
+        else:
+            lines = [
+                "Goethe 已恢复，可以继续上次的长期规划会话。",
+                f"会话: {session_state.session_id} / active_agent={session_state.active_agent}",
+            ]
+
+        if onboarding.get("missing_labels"):
+            lines.append("当前资产缺口: " + "、".join(onboarding["missing_labels"]))
+        if onboarding.get("suggested_first_message"):
+            lines.append(f"可引导用户从这句话开始: {onboarding['suggested_first_message']}")
         if session_state.conversation_summary:
             lines.append(f"会话摘要: {session_state.conversation_summary}")
         if session_state.working_memory:
@@ -362,6 +410,14 @@ class GoetheChatAgent:
         if session_state.last_action:
             lines.append(f"最近动作: {session_state.last_action}")
         return "\n".join(lines)
+
+    def _load_onboarding_snapshot(self) -> dict[str, Any]:
+        try:
+            from tools.novel_workspace import build_onboarding_checklist
+
+            return build_onboarding_checklist(self.project_root, self.novel_id)
+        except Exception:
+            return {}
 
     def run(self) -> GoetheResult:
         startup = self.startup()
@@ -408,9 +464,14 @@ class GoetheChatAgent:
                     novel_id=self.novel_id,
                 )
 
-            if self._looks_like_handoff_request(user_input):
+            if self._should_use_handoff_shortcut(user_input):
+                self._append_user_turn(user_input)
                 handoff = self.prepare_dante_handoff()
                 if handoff.get("ok"):
+                    self._append_assistant_turn(
+                        "Goethe 已完成交接，可以切换到 Dante 继续正文创作。"
+                    )
+                    self.session_store.save(self._require_session_state())
                     print(f"\n✅ Goethe 已完成交接: {handoff.get('handoff_markdown_path')}")
                     return GoetheResult(
                         success=True,
@@ -421,7 +482,13 @@ class GoetheChatAgent:
                         novel_id=self.novel_id,
                     )
                 blocked_items = handoff.get("missing_items", [])
-                blocked_text = "、".join(str(item) for item in blocked_items) if blocked_items else "未知"
+                blocked_text = (
+                    "、".join(str(item) for item in blocked_items)
+                    if blocked_items
+                    else "未知"
+                )
+                self._append_assistant_turn(f"暂时不能交接给 Dante，还缺少：{blocked_text}。")
+                self.session_store.save(self._require_session_state())
                 print(f"\n⚠️ 还不能切到 Dante，缺少: {blocked_text}")
                 continue
 
@@ -450,14 +517,21 @@ class GoetheChatAgent:
             raise ValueError("消息不能为空")
         if self.session_state is None:
             self.startup()
-        if self._looks_like_handoff_request(text):
+        if self._should_use_handoff_shortcut(text):
+            self._append_user_turn(text)
             handoff = self.prepare_dante_handoff()
             if handoff.get("ok"):
-                return "Goethe 已完成交接，可以切换到 Dante 继续正文创作。"
+                response_text = "Goethe 已完成交接，可以切换到 Dante 继续正文创作。"
+                self._append_assistant_turn(response_text)
+                self.session_store.save(self._require_session_state())
+                return response_text
             missing = "、".join(
                 str(item) for item in handoff.get("missing_items", [])
             ) or "必要资产"
-            return f"暂时不能交接给 Dante，还缺少：{missing}。"
+            response_text = f"暂时不能交接给 Dante，还缺少：{missing}。"
+            self._append_assistant_turn(response_text)
+            self.session_store.save(self._require_session_state())
+            return response_text
         self._append_user_turn(text)
         state = self._require_session_state()
         state.last_action = "chat"
@@ -507,6 +581,7 @@ class GoetheChatAgent:
             tools=_build_goethe_tool_definitions(),
             system_prompt=DEFAULT_GOETHE_SYSTEM_PROMPT,
             max_turns=20,
+            activity_callback=self.activity_callback,
         )
         combined = self._combined_tool_executors()
         if combined:
@@ -548,6 +623,8 @@ class GoetheChatAgent:
 
         if self._combined_tool_executors() and hasattr(react_agent, "_register_tool_executors"):
             react_agent._register_tool_executors(self._combined_tool_executors())
+        if hasattr(react_agent, "activity_callback"):
+            react_agent.activity_callback = self.activity_callback
 
     def _run_react_agent(self, react_agent: Any, instruction: str) -> str:
         self._active_user_instruction = instruction
@@ -621,21 +698,17 @@ class GoetheChatAgent:
             combined.update(tool_executors)
         if isinstance(action_tool_executors, dict):
             combined.update(action_tool_executors)
-        confirm_executor = combined.get("confirm_outline_edits")
-        if confirm_executor is not None:
-            combined["confirm_outline_edits"] = lambda args: self._confirm_outline_if_explicit(
-                confirm_executor, args
-            )
-        return combined
+        return guard_confirmable_executors(
+            combined,
+            instruction=lambda: self._active_user_instruction,
+        )
 
     def _confirm_outline_if_explicit(
         self,
         executor: Callable[[dict[str, Any]], Any],
         args: dict[str, Any],
     ) -> Any:
-        if not self._looks_like_explicit_outline_confirmation(
-            self._active_user_instruction
-        ):
+        if not is_explicit_mutation_confirmation(self._active_user_instruction):
             return {
                 "action": "confirm_outline_edits",
                 "ok": False,
@@ -648,33 +721,7 @@ class GoetheChatAgent:
 
     @staticmethod
     def _looks_like_explicit_outline_confirmation(text: str) -> bool:
-        normalized = "".join(str(text or "").strip().lower().split())
-        if not normalized:
-            return False
-        if any(
-            token in normalized
-            for token in ("不确认", "先不", "暂不", "不要", "别", "取消", "放弃")
-        ):
-            return False
-        if normalized in {"确认", "同意", "可以", "应用", "保存", "提交", "就这样"}:
-            return True
-        return any(
-            token in normalized
-            for token in (
-                "确认应用",
-                "确认修改",
-                "确认大纲",
-                "应用这版",
-                "应用修改",
-                "写入大纲",
-                "保存大纲",
-                "采用这版",
-                "就按这版",
-                "提交修改",
-                "直接应用",
-                "无需确认",
-            )
-        )
+        return is_explicit_mutation_confirmation(text)
 
     def _load_tool_layers(self) -> dict[str, object]:
         if self._tool_layers is None:
@@ -685,6 +732,19 @@ class GoetheChatAgent:
             except TypeError:
                 self._tool_layers = dict(self.tool_layer_factory(self.project_root))
         return self._tool_layers
+
+    def _should_use_handoff_shortcut(self, text: str) -> bool:
+        if not self._looks_like_handoff_request(text):
+            return False
+        if self._looks_like_explicit_outline_confirmation(text):
+            return False
+        try:
+            from .agent.book_state import BookStateStore
+
+            state = BookStateStore(self.project_root, self.novel_id).load_or_create()
+        except Exception:
+            return True
+        return not bool(str(state.pending_confirmation or "").strip())
 
     def _append_user_turn(self, content: str) -> None:
         state = self._require_session_state()

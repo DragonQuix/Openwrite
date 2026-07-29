@@ -281,10 +281,10 @@ rhythm: "待定义"
     print("    hierarchy.yaml - 从 src/outline.md 自动生成")
     print("    characters/cards/ - 生成的角色卡片")
     print("\n下一步:")
-    print(f"1. 编辑 data/novels/{novel_id}/src/outline.md 添加大纲")
-    print("2. 使用 novel-manager 创建角色 (会同步到 src/characters/)")
-    print(f"3. 填充 data/novels/{novel_id}/src/world/ 世界观")
-    print("4. 使用 novel-creator 开始创作")
+    print("1. openwrite goethe   # 先聊书名、冲突、人物与可写大纲")
+    print("2. openwrite desk     # 查看资产就绪度与建议")
+    print("3. openwrite dante    # 资产就绪后再持续写正文")
+    print("4. openwrite studio   # 也可用网页端完成同样流程")
 
 
 if __name__ == "__main__":

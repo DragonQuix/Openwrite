@@ -335,11 +335,61 @@ class ForeshadowingDAGManager:
                 errors.append(f"边引用了不存在的源节点: {edge.from_}")
             # 目标可以是章节，不一定是伏笔节点
 
-        # 3. 检查超期未回收的伏笔
-        # TODO: 需要章节顺序信息才能判断
+        # 3. 检查超期未回收的伏笔（相对当前最新正文/配置章节）
+        current_chapter_num = self._resolve_current_chapter_number()
+        if current_chapter_num is not None:
+            open_statuses = {"埋伏", "待收", "pending", "open"}
+            for node_id, node in dag.nodes.items():
+                status = str(dag.status.get(node_id) or node.status or "").strip()
+                if status not in open_statuses:
+                    continue
+                target = str(node.target_chapter or "").strip()
+                target_num = self._chapter_number(target)
+                if target_num is None:
+                    continue
+                if current_chapter_num > target_num:
+                    errors.append(
+                        f"伏笔超期未回收: {node_id} 目标 {target}，"
+                        f"当前已推进到 ch_{current_chapter_num:03d}"
+                    )
 
         is_valid = len(errors) == 0
         return is_valid, errors
+
+    def _resolve_current_chapter_number(self) -> int | None:
+        config_path = self.project_dir / "novel_config.yaml"
+        candidates: list[int] = []
+        if config_path.is_file():
+            try:
+                data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                data = {}
+            if isinstance(data, dict):
+                num = self._chapter_number(str(data.get("current_chapter") or ""))
+                if num is not None:
+                    candidates.append(num)
+
+        manuscript_root = (
+            self.project_dir
+            / "data"
+            / "novels"
+            / self.novel_id
+            / "data"
+            / "manuscript"
+        )
+        if manuscript_root.is_dir():
+            for path in manuscript_root.glob("arc_*/ch_*.md"):
+                num = self._chapter_number(path.stem)
+                if num is not None:
+                    candidates.append(num)
+        return max(candidates) if candidates else None
+
+    @staticmethod
+    def _chapter_number(value: str) -> int | None:
+        import re
+
+        match = re.search(r"(\d+)", str(value or ""))
+        return int(match.group(1)) if match else None
 
     # ── 统计 ──────────────────────────────────────────────────
 

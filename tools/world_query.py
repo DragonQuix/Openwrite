@@ -279,6 +279,70 @@ def get_entity(
     return parse_entity(matches[0])
 
 
+def search_relation_targets(
+    novel_id: str,
+    query: str,
+    project_root: Optional[Path] = None,
+    *,
+    entity_type: str = "",
+    limit: int = 20,
+) -> Dict[str, Any]:
+    """Search character and world entity files for relation candidates."""
+    root = (project_root or Path(__file__).parent.parent).resolve()
+    query_text = str(query or "").strip()
+    query_terms = [term.casefold() for term in re.split(r"\s+", query_text) if term.strip()]
+    type_filter = str(entity_type or "").strip().casefold()
+    candidates = _relation_document_summaries(root, novel_id)
+    ranked: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        candidate_type = str(candidate.get("type") or "").casefold()
+        if type_filter and type_filter not in candidate_type:
+            continue
+        haystack = "\n".join(
+            str(candidate.get(key) or "")
+            for key in ("id", "name", "type", "subtype", "description", "content")
+        ).casefold()
+        if not query_terms:
+            score = 1
+            matched_terms: List[str] = []
+        else:
+            matched_terms = [term for term in query_terms if term in haystack]
+            if not matched_terms:
+                continue
+            score = len(matched_terms)
+            name = str(candidate.get("name") or "").casefold()
+            identifier = str(candidate.get("id") or "").casefold()
+            if any(term in name or term in identifier for term in matched_terms):
+                score += 2
+        snippet = _candidate_snippet(str(candidate.get("content") or ""), query_terms)
+        ranked.append(
+            {
+                "id": candidate["id"],
+                "name": candidate["name"],
+                "type": candidate["type"],
+                "subtype": candidate.get("subtype", ""),
+                "description": candidate.get("description", ""),
+                "source_path": candidate["source_path"],
+                "score": score,
+                "matched_terms": matched_terms,
+                "snippet": snippet,
+            }
+        )
+    ranked.sort(
+        key=lambda item: (
+            -int(item["score"]),
+            str(item["name"]).casefold(),
+            str(item["id"]).casefold(),
+        )
+    )
+    safe_limit = max(1, min(int(limit or 20), 80))
+    return {
+        "query": query_text,
+        "count": len(ranked),
+        "candidates": ranked[:safe_limit],
+    }
+
+
 def get_relations_graph(
     novel_id: str,
     project_root: Optional[Path] = None,
@@ -675,7 +739,9 @@ def edit_world_relation(
         "applied": False,
         "source_id": str(source_metadata.get("id") or source.stem),
         "target_id": canonical_target,
-        "target_name": str(target_metadata.get("name") or _markdown_title(target_body) or target.stem),
+        "target_name": str(
+            target_metadata.get("name") or _markdown_title(target_body) or target.stem
+        ),
         "source_path": relative,
         "base_revision": revision,
         "diff": diff,
@@ -702,6 +768,259 @@ def edit_world_relation(
         "applied": True,
         "revision": hashlib.sha256(updated.encode("utf-8")).hexdigest()[:16],
     }
+
+
+def edit_world_relations(
+    novel_id: str,
+    relations: List[Dict[str, Any]],
+    *,
+    project_root: Optional[Path] = None,
+    confirm: bool = False,
+    base_revisions: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Preview or apply multiple canonical ``[[related]]`` edits in one request."""
+    root = (project_root or Path(__file__).parent.parent).resolve()
+    if not isinstance(relations, list) or not relations:
+        return {"ok": False, "error": "relations 不能为空"}
+    if len(relations) > 50:
+        return {"ok": False, "error": "单次最多编辑 50 条关系"}
+
+    grouped: Dict[Path, Dict[str, Any]] = {}
+    changes: List[Dict[str, Any]] = []
+    provided_revisions = base_revisions if isinstance(base_revisions, dict) else {}
+    for index, relation in enumerate(relations):
+        if not isinstance(relation, dict):
+            return {"ok": False, "error": f"第 {index + 1} 条关系不是对象"}
+        source_id = str(relation.get("source_id") or "").strip()
+        target_id = str(relation.get("target_id") or "").strip()
+        description = str(relation.get("description") or relation.get("note") or "").strip()
+        action = str(relation.get("action") or "upsert").strip() or "upsert"
+        if action not in {"upsert", "remove"}:
+            return {"ok": False, "error": "action 仅支持 upsert 或 remove"}
+        source = _find_relation_document(root, novel_id, source_id)
+        target = _find_relation_document(root, novel_id, target_id)
+        if source is None:
+            return {
+                "ok": False,
+                "error": f"第 {index + 1} 条关系源实体不存在: {source_id}",
+            }
+        if target is None:
+            return {
+                "ok": False,
+                "error": f"第 {index + 1} 条关系目标实体不存在: {target_id}",
+            }
+        if source.resolve() == target.resolve():
+            return {"ok": False, "error": f"第 {index + 1} 条关系源和目标不能相同"}
+
+        group = grouped.get(source)
+        if group is None:
+            original = source.read_text(encoding="utf-8")
+            revision = hashlib.sha256(original.encode("utf-8")).hexdigest()[:16]
+            metadata, body = parse_toml_front_matter(original)
+            if not metadata:
+                metadata = {
+                    "id": source.stem,
+                    "name": _markdown_title(body) or source.stem,
+                }
+            related = [item for item in metadata.get("related", []) if isinstance(item, dict)]
+            group = {
+                "source": source,
+                "original": original,
+                "revision": revision,
+                "metadata": metadata,
+                "body": body,
+                "related": related,
+                "item_revisions": [],
+            }
+            grouped[source] = group
+        item_revision = str(relation.get("base_revision") or "").strip()
+        if item_revision:
+            group["item_revisions"].append(item_revision)
+
+        target_metadata, target_body = parse_toml_front_matter(
+            target.read_text(encoding="utf-8")
+        )
+        canonical_target = str(target_metadata.get("id") or target.stem).strip()
+        existing_index = next(
+            (
+                rel_index
+                for rel_index, item in enumerate(group["related"])
+                if str(item.get("target") or "").strip() == canonical_target
+            ),
+            None,
+        )
+        changed = False
+        if action == "remove":
+            if existing_index is not None:
+                group["related"].pop(existing_index)
+                changed = True
+        else:
+            entry = {"target": canonical_target, "kind": "related"}
+            if description:
+                entry["note"] = description
+            if existing_index is None:
+                group["related"].append(entry)
+                changed = True
+            else:
+                merged = {**group["related"][existing_index], **entry}
+                changed = merged != group["related"][existing_index]
+                group["related"][existing_index] = merged
+        changes.append(
+            {
+                "index": index + 1,
+                "source_id": str(group["metadata"].get("id") or source.stem),
+                "target_id": canonical_target,
+                "target_name": str(
+                    target_metadata.get("name") or _markdown_title(target_body) or target.stem
+                ),
+                "action": action,
+                "changed": changed,
+            }
+        )
+
+    diffs: List[str] = []
+    updated_by_source: Dict[Path, str] = {}
+    source_revisions: Dict[str, str] = {}
+    changed_sources = 0
+    for source, group in grouped.items():
+        metadata = dict(group["metadata"])
+        if group["related"]:
+            metadata["related"] = group["related"]
+        else:
+            metadata.pop("related", None)
+        updated = compose_toml_document(metadata, group["body"])
+        if group["original"].endswith("\n") and not updated.endswith("\n"):
+            updated += "\n"
+        relative = source.resolve().relative_to(root).as_posix()
+        diff = "".join(
+            difflib.unified_diff(
+                group["original"].splitlines(keepends=True),
+                updated.splitlines(keepends=True),
+                fromfile=f"a/{relative}",
+                tofile=f"b/{relative}",
+            )
+        )
+        source_id = str(metadata.get("id") or source.stem)
+        source_revisions[source_id] = str(group["revision"])
+        source_revisions[relative] = str(group["revision"])
+        diffs.append(diff)
+        updated_by_source[source] = updated
+        if updated != group["original"]:
+            changed_sources += 1
+
+    payload = {
+        "ok": True,
+        "applied": False,
+        "changed": changed_sources > 0,
+        "changed_sources": changed_sources,
+        "changes": changes,
+        "source_revisions": source_revisions,
+        "diff": "".join(diffs),
+        "next_action": (
+            "确认后使用相同 relations，并传入 source_revisions、confirm=true"
+        ),
+    }
+    if not confirm or changed_sources == 0:
+        return payload
+
+    for source, group in grouped.items():
+        relative = source.resolve().relative_to(root).as_posix()
+        source_id = str(group["metadata"].get("id") or source.stem)
+        expected = (
+            str(provided_revisions.get(source_id) or "").strip()
+            or str(provided_revisions.get(relative) or "").strip()
+            or (group["item_revisions"][0] if group["item_revisions"] else "")
+        )
+        if expected != group["revision"]:
+            return {
+                **payload,
+                "ok": False,
+                "error": "relation_revision_conflict",
+                "message": f"{relative} 已变化，请重新预览后确认",
+            }
+
+    revisions: Dict[str, str] = {}
+    for source, updated in updated_by_source.items():
+        if updated == grouped[source]["original"]:
+            continue
+        source.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=source.parent, delete=False
+        ) as handle:
+            handle.write(updated)
+            temp_path = Path(handle.name)
+        os.replace(temp_path, source)
+        relative = source.resolve().relative_to(root).as_posix()
+        revisions[relative] = hashlib.sha256(updated.encode("utf-8")).hexdigest()[:16]
+    return {**payload, "applied": True, "revisions": revisions}
+
+
+def _relation_document_summaries(root: Path, novel_id: str) -> List[Dict[str, Any]]:
+    novel_root = root / "data" / "novels" / novel_id / "src"
+    summaries: List[Dict[str, Any]] = []
+    world_root = novel_root / "world" / "entities"
+    if world_root.exists():
+        for path in sorted(world_root.rglob("*.md")):
+            entity = parse_entity(path)
+            content = path.read_text(encoding="utf-8")
+            summaries.append(
+                {
+                    "id": str(entity.get("id") or path.stem),
+                    "name": str(entity.get("name") or path.stem),
+                    "type": str(entity.get("type") or "未分类"),
+                    "subtype": str(entity.get("subtype") or ""),
+                    "description": str(entity.get("description") or ""),
+                    "content": content,
+                    "source_path": path.resolve().relative_to(root).as_posix(),
+                }
+            )
+    characters_root = novel_root / "characters"
+    if characters_root.exists():
+        from tools.character_sync import parse_profile_to_card
+
+        for path in sorted(characters_root.glob("*.md")):
+            card = parse_profile_to_card(path)
+            metadata, body = parse_toml_front_matter(path.read_text(encoding="utf-8"))
+            name = str(
+                (card or {}).get("name")
+                or metadata.get("name")
+                or _markdown_title(body)
+                or path.stem
+            )
+            summaries.append(
+                {
+                    "id": str((card or {}).get("id") or metadata.get("id") or path.stem),
+                    "name": name,
+                    "type": "人物",
+                    "subtype": str(metadata.get("role") or metadata.get("tier") or ""),
+                    "description": str(
+                        (card or {}).get("brief")
+                        or (card or {}).get("background")
+                        or metadata.get("summary")
+                        or ""
+                    ),
+                    "content": path.read_text(encoding="utf-8"),
+                    "source_path": path.resolve().relative_to(root).as_posix(),
+                }
+            )
+    return summaries
+
+
+def _candidate_snippet(content: str, query_terms: List[str], *, limit: int = 160) -> str:
+    clean = re.sub(r"\s+", " ", str(content or "")).strip()
+    if not clean:
+        return ""
+    lowered = clean.casefold()
+    position = 0
+    for term in query_terms:
+        found = lowered.find(term)
+        if found >= 0:
+            position = max(0, found - 40)
+            break
+    snippet = clean[position: position + limit]
+    prefix = "..." if position > 0 else ""
+    suffix = "..." if position + limit < len(clean) else ""
+    return f"{prefix}{snippet}{suffix}"
 
 
 def _find_relation_document(root: Path, novel_id: str, entity_id: str) -> Optional[Path]:

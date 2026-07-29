@@ -1,7 +1,10 @@
 import json
+import logging
+import os
 from http import HTTPStatus
 from pathlib import Path
 from threading import Thread
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
@@ -9,10 +12,227 @@ import pytest
 
 from tools.agent.book_state import BookStage, BookStateStore
 from tools.cli import _save_chapter
+from tools.context_builder import ContextBuilder
 from tools.init_project import init_project
-from tools.studio import StudioApplication, StudioError, create_server
 from tools.project_registry import ProjectRegistry
+from tools.studio import (
+    StudioApplication,
+    StudioError,
+    create_server,
+    render_chat_markdown,
+)
+from tools.studio_preferences import StudioModelSettingsStore
 from tools.workflow_scheduler import WorkflowScheduler
+
+
+def test_studio_model_form_uses_valid_output_step_and_interface_presets():
+    assets = Path(__file__).parent.parent / "tools" / "studio_assets"
+    html = (assets / "index.html").read_text(encoding="utf-8")
+    javascript = (assets / "app.js").read_text(encoding="utf-8")
+
+    assert (
+        'id="model-max-tokens" type="number" min="256" max="131072" '
+        'step="1" value="24000"'
+    ) in html
+    assert 'value="deepseek-pro">DeepSeek · V4 Pro<' in html
+    assert 'value="deepseek-flash">DeepSeek · V4 Flash<' in html
+    assert 'value="openai">OpenAI 格式接口<' in html
+    assert 'value="anthropic">Anthropic 格式接口<' in html
+    assert 'id="model-remember-key" type="checkbox" checked' in html
+    assert 'model: "deepseek-v4-pro"' in javascript
+    assert 'model: "deepseek-v4-flash"' in javascript
+    assert "remember_api_key" in javascript
+    assert (
+        'return name === "deepseek-v4-flash" ? "deepseek-flash" : "deepseek-pro";'
+        in javascript
+    )
+
+
+def test_studio_onboarding_ui_guides_new_projects_and_next_actions():
+    assets = Path(__file__).parent.parent / "tools" / "studio_assets"
+    html = (assets / "index.html").read_text(encoding="utf-8")
+    javascript = (assets / "app.js").read_text(encoding="utf-8")
+    styles = (assets / "styles.css").read_text(encoding="utf-8")
+
+    assert "guideAfterProjectReady" in javascript
+    assert "runNextAction" in javascript
+    assert "agentEmptyGuidance" in javascript
+    assert "next_action_items" in javascript
+    assert "open_goethe" in javascript
+    assert "创建后先配置模型" in html
+    assert "next-action-button" in styles
+
+
+def test_relationship_topology_includes_search_and_context_controls():
+    assets = Path(__file__).parent.parent / "tools" / "studio_assets"
+    html = (assets / "index.html").read_text(encoding="utf-8")
+    javascript = (assets / "app.js").read_text(encoding="utf-8")
+    styles = (assets / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="relationship-search" type="search"' in html
+    assert 'id="relationship-search-status"' in html
+    assert "findRelationshipMatches" in javascript
+    assert "相邻上下文" in javascript
+    assert "search-match" in javascript
+    assert ".relationship-node.search-match" in styles
+
+
+def test_outline_tree_ui_supports_direct_text_editing():
+    assets = Path(__file__).parent.parent / "tools" / "studio_assets"
+    javascript = (assets / "app.js").read_text(encoding="utf-8")
+    styles = (assets / "styles.css").read_text(encoding="utf-8")
+
+    assert "startOutlineInlineRename" in javascript
+    assert 'operation: "update_summary"' in javascript
+    assert "outline-summary-editor" in javascript
+    assert ".outline-tree-title-input" in styles
+    assert ".outline-summary-editor" in styles
+
+
+def test_agent_chat_ui_supports_sessions_and_collapsible_inspector():
+    assets = Path(__file__).parent.parent / "tools" / "studio_assets"
+    html = (assets / "index.html").read_text(encoding="utf-8")
+    javascript = (assets / "app.js").read_text(encoding="utf-8")
+    styles = (assets / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="agent-session-new"' in html
+    assert 'id="agent-session-delete"' in html
+    assert 'id="agent-session-list"' in html
+    assert 'id="inspector-collapse"' in html
+    assert 'id="inspector-restore"' in html
+    assert 'id="agent-activity"' in html
+    assert 'id="agent-activity-steps"' in html
+    assert "agentSessionId" in javascript
+    assert '"/api/agent/session"' in javascript
+    assert '"/api/agent/session/delete"' in javascript
+    assert "deleteAgentSession" in javascript
+    assert "默认会话不能删除" in javascript
+    assert "session_id" in javascript
+    assert "startAgentActivity" in javascript
+    assert "pollAgentActivity" in javascript
+    assert "/api/agent/activity" in javascript
+    assert "finishAgentActivity" in javascript
+    assert "耗时较久" in javascript
+    assert "可能异常" in javascript
+    assert "toggleInspectorCollapsed" in javascript
+    assert ".agent-console" in styles
+    assert ".agent-session-item" in styles
+    assert ".danger-mini-button" in styles
+    assert ".agent-activity" in styles
+    assert ".agent-activity.long-running" in styles
+    assert ".agent-activity.possibly-stuck" in styles
+    assert "@keyframes agentPulse" in styles
+    assert ".app.inspector-collapsed" in styles
+
+
+def test_studio_debug_mode_writes_sanitized_backend_log(tmp_path: Path):
+    init_project(tmp_path, "demo")
+    app = StudioApplication(tmp_path, debug=True)
+
+    app._debug_event(
+        "unit_test",
+        api_key="secret-value",
+        token="token-value",
+        message="后台记录" * 200,
+        nested={"authorization": "bearer secret"},
+    )
+    for handler in logging.getLogger("tools.studio").handlers:
+        handler.flush()
+
+    log_path = (
+        tmp_path
+        / "data"
+        / "novels"
+        / "demo"
+        / "data"
+        / "logs"
+        / "studio-debug.log"
+    )
+    assert app.debug_log_path == log_path
+    text = log_path.read_text(encoding="utf-8")
+
+    assert "studio.project_activated" in text
+    assert "studio.unit_test" in text
+    assert "secret-value" not in text
+    assert "token-value" not in text
+    assert "bearer secret" not in text
+    assert "<redacted>" in text
+
+
+def test_studio_chat_markdown_renders_commonmark_without_raw_html():
+    rendered = render_chat_markdown(
+        "## 计划\n\n- **第一步**\n- `第二步`\n\n<script>alert('xss')</script>\n"
+        "\n[危险链接](javascript:alert('xss'))"
+    )
+
+    assert "<h2>计划</h2>" in rendered
+    assert "<li><strong>第一步</strong></li>" in rendered
+    assert "<code>第二步</code>" in rendered
+    assert "<script>" not in rendered
+    assert "&lt;script&gt;" in rendered
+    assert 'href="javascript:' not in rendered
+
+
+def test_studio_agent_sessions_can_be_created_selected_and_listed(tmp_path: Path):
+    from tools.agent.goethe_session_state import GoetheSessionStateStore
+    from tools.agent.session_state import SessionStateStore
+
+    init_project(tmp_path, "demo")
+    app = StudioApplication(tmp_path)
+
+    goethe_created = app.create_agent_session({"agent": "goethe"})
+    goethe_session_id = goethe_created["active_session_id"]
+    assert goethe_session_id.startswith("goethe-")
+    assert goethe_created["history"]["session_id"] == goethe_session_id
+    assert goethe_created["history"]["path"].startswith(
+        "data/workflows/sessions/goethe/"
+    )
+
+    goethe_store = GoetheSessionStateStore(
+        tmp_path,
+        "demo",
+        session_id=goethe_session_id,
+    )
+    goethe_store.append_turn("user", "扩写第一篇的大纲")
+    goethe_store.append_turn("assistant", "已经拆成三幕推进。")
+    goethe_surface = app.agent_surface("goethe", limit=10, session_id=goethe_session_id)
+    assert [message["content"] for message in goethe_surface["history"]["messages"]] == [
+        "扩写第一篇的大纲",
+        "已经拆成三幕推进。",
+    ]
+    assert any(
+        session["id"] == goethe_session_id
+        and session["title"] == "扩写第一篇的大纲"
+        and session["messages"] == 2
+        for session in goethe_surface["sessions"]
+    )
+
+    default_surface = app.agent_surface("goethe", limit=10, session_id="default")
+    assert default_surface["history"]["path"] == "data/workflows/goethe_session.jsonl"
+    assert default_surface["history"]["messages"] == []
+
+    dante_created = app.create_agent_session({"agent": "dante"})
+    dante_session_id = dante_created["active_session_id"]
+    assert dante_session_id.startswith("dante-")
+    dante_store = SessionStateStore(tmp_path, "demo", session_id=dante_session_id)
+    dante_store.append_turn("user", "根据大纲推进第一章")
+    dante_surface = app.agent_surface("dante", limit=10, session_id=dante_session_id)
+    assert dante_surface["history"]["messages"][0]["content"] == "根据大纲推进第一章"
+    assert dante_surface["history"]["path"].startswith(
+        "data/workflows/sessions/dante/"
+    )
+
+    deleted = app.delete_agent_session(
+        {"agent": "goethe", "session_id": goethe_session_id}
+    )
+    assert deleted["deleted"] is True
+    assert deleted["deleted_session_id"] == goethe_session_id
+    assert deleted["active_session_id"] == "default"
+    assert not goethe_store.path.exists()
+    assert not goethe_store.transcript_path.exists()
+    assert not any(session["id"] == goethe_session_id for session in deleted["sessions"])
+    with pytest.raises(StudioError, match="默认会话不能删除"):
+        app.delete_agent_session({"agent": "goethe", "session_id": "default"})
 
 
 def _read_json(url: str) -> dict:
@@ -174,6 +394,21 @@ def test_studio_incrementally_edits_outline_tree_with_revision_guard(tmp_path: P
     assert "#### 第二章：追踪" in outline_path.read_text(encoding="utf-8")
     assert "checkpoint" in result
 
+    refreshed = result["outline"]
+    summary = app.edit_outline_structure(
+        {
+            "operation": "update_summary",
+            "node_id": "section_001",
+            "summary": "树上直接修改这一节内容。\n继续保留子章。",
+            "revision": refreshed["revision"],
+        }
+    )
+    source = outline_path.read_text(encoding="utf-8")
+    assert "树上直接修改这一节内容。" in source
+    assert "#### 第一章：开门" in source
+    assert "#### 第二章：追踪" in source
+    assert summary["selected_node_id"] == "section_001"
+
     with pytest.raises(StudioError) as stale:
         app.edit_outline_structure(
             {
@@ -216,26 +451,188 @@ def test_studio_delete_returns_renumbering_impact(tmp_path: Path):
     assert "连续重编号 2 个" in result["message"]
 
 
-def test_studio_model_configuration_is_session_only_and_never_echoes_key(
+def test_studio_model_configuration_persists_local_settings_and_never_echoes_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     init_project(tmp_path, "demo")
     monkeypatch.delenv("LLM_API_KEY", raising=False)
-    app = StudioApplication(tmp_path)
+    settings_store = StudioModelSettingsStore(tmp_path / "studio-settings")
+    app = StudioApplication(tmp_path, model_settings_store=settings_store)
+
+    payload = app.configure_model(
+        {
+            "provider": "openai",
+            "base_url": "https://api.deepseek.com",
+            "model": "deepseek-v4-pro",
+            "api_key": "session-test-secret",
+            "api_format": "chat",
+            "context_tokens": 160000,
+            "max_tokens": 24000,
+        }
+    )
+
+    assert payload["model"] == {
+        "configured": True,
+        "provider": "openai",
+        "base_url": "https://api.deepseek.com",
+        "name": "deepseek-v4-pro",
+        "api_format": "chat",
+        "context_tokens": 160000,
+        "max_tokens": 24000,
+        "persistence": {
+            "settings_saved": True,
+            "credential_saved": True,
+            "remember_api_key": True,
+        },
+    }
+    payload_json = json.dumps(payload)
+    assert "session-test-secret" not in payload_json
+    assert str(settings_store.directory) not in payload_json
+    assert "session-test-secret" not in (tmp_path / "novel_config.yaml").read_text(encoding="utf-8")
+    assert settings_store.load_credential() == "session-test-secret"
+    assert ContextBuilder(tmp_path, "demo").MAX_TOKENS == 160000
+
+
+def test_studio_model_configuration_does_not_persist_inherited_process_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    init_project(tmp_path, "demo")
+    monkeypatch.setenv("LLM_API_KEY", "process-only-secret")
+    settings_store = StudioModelSettingsStore(tmp_path / "studio-settings")
+    app = StudioApplication(tmp_path, model_settings_store=settings_store)
 
     payload = app.configure_model(
         {
             "provider": "openai",
             "base_url": "https://api.deepseek.com",
             "model": "deepseek-chat",
-            "api_key": "session-test-secret",
+            "api_key": "",
+            "api_format": "chat",
+            "context_tokens": 160000,
+            "max_tokens": 6000,
+            "remember_api_key": True,
+        }
+    )
+
+    assert payload["model"]["configured"] is True
+    assert payload["model"]["persistence"] == {
+        "settings_saved": True,
+        "credential_saved": False,
+        "remember_api_key": True,
+    }
+    assert os.environ["LLM_API_KEY"] == "process-only-secret"
+    assert settings_store.load_credential() == ""
+
+
+def test_studio_model_connection_test_does_not_replace_active_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    init_project(tmp_path, "demo")
+    monkeypatch.setenv("LLM_API_KEY", "active-secret")
+    monkeypatch.setenv("LLM_MODEL", "active-model")
+    captured = {}
+
+    def fake_test(settings):
+        captured.update(settings)
+        return {"reply": "OK"}
+
+    app = StudioApplication(tmp_path, model_test_executor=fake_test)
+    result = app.test_model_connection(
+        {
+            "provider": "openai",
+            "base_url": "https://api.deepseek.com",
+            "model": "candidate-model",
+            "api_key": "candidate-secret",
+            "api_format": "chat",
+            "context_tokens": 160000,
+            "max_tokens": 24000,
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["model"] == "candidate-model"
+    assert result["reply"] == "OK"
+    assert captured["api_key"] == "candidate-secret"
+    assert os.environ["LLM_MODEL"] == "active-model"
+    assert os.environ["LLM_API_KEY"] == "active-secret"
+    assert "candidate-secret" not in json.dumps(result)
+
+
+def test_studio_rejects_invalid_live_model_budgets(tmp_path: Path, monkeypatch):
+    init_project(tmp_path, "demo")
+    monkeypatch.setenv("LLM_API_KEY", "active-secret")
+    app = StudioApplication(tmp_path)
+
+    with pytest.raises(StudioError, match="上下文预算"):
+        app.configure_model(
+            {
+                "model": "deepseek-v4-pro",
+                "base_url": "https://api.deepseek.com",
+                "context_tokens": 1000,
+            }
+        )
+
+
+def test_studio_model_connection_errors_never_echo_provider_key_fragments(tmp_path: Path):
+    init_project(tmp_path, "demo")
+
+    def fail_with_provider_body(settings):
+        raise RuntimeError(
+            "401 authentication failed; Your api key: ****-7f70 is invalid"
+        )
+
+    app = StudioApplication(tmp_path, model_test_executor=fail_with_provider_body)
+    with pytest.raises(StudioError) as captured:
+        app.test_model_connection(
+            {
+                "provider": "openai",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-v4-pro",
+                "api_key": "secret-ending-7f70",
+            }
+        )
+
+    message = str(captured.value)
+    assert message == "连接测试失败：认证失败，请检查 API Key。"
+    assert "7f70" not in message
+
+
+def test_studio_default_model_connection_test_allows_reasoning_budget(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, int] = {}
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        def chat(self, messages, temperature, max_tokens, stream):
+            captured["max_tokens"] = max_tokens
+            return SimpleNamespace(content="OK")
+
+    monkeypatch.setattr("tools.llm.LLMClient", FakeClient)
+
+    result = StudioApplication._default_model_connection_test(
+        {
+            "provider": "openai",
+            "api_key": "secret",
+            "base_url": "https://api.deepseek.com",
+            "model": "deepseek-v4-flash",
+            "max_tokens": 24000,
             "api_format": "chat",
         }
     )
 
-    assert payload["model"] == {"configured": True, "name": "deepseek-chat"}
-    assert "session-test-secret" not in json.dumps(payload)
-    assert "session-test-secret" not in (tmp_path / "novel_config.yaml").read_text(encoding="utf-8")
+    assert result == {"reply": "OK"}
+    assert captured["max_tokens"] == 32
+
+
+def test_studio_empty_model_connection_reply_gets_actionable_error():
+    message = StudioApplication._safe_model_connection_error(
+        RuntimeError("empty model reply")
+    )
+
+    assert message == "连接测试失败：模型返回空内容，请调大最大输出后重试。"
 
 
 def test_studio_document_write_is_atomic_and_version_checked(tmp_path: Path):
@@ -358,7 +755,50 @@ def test_studio_http_serves_ui_api_and_blocks_unsigned_writes(tmp_path: Path):
             assert 'id="outline-node-add-child"' in html
             assert 'id="outline-edit-dialog"' in html
             assert 'id="outline-edit-impact"' in html
+            assert 'id="agent-session-new"' in html
+            assert 'id="agent-session-delete"' in html
+            assert 'id="inspector-collapse"' in html
             assert "default-src 'self'" in response.headers["Content-Security-Policy"]
+
+        agent_surface = _read_json(
+            f"{base}/api/agents?agent=goethe&session_id=default&limit=5"
+        )
+        assert agent_surface["active_session_id"] == "default"
+        assert agent_surface["sessions"][0]["id"] == "default"
+
+        new_session_request = Request(
+            f"{base}/api/agent/session",
+            method="POST",
+            data=json.dumps({"agent": "goethe"}).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-OpenWrite-Studio": "1"},
+        )
+        with opener.open(new_session_request) as response:
+            new_session = json.loads(response.read())
+        assert new_session["created"] is True
+        assert new_session["active_session_id"].startswith("goethe-")
+        assert any(
+            session["id"] == new_session["active_session_id"]
+            for session in new_session["sessions"]
+        )
+        delete_session_request = Request(
+            f"{base}/api/agent/session/delete",
+            method="POST",
+            data=json.dumps(
+                {
+                    "agent": "goethe",
+                    "session_id": new_session["active_session_id"],
+                }
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-OpenWrite-Studio": "1"},
+        )
+        with opener.open(delete_session_request) as response:
+            deleted_session = json.loads(response.read())
+        assert deleted_session["deleted"] is True
+        assert deleted_session["active_session_id"] == "default"
+        assert not any(
+            session["id"] == new_session["active_session_id"]
+            for session in deleted_session["sessions"]
+        )
 
         request = Request(
             f"{base}/api/focus",
@@ -500,9 +940,23 @@ def test_studio_chat_and_source_extraction_use_injected_real_surfaces(
         chat_executor=fake_chat,
         source_executor=fake_source,
     )
-    chat = app.chat_turn({"agent": "goethe", "message": "整理第一篇"})
+    chat = app.chat_turn(
+        {
+            "agent": "goethe",
+            "session_id": "goethe-20260729-120000-test01",
+            "run_id": "run-studio-activity-01",
+            "message": "整理第一篇",
+        }
+    )
     assert chat["content"] == "goethe 已收到：整理第一篇"
+    assert chat["content_html"] == "<p>goethe 已收到：整理第一篇</p>\n"
+    assert chat["session_id"] == "goethe-20260729-120000-test01"
+    assert chat["run_id"] == "run-studio-activity-01"
     assert chat_calls == [("goethe", "整理第一篇")]
+    activity = app.agent_activity("run-studio-activity-01")
+    assert activity["status"] == "complete"
+    assert activity["step_index"] == 4
+    assert activity["elapsed_seconds"] >= 0
 
     extracted = app.source_action(
         {
@@ -544,6 +998,37 @@ def test_studio_http_exposes_context_and_import_routes(tmp_path: Path):
         with opener.open(request) as response:
             payload = json.loads(response.read())
         assert payload["imported"][0]["chapter_id"] == "ch_001"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_studio_http_exposes_real_agent_activity(tmp_path: Path):
+    init_project(tmp_path, "demo")
+    server = create_server(tmp_path, port=0)
+    server.app._start_agent_activity(
+        "run-http-activity-01",
+        agent="dante",
+        session_id="default",
+    )
+    server.app._record_agent_activity(
+        "run-http-activity-01",
+        {"event": "tool_started", "turn": 2, "tool": "get_context"},
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        activity = _read_json(
+            f"{base}/api/agent/activity?run_id=run-http-activity-01"
+        )
+        assert activity["status"] == "running"
+        assert activity["phase"] == "tool_running"
+        assert activity["step_index"] == 2
+        assert activity["title"] == "Dante 正在调用工具"
+        assert activity["note"] == "第 2 轮：组装章节上下文"
+        assert activity["tool"] == "get_context"
     finally:
         server.shutdown()
         server.server_close()

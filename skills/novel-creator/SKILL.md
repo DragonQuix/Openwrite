@@ -8,6 +8,13 @@ description: Use when user wants to write chapters, generate drafts, or continue
 Dante 的完整原始对话追加保存在 `data/workflows/agent_session.jsonl`；
 `agent_session.yaml` 是有界的恢复状态。较早轮次进入滚动摘要，但原始记录不会因压缩丢失。
 
+网页端模型连接从 Studio 顶栏“模型设置”进入。配置在当前服务进程即时生效；
+DeepSeek 快速预设为 V4 Pro / V4 Flash；OpenAI / Anthropic 是接口格式而非模型限定，
+Base URL 和模型名可编辑。
+API Key 不进入作品文件、Git、浏览器存储、ReAct 工具结果或会话历史。
+Studio 将 Goethe / Dante 回复按安全 CommonMark 渲染；用户输入、错误消息和原始 HTML
+不作为可执行页面内容处理。
+
 编排 **Director → Writer → User Review → Stylist** 完整创作流程。
 
 ## 触发条件
@@ -82,6 +89,11 @@ Studio 创建章节时使用返回的建议预填 `chapter_id`、所属节上下
     ├── ledger.md - 资源账本
     └── relationships.md - 角色关系矩阵
 ```
+
+发送前必须执行 `tiered-hierarchical-v2` 预算检查。超限时依次压缩旧章节记忆、
+当前章居中的大纲窗口、真相运行态/人物/精确上文，最后执行硬适配并复检。
+前三层不得删除作者意图、创作罗盘或当前章；不得修改 `src/` 真源、完整正文或
+JSONL 会话历史。将压缩级别、动作及压缩前后估算 token 写入 `context.compression`。
 
 **可选：使用内置 Agent**
 

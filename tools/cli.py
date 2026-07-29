@@ -75,6 +75,7 @@ def main():
     _add_studio_command(subparsers)
     _add_doctor_command(subparsers)
     _add_agent_command(subparsers)
+    _add_project_arguments(subparsers)
 
     args = parser.parse_args()
 
@@ -95,7 +96,31 @@ def main():
 
 
 def _dispatch(args) -> int:
-    """分发命令"""
+    """Resolve an optional project root, then dispatch one CLI command."""
+
+    raw_project = str(getattr(args, "project", "") or "").strip()
+    if not raw_project or args.command == "studio":
+        return _dispatch_in_project(args)
+
+    project_root = Path(raw_project).expanduser().resolve()
+    if args.command == "init":
+        project_root.mkdir(parents=True, exist_ok=True)
+    elif not project_root.is_dir():
+        logger.error(f"作品项目目录不存在: {project_root}")
+        return 1
+
+    args.project = str(project_root)
+    previous_root = Path.cwd()
+    try:
+        os.chdir(project_root)
+        return _dispatch_in_project(args)
+    finally:
+        os.chdir(previous_root)
+
+
+def _dispatch_in_project(args) -> int:
+    """Dispatch after the process is positioned at the selected project."""
+
     if args.command == "init":
         return _cmd_init(args)
     elif args.command == "sync":
@@ -143,10 +168,23 @@ def _dispatch(args) -> int:
         return 1
 
 
+def _add_project_arguments(subparsers) -> None:
+    """Expose one project selector consistently on every top-level command."""
+
+    for command_parser in subparsers.choices.values():
+        if "--project" in command_parser._option_string_actions:
+            continue
+        command_parser.add_argument(
+            "--project",
+            help="作品项目目录；省略时使用当前目录",
+        )
+
+
 def _add_init_command(subparsers):
     """init 命令"""
     p = subparsers.add_parser("init", help="初始化新项目")
     p.add_argument("novel_id", help="小说 ID")
+    p.add_argument("--title", default="", help="小说标题（可选）")
     p.add_argument("--template", "-t", default="default", help="模板类型")
 
 
@@ -339,6 +377,7 @@ def _add_studio_command(subparsers):
     p.add_argument("--port", "-p", type=int, default=4567, help="监听端口（默认 4567）")
     p.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
     p.add_argument("--project", help="作品项目目录；可与框架代码目录分离")
+    p.add_argument("--debug", action="store_true", help="启用 Studio 后台 debug 日志")
 
 
 def _add_doctor_command(subparsers):
@@ -361,13 +400,14 @@ def _cmd_init(args) -> int:
 
     novel_id = args.novel_id
     project_root = Path.cwd()
+    title = str(getattr(args, "title", "") or "").strip() or None
 
     logger.info(f"初始化项目: {novel_id}")
     if getattr(args, "template", "default") != "default":
         logger.info("当前仅支持 default 模板，已按默认模板初始化。")
 
     try:
-        NovelApplicationService.initialize(project_root, novel_id)
+        NovelApplicationService.initialize(project_root, novel_id, title)
     except NovelServiceError as exc:
         logger.error(str(exc))
         return 1
@@ -1008,6 +1048,7 @@ def _cmd_studio(args) -> int:
             Path(args.project).expanduser() if args.project else Path.cwd(),
             port=args.port,
             open_browser=not bool(args.no_open),
+            debug=bool(args.debug),
         )
     except (OSError, StudioError) as exc:
         logger.error(f"Studio 启动失败: {exc}")

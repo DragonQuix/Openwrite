@@ -7,11 +7,29 @@ const state = {
   dirty: false,
   saving: false,
   agent: "goethe",
+  agentSessionId: { goethe: "default", dante: "default" },
+  agentSessions: { goethe: [], dante: [] },
+  agentActivity: {
+    timer: null,
+    startedAt: 0,
+    stepIndex: 0,
+    hideTimer: null,
+    agentLabel: "AI",
+    baseNote: "",
+    runId: "",
+    polling: false,
+    serverStepIndex: null,
+    serverTitle: "",
+    serverNote: "",
+  },
+  inspectorCollapsed: false,
   continuity: null,
   outline: null,
   outlineSelectedId: null,
+  outlineRenamingId: null,
   relationship: {
     nodes: [], edges: [], positions: new Map(), selectedId: null,
+    matchIds: new Set(), query: "",
     scale: 1, tx: 0, ty: 0, paused: false, frame: null, ticks: 0, pointer: null,
   },
 };
@@ -32,6 +50,48 @@ const readinessLabels = {
   characters: "主要人物",
   outline: "可写大纲",
   creative_focus: "创作罗盘",
+};
+const modelPresets = {
+  "deepseek-pro": {
+    provider: "openai",
+    base_url: "https://api.deepseek.com",
+    model: "deepseek-v4-pro",
+    api_format: "chat",
+    context_tokens: 160000,
+    max_tokens: 24000,
+  },
+  "deepseek-flash": {
+    provider: "openai",
+    base_url: "https://api.deepseek.com",
+    model: "deepseek-v4-flash",
+    api_format: "chat",
+    context_tokens: 160000,
+    max_tokens: 24000,
+  },
+  openai: {
+    provider: "openai",
+    base_url: "https://api.openai.com/v1",
+    model: "gpt-4o-mini",
+    api_format: "chat",
+    context_tokens: 64000,
+    max_tokens: 24000,
+  },
+  anthropic: {
+    provider: "anthropic",
+    base_url: "https://api.anthropic.com",
+    model: "claude-sonnet-4-5",
+    api_format: "chat",
+    context_tokens: 64000,
+    max_tokens: 24000,
+  },
+  custom: {
+    provider: "custom",
+    base_url: "",
+    model: "",
+    api_format: "chat",
+    context_tokens: 64000,
+    max_tokens: 24000,
+  },
 };
 
 async function api(path, options = {}) {
@@ -110,15 +170,17 @@ function renderWorkspace() {
   progress.setAttribute("aria-valuenow", String(percent));
 
   const modelState = $("#model-state");
-  modelState.textContent = model.configured ? model.name : "模型未配置";
+  modelState.textContent = model.configured ? `模型设置 · ${model.name}` : "模型设置 · 未配置";
   modelState.classList.toggle("ready", model.configured);
-  if (model.configured && !$("#model-name").value) $("#model-name").value = model.name;
+  $("#model-topbar-name").textContent = model.configured ? model.name : "未配置";
+  $("#model-connection-dot").classList.toggle("ready", model.configured);
+  if (!$("#model-dialog").open) fillModelForm(model);
   $("#write-open").disabled = !model.configured;
-  $("#write-open").title = model.configured ? "" : "请通过环境变量配置 LLM_API_KEY";
+  $("#write-open").title = model.configured ? "" : "请先打开模型设置并输入 API Key";
 
   renderReadiness(snapshot.readiness);
   renderRecentChapters();
-  renderNextActions(snapshot.next_actions);
+  renderNextActions(snapshot.next_action_items || snapshot.next_actions || []);
   fillFocus(snapshot.creative_focus);
   $("#fact-arc").textContent = snapshot.current_arc;
   $("#fact-chapter").textContent = snapshot.current_chapter;
@@ -180,12 +242,68 @@ function renderRecentChapters() {
 function renderNextActions(actions) {
   const root = $("#next-actions");
   root.replaceChildren();
-  actions.forEach((action) => {
-    const span = document.createElement("span");
-    span.className = "next-action";
-    span.textContent = action;
-    root.append(span);
+  const items = normalizeNextActions(actions);
+  items.forEach((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "next-action next-action-button";
+    button.textContent = item.label;
+    button.title = item.cli || item.label;
+    button.addEventListener("click", () => runNextAction(item));
+    root.append(button);
   });
+}
+
+function normalizeNextActions(actions) {
+  if (!Array.isArray(actions) || !actions.length) return [];
+  return actions.map((action) => {
+    if (action && typeof action === "object") {
+      return {
+        id: action.id || "",
+        label: action.label || action.cli || "下一步",
+        cli: action.cli || "",
+        studio_action: action.studio_action || "",
+        seed: action.seed || "",
+      };
+    }
+    const text = String(action || "");
+    const lower = text.toLowerCase();
+    let studioAction = "";
+    if (lower.includes("goethe")) studioAction = "open_goethe";
+    else if (lower.includes("dante")) studioAction = "open_dante";
+    else if (lower.includes("focus") || text.includes("罗盘")) studioAction = "open_focus";
+    else if (text.includes("创建")) studioAction = "open_project_dialog";
+    return { id: "", label: text, cli: text, studio_action: studioAction, seed: "" };
+  });
+}
+
+function runNextAction(item) {
+  const action = item.studio_action || "";
+  if (action === "open_project_dialog") {
+    openProjectDialog();
+    return;
+  }
+  if (action === "open_focus") {
+    setView("dashboard");
+    const goal = $("#focus-goal");
+    if (goal) {
+      goal.focus();
+      goal.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+    showToast("请在创作罗盘中填写本阶段目标");
+    return;
+  }
+  if (action === "open_goethe" || action === "open_dante") {
+    const agent = action === "open_dante" ? "dante" : "goethe";
+    setView("agents");
+    chooseAgent(agent);
+    if (item.seed) {
+      $("#chat-input").value = item.seed;
+      $("#chat-input").focus();
+    }
+    return;
+  }
+  showToast(item.label);
 }
 
 function fillFocus(focus) {
@@ -204,7 +322,7 @@ function renderDocumentList(group) {
   if (!documents.length) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
-    empty.textContent = group === "chapters" ? "尚无正文" : "暂无文档";
+    empty.textContent = emptyDocumentTip(group);
     root.append(empty);
     return;
   }
@@ -243,6 +361,7 @@ function setView(view, pushHistory = true) {
     if (first) openDocument(first.path, false);
   }
   if (outlineView) loadOutline();
+  if (view === "agents") loadAgentSurface(state.agent);
   if (view === "continuity") loadContinuity();
   if (pushHistory) {
     history.pushState({ view }, "", dashboard ? "/" : `/#${encodeURIComponent(view)}`);
@@ -308,6 +427,9 @@ function renderOutline() {
   const counts = outline.counts || {};
   $("#outline-stats").textContent = `${counts.volume || 0} 卷 · ${counts.act || 0} 幕 · ${counts.section || 0} 节 · ${counts.chapter || 0} 章 · ${outline.drafted_chapters || 0} 章已有正文`;
   $("#outline-tree-count").textContent = String((counts.volume || 0) + (counts.act || 0) + (counts.section || 0) + (counts.chapter || 0));
+  if (state.outlineRenamingId && !outlineNodeById(state.outlineRenamingId)) {
+    state.outlineRenamingId = null;
+  }
   const root = $("#outline-tree");
   root.replaceChildren();
   (outline.roots || []).forEach((node) => root.append(buildOutlineTreeItem(node)));
@@ -347,21 +469,68 @@ function buildOutlineTreeItem(node) {
   } else {
     const spacer = document.createElement("span"); spacer.className = "outline-tree-spacer"; row.append(spacer);
   }
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "outline-tree-node";
-  button.setAttribute("aria-current", String(node.id === state.outlineSelectedId));
+  const inlineEditing = state.outlineRenamingId === node.id;
+  const nodeControl = inlineEditing ? document.createElement("div") : document.createElement("button");
+  if (!inlineEditing) nodeControl.type = "button";
+  nodeControl.className = `outline-tree-node${inlineEditing ? " editing" : ""}`;
+  nodeControl.setAttribute("aria-current", String(node.id === state.outlineSelectedId));
   const badge = document.createElement("span"); badge.className = "outline-kind-badge"; badge.textContent = node.label;
-  const title = document.createElement("span"); title.className = "outline-tree-title"; title.textContent = node.title;
-  button.append(badge, title);
-  if (node.kind === "chapter") {
-    const status = document.createElement("span"); status.className = `outline-chapter-status ${node.status}`; status.textContent = node.status === "drafted" ? "已写" : "待写"; button.append(status);
+  if (inlineEditing) {
+    const input = document.createElement("input");
+    input.className = "outline-tree-title-input";
+    input.value = node.title;
+    input.setAttribute("aria-label", `修改${node.title}`);
+    nodeControl.append(badge, input);
+    let handled = false;
+    const finish = (commit) => {
+      if (handled) return;
+      handled = true;
+      finishOutlineInlineRename(node.id, input.value, commit);
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        finish(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        finish(false);
+      }
+    });
+    input.addEventListener("blur", () => finish(true));
+    window.requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+  } else {
+    const title = document.createElement("span"); title.className = "outline-tree-title"; title.textContent = node.title;
+    nodeControl.append(badge, title);
+    if (node.kind === "chapter") {
+      const status = document.createElement("span"); status.className = `outline-chapter-status ${node.status}`; status.textContent = node.status === "drafted" ? "已写" : "待写"; nodeControl.append(status);
+    }
+    nodeControl.title = node.editable ? "双击修改标题" : "";
+    nodeControl.addEventListener("mousedown", (event) => {
+      if (event.detail >= 2) {
+        event.preventDefault();
+        startOutlineInlineRename(node);
+      }
+    });
+    nodeControl.addEventListener("click", async () => {
+      state.outlineSelectedId = node.id;
+      if (node.kind === "chapter") await loadOutline(node.id); else renderOutline();
+    });
+    nodeControl.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      startOutlineInlineRename(node);
+    });
+    nodeControl.addEventListener("keydown", (event) => {
+      if (event.key === "F2") {
+        event.preventDefault();
+        startOutlineInlineRename(node);
+      }
+    });
   }
-  button.addEventListener("click", async () => {
-    state.outlineSelectedId = node.id;
-    if (node.kind === "chapter") await loadOutline(node.id); else renderOutline();
-  });
-  row.append(button);
+  row.append(nodeControl);
   if (node.editable) {
     const actions = document.createElement("span");
     actions.className = "outline-row-actions";
@@ -381,7 +550,7 @@ function buildOutlineTreeItem(node) {
     rename.textContent = "改";
     rename.setAttribute("aria-label", `修改${node.title}`);
     rename.title = "改名";
-    rename.addEventListener("click", () => openOutlineEditDialog("rename", node));
+    rename.addEventListener("click", () => startOutlineInlineRename(node));
     actions.append(rename);
     row.append(actions);
   }
@@ -394,10 +563,15 @@ function buildOutlineTreeItem(node) {
 function renderOutlineDetail() {
   const nodes = flattenOutline(state.outline?.roots || []);
   const node = nodes.find((item) => item.id === state.outlineSelectedId);
-  $("#outline-detail-title").textContent = node?.title || "选择一个节点";
+  const title = $("#outline-detail-title");
+  title.textContent = node?.title || "选择一个节点";
+  title.contentEditable = String(Boolean(node?.editable));
+  title.classList.toggle("editable", Boolean(node?.editable));
+  title.dataset.nodeId = node?.id || "";
+  title.dataset.originalTitle = node?.title || "";
   $("#outline-breadcrumb").textContent = node ? [...node.path, node.title].join(" / ") : "从左侧结构树查看卷、幕、节或章。";
   $("#outline-node-meta").textContent = node ? `${node.label} · 原文第 ${node.line} 行${node.kind === "chapter" ? ` · ${node.status === "drafted" ? "已有正文" : "尚未写作"}` : ""}` : "";
-  $("#outline-node-summary").textContent = node?.summary || "这个节点尚未填写摘要。";
+  renderOutlineSummaryEditor(node);
   $("#outline-node-source").disabled = !node;
   $("#outline-node-rename").disabled = !node?.editable;
   $("#outline-node-add-child").disabled = !node?.child_kind;
@@ -411,8 +585,152 @@ function renderOutlineDetail() {
   create.textContent = node?.status === "drafted" ? "打开已写正文" : "用此章创建正文";
 }
 
+function renderOutlineSummaryEditor(node) {
+  const root = $("#outline-node-summary");
+  root.replaceChildren();
+  if (!node) {
+    root.textContent = "选择一个节点后查看或修改内容。";
+    return;
+  }
+  if (!node.editable) {
+    root.textContent = node.summary || "这个节点尚未填写摘要。";
+    return;
+  }
+  const editor = document.createElement("textarea");
+  editor.className = "outline-summary-editor";
+  editor.value = node.content || "";
+  editor.placeholder = "这个节点尚未填写内容。";
+  editor.dataset.originalValue = editor.value;
+  editor.setAttribute("aria-label", `修改${node.title}的内容`);
+  const actions = document.createElement("div");
+  actions.className = "outline-summary-actions";
+  const status = document.createElement("span");
+  status.textContent = "已保存";
+  status.setAttribute("role", "status");
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "quiet-button";
+  save.textContent = "保存内容";
+  save.disabled = true;
+  const syncState = () => {
+    const changed = editor.value !== editor.dataset.originalValue;
+    save.disabled = !changed;
+    status.textContent = changed ? "未保存" : "已保存";
+  };
+  editor.addEventListener("input", syncState);
+  editor.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      submitOutlineSummary(node.id, editor, status, save);
+    } else if (event.key === "Escape") {
+      editor.value = editor.dataset.originalValue;
+      syncState();
+    }
+  });
+  save.addEventListener("click", () => submitOutlineSummary(node.id, editor, status, save));
+  actions.append(status, save);
+  root.append(editor, actions);
+}
+
+async function submitOutlineSummary(nodeId, editor, status, save) {
+  if (!outlineNodeById(nodeId) || editor.value === editor.dataset.originalValue) return;
+  editor.disabled = true;
+  save.disabled = true;
+  status.textContent = "正在保存…";
+  try {
+    await commitOutlineEdit({
+      operation: "update_summary",
+      node_id: nodeId,
+      summary: editor.value,
+    }, { selectNodeId: nodeId });
+  } catch (error) {
+    status.textContent = error.message;
+    showToast(error.message, true);
+    if (error.status === 409) {
+      await loadOutline();
+    } else {
+      editor.disabled = false;
+      save.disabled = false;
+    }
+  }
+}
+
+function handleOutlineDetailTitleKeydown(event) {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    event.currentTarget.blur();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    event.currentTarget.textContent = event.currentTarget.dataset.originalTitle || "";
+    event.currentTarget.blur();
+  }
+}
+
+function handleOutlineDetailTitlePaste(event) {
+  if (!event.currentTarget.isContentEditable) return;
+  event.preventDefault();
+  const text = event.clipboardData?.getData("text/plain") || "";
+  document.execCommand("insertText", false, text.replace(/\s*\n\s*/g, " "));
+}
+
+async function submitOutlineDetailTitle(event) {
+  const target = event.currentTarget;
+  const nodeId = target.dataset.nodeId || "";
+  const node = outlineNodeById(nodeId);
+  const title = target.textContent.trim();
+  if (!node?.editable || !title || title === target.dataset.originalTitle) {
+    target.textContent = target.dataset.originalTitle || target.textContent;
+    return;
+  }
+  target.contentEditable = "false";
+  try {
+    await commitOutlineEdit({
+      operation: "rename",
+      node_id: nodeId,
+      kind: node.kind,
+      title,
+    }, { selectNodeId: nodeId });
+  } catch (error) {
+    showToast(error.message, true);
+    target.textContent = target.dataset.originalTitle || node.title;
+    if (error.status === 409) await loadOutline(); else renderOutlineDetail();
+  }
+}
+
 function selectedOutlineNode() {
   return flattenOutline(state.outline?.roots || []).find((node) => node.id === state.outlineSelectedId);
+}
+
+function outlineNodeById(nodeId) {
+  return flattenOutline(state.outline?.roots || []).find((node) => node.id === nodeId);
+}
+
+function startOutlineInlineRename(node) {
+  if (!node?.editable) return;
+  state.outlineRenamingId = node.id;
+  state.outlineSelectedId = node.id;
+  renderOutline();
+}
+
+async function finishOutlineInlineRename(nodeId, value, commit) {
+  const node = outlineNodeById(nodeId);
+  state.outlineRenamingId = null;
+  const title = String(value || "").trim();
+  if (!commit || !node || title === node.title) {
+    renderOutline();
+    return;
+  }
+  try {
+    await commitOutlineEdit({
+      operation: "rename",
+      node_id: nodeId,
+      kind: node.kind,
+      title,
+    }, { selectNodeId: nodeId });
+  } catch (error) {
+    showToast(error.message, true);
+    if (error.status === 409) await loadOutline(); else renderOutline();
+  }
 }
 
 function outlineKindLabel(kind) {
@@ -506,6 +824,22 @@ function openOutlineEditDialog(operation, node = null) {
   if (operation !== "delete") $("#outline-edit-name").select();
 }
 
+async function commitOutlineEdit(edit, options = {}) {
+  const payload = await api("/api/outline/edit", {
+    method: "POST",
+    body: JSON.stringify({
+      ...edit,
+      revision: state.outline?.revision || "",
+    }),
+  });
+  state.outline = payload.outline;
+  state.outlineSelectedId = payload.selected_node_id || options.selectNodeId || state.outline.recommendation?.chapter_id || null;
+  renderOutline();
+  showToast(payload.message || "大纲已更新");
+  await loadWorkspace();
+  return payload;
+}
+
 async function submitOutlineEdit(event) {
   event.preventDefault();
   const submit = $("#outline-edit-submit");
@@ -514,22 +848,13 @@ async function submitOutlineEdit(event) {
   let blockedByConflict = false;
   progress.textContent = "正在安全写入大纲…";
   try {
-    const payload = await api("/api/outline/edit", {
-      method: "POST",
-      body: JSON.stringify({
-        operation: $("#outline-edit-operation").value,
-        node_id: $("#outline-edit-node-id").value,
-        kind: $("#outline-edit-kind").value,
-        title: $("#outline-edit-name").value,
-        revision: state.outline?.revision || "",
-      }),
+    await commitOutlineEdit({
+      operation: $("#outline-edit-operation").value,
+      node_id: $("#outline-edit-node-id").value,
+      kind: $("#outline-edit-kind").value,
+      title: $("#outline-edit-name").value,
     });
-    state.outline = payload.outline;
-    state.outlineSelectedId = payload.selected_node_id || state.outline.recommendation?.chapter_id || null;
-    renderOutline();
     $("#outline-edit-dialog").close();
-    showToast(payload.message || "大纲已更新");
-    await loadWorkspace();
   } catch (error) {
     progress.textContent = error.message;
     if (error.status === 409) {
@@ -641,13 +966,7 @@ async function saveModel(event) {
   try {
     state.workspace = await api("/api/model", {
       method: "POST",
-      body: JSON.stringify({
-        provider: $("#model-provider").value,
-        base_url: $("#model-base-url").value.trim(),
-        model: $("#model-name").value.trim(),
-        api_key: $("#model-api-key").value.trim(),
-        api_format: $("#model-api-format").value,
-      }),
+      body: JSON.stringify(modelFormPayload()),
     });
     $("#model-api-key").value = "";
     renderWorkspace();
@@ -658,6 +977,99 @@ async function saveModel(event) {
   } finally {
     submit.disabled = false;
   }
+}
+
+function detectModelPreset(model) {
+  const base = String(model?.base_url || "").toLowerCase();
+  const name = String(model?.name || model?.model || "").toLowerCase();
+  if (base.includes("deepseek.com")) {
+    return name === "deepseek-v4-flash" ? "deepseek-flash" : "deepseek-pro";
+  }
+  if (model?.provider === "anthropic") return "anthropic";
+  if (base.includes("api.openai.com")) return "openai";
+  return "custom";
+}
+
+function fillModelForm(model) {
+  const preset = detectModelPreset(model);
+  const persistence = model?.persistence || {};
+  $("#model-preset").value = preset;
+  $("#model-base-url").value = model?.base_url || modelPresets[preset].base_url;
+  $("#model-name").value = model?.name === "未配置" ? "" : (model?.name || "");
+  $("#model-api-format").value = model?.api_format || "chat";
+  $("#model-context-tokens").value = String(model?.context_tokens || 64000);
+  $("#model-max-tokens").value = String(model?.max_tokens || 24000);
+  $("#model-remember-key").checked = persistence.remember_api_key !== false;
+  $("#model-key-state").textContent = persistence.credential_saved
+    ? "本机已保存 Key；留空即可沿用"
+    : model?.configured
+    ? "当前进程已有 Key；留空即可沿用"
+    : "当前进程尚无可沿用的 Key";
+  $("#model-dialog-current").textContent = model?.configured
+    ? `${model.name} · ${formatNumber(model.context_tokens)} 上下文`
+    : "尚未配置模型";
+  $("#model-dialog-status-dot").classList.toggle("ready", Boolean(model?.configured));
+}
+
+function applyModelPreset() {
+  const preset = modelPresets[$("#model-preset").value];
+  if (!preset) return;
+  $("#model-base-url").value = preset.base_url;
+  $("#model-name").value = preset.model;
+  $("#model-api-format").value = preset.api_format;
+  $("#model-context-tokens").value = String(preset.context_tokens);
+  $("#model-max-tokens").value = String(preset.max_tokens);
+  $("#model-progress").textContent = "已载入预设，点击“立即应用”后生效。";
+}
+
+function modelFormPayload() {
+  const presetName = $("#model-preset").value;
+  const preset = modelPresets[presetName] || modelPresets.custom;
+  return {
+    provider: preset.provider,
+    base_url: $("#model-base-url").value.trim(),
+    model: $("#model-name").value.trim(),
+    api_key: $("#model-api-key").value.trim(),
+    api_format: $("#model-api-format").value,
+    context_tokens: Number($("#model-context-tokens").value),
+    max_tokens: Number($("#model-max-tokens").value),
+    remember_api_key: $("#model-remember-key").checked,
+  };
+}
+
+function openModelDialog() {
+  fillModelForm(state.workspace?.model || {});
+  $("#model-progress").textContent = "";
+  $("#model-dialog").showModal();
+  $("#model-preset").focus();
+}
+
+async function testModelConnection() {
+  const button = $("#model-test");
+  button.disabled = true;
+  $("#model-submit").disabled = true;
+  $("#model-progress").textContent = "正在发送最小连接测试…";
+  try {
+    const result = await api("/api/model/test", {
+      method: "POST",
+      body: JSON.stringify(modelFormPayload()),
+    });
+    $("#model-progress").textContent = `连接成功 · ${result.model} · ${formatNumber(result.latency_ms)} ms`;
+  } catch (error) {
+    $("#model-progress").textContent = error.message;
+  } finally {
+    button.disabled = false;
+    $("#model-submit").disabled = false;
+  }
+}
+
+function toggleModelKeyVisibility() {
+  const input = $("#model-api-key");
+  const button = $("#model-key-toggle");
+  const visible = input.type === "text";
+  input.type = visible ? "password" : "text";
+  button.textContent = visible ? "显示" : "隐藏";
+  button.setAttribute("aria-pressed", String(!visible));
 }
 
 async function initializeProject(event) {
@@ -677,11 +1089,47 @@ async function initializeProject(event) {
     renderWorkspace();
     $("#project-dialog").close();
     showToast("小说工作区已创建");
+    await guideAfterProjectReady(true);
   } catch (error) {
     $("#project-progress").textContent = error.message;
   } finally {
     submit.disabled = false;
   }
+}
+
+async function guideAfterProjectReady(isNewProject = false) {
+  const model = state.workspace?.model || {};
+  if (!model.configured) {
+    openModelDialog();
+    showToast(isNewProject ? "项目已创建，请先配置模型" : "请先配置模型");
+    return;
+  }
+  const items = normalizeNextActions(
+    state.workspace?.snapshot?.next_action_items || state.workspace?.snapshot?.next_actions || [],
+  );
+  const first = items[0];
+  if (first && (first.studio_action === "open_goethe" || !first.studio_action)) {
+    setView("agents");
+    chooseAgent("goethe");
+    if (first.seed) {
+      $("#chat-input").value = first.seed;
+    }
+    showToast(isNewProject ? "已打开 Goethe，从核心冲突开始规划" : "已打开 Goethe");
+    return;
+  }
+  if (first) {
+    runNextAction(first);
+    return;
+  }
+  setView("dashboard");
+}
+
+function openProjectDialog() {
+  $("#project-progress").textContent = "";
+  $("#open-project-progress").textContent = "";
+  renderRecentProjects();
+  $("#project-dialog").showModal();
+  $("#open-project-path").focus();
 }
 
 async function openProject(event) {
@@ -708,6 +1156,11 @@ async function openProject(event) {
   }
 }
 
+async function openRecentProject(projectPath) {
+  $("#open-project-path").value = projectPath;
+  await openProject(new Event("submit", { cancelable: true }));
+}
+
 function renderRecentProjects() {
   const root = $("#recent-projects");
   root.replaceChildren();
@@ -722,7 +1175,7 @@ function renderRecentProjects() {
     path.textContent = project.path;
     button.append(title, path);
     button.addEventListener("click", () => {
-      $("#open-project-path").value = project.path;
+      openRecentProject(project.path);
     });
     root.append(button);
   });
@@ -916,20 +1369,36 @@ async function submitChat(event) {
   const input = $("#chat-input");
   const message = input.value.trim();
   if (!message) return;
+  const sessionId = activeAgentSessionId();
   appendChatMessage("user", "你", message);
   input.value = "";
   $("#chat-submit").disabled = true;
   $("#chat-status").textContent = `${state.agent === "goethe" ? "Goethe" : "Dante"} 正在读取项目并思考…`;
+  const runId = startAgentActivity(state.agent, message);
   try {
     const payload = await api("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ agent: state.agent, message }),
+      body: JSON.stringify({
+        agent: state.agent,
+        session_id: sessionId,
+        run_id: runId,
+        message,
+      }),
     });
-    appendChatMessage("assistant", state.agent === "goethe" ? "Goethe" : "Dante", payload.content || "本轮已执行完成。");
+    state.agentSessionId[state.agent] = payload.session_id || sessionId;
+    appendChatMessage(
+      "assistant",
+      state.agent === "goethe" ? "Goethe" : "Dante",
+      payload.content || "本轮已执行完成。",
+      payload.content_html || "",
+    );
     state.workspace = payload.workspace;
     renderWorkspace();
+    await loadAgentSurface(state.agent, activeAgentSessionId());
+    finishAgentActivity("complete");
   } catch (error) {
     appendChatMessage("assistant error", "系统", error.message);
+    finishAgentActivity("error", error.message);
   } finally {
     $("#chat-submit").disabled = false;
     $("#chat-status").textContent = "";
@@ -937,16 +1406,149 @@ async function submitChat(event) {
   }
 }
 
-function appendChatMessage(role, author, content) {
+function appendChatMessage(role, author, content, renderedHtml = "") {
   const item = document.createElement("article");
   item.className = `chat-message ${role}`;
   const name = document.createElement("strong");
   name.textContent = author;
-  const body = document.createElement("p");
-  body.textContent = content;
+  const body = document.createElement(renderedHtml ? "div" : "p");
+  if (renderedHtml) {
+    body.className = "chat-markdown";
+    body.innerHTML = renderedHtml;
+  } else {
+    body.textContent = content;
+  }
   item.append(name, body);
   $("#chat-log").append(item);
   item.scrollIntoView({ block: "end", behavior: "smooth" });
+}
+
+function startAgentActivity(agent, message) {
+  const root = $("#agent-activity");
+  if (!root) return "";
+  if (state.agentActivity.hideTimer) {
+    clearTimeout(state.agentActivity.hideTimer);
+    state.agentActivity.hideTimer = null;
+  }
+  if (state.agentActivity.timer) clearInterval(state.agentActivity.timer);
+  state.agentActivity.startedAt = Date.now();
+  state.agentActivity.stepIndex = 0;
+  state.agentActivity.agentLabel = agent === "goethe" ? "Goethe" : "Dante";
+  state.agentActivity.baseNote = summarizeAgentActivityMessage(message);
+  state.agentActivity.runId = createAgentRunId();
+  state.agentActivity.polling = false;
+  state.agentActivity.serverStepIndex = null;
+  state.agentActivity.serverTitle = `${state.agentActivity.agentLabel} 正在读取项目`;
+  state.agentActivity.serverNote = "正在恢复会话、作品状态和本轮上下文。";
+  root.hidden = false;
+  root.classList.remove("complete", "error", "long-running", "possibly-stuck");
+  $("#agent-activity-title").textContent = `${state.agentActivity.agentLabel} 正在工作`;
+  $("#agent-activity-note").textContent = state.agentActivity.baseNote;
+  if (state.inspectorCollapsed) toggleInspectorCollapsed(false);
+  updateAgentActivity();
+  state.agentActivity.timer = setInterval(() => {
+    updateAgentActivity();
+    pollAgentActivity();
+  }, 1000);
+  return state.agentActivity.runId;
+}
+
+function updateAgentActivity() {
+  const elapsed = Math.max(0, Math.floor((Date.now() - state.agentActivity.startedAt) / 1000));
+  const stepIndex = Number.isInteger(state.agentActivity.serverStepIndex)
+    ? Math.min(4, state.agentActivity.serverStepIndex)
+    : Math.min(3, Math.floor(elapsed / 6));
+  state.agentActivity.stepIndex = stepIndex;
+  const root = $("#agent-activity");
+  const longRunning = elapsed >= 5 * 60;
+  const possiblyStuck = elapsed >= 15 * 60;
+  root.classList.toggle("long-running", longRunning && !possiblyStuck);
+  root.classList.toggle("possibly-stuck", possiblyStuck);
+  if (possiblyStuck) {
+    $("#agent-activity-title").textContent = `${state.agentActivity.agentLabel} 可能异常`;
+    $("#agent-activity-note").textContent = `${state.agentActivity.serverNote || "后台没有返回新状态。"} 已运行超过 15 分钟，请查看 debug 日志。`;
+  } else if (longRunning) {
+    $("#agent-activity-title").textContent = `${state.agentActivity.agentLabel} 耗时较久`;
+    $("#agent-activity-note").textContent = `${state.agentActivity.serverNote || "正在等待后台返回。"} 已运行超过 5 分钟。`;
+  } else {
+    $("#agent-activity-title").textContent = state.agentActivity.serverTitle
+      || `${state.agentActivity.agentLabel} 正在工作`;
+    $("#agent-activity-note").textContent = state.agentActivity.serverNote
+      || state.agentActivity.baseNote;
+  }
+  $("#agent-activity-elapsed").textContent = formatDuration(elapsed);
+  $$("#agent-activity-steps li").forEach((item, index) => {
+    item.classList.toggle("done", index < stepIndex);
+    item.classList.toggle("active", stepIndex < 4 && index === stepIndex);
+  });
+}
+
+async function pollAgentActivity() {
+  const runId = state.agentActivity.runId;
+  if (!runId || state.agentActivity.polling) return;
+  state.agentActivity.polling = true;
+  try {
+    const payload = await api(`/api/agent/activity?run_id=${encodeURIComponent(runId)}`);
+    if (payload.run_id !== state.agentActivity.runId) return;
+    state.agentActivity.serverStepIndex = Number(payload.step_index);
+    state.agentActivity.serverTitle = payload.title || "";
+    state.agentActivity.serverNote = payload.note || "";
+    updateAgentActivity();
+  } catch (error) {
+    if (error.status !== 404) {
+      state.agentActivity.serverNote = `活动状态读取失败：${error.message}`;
+    }
+  } finally {
+    state.agentActivity.polling = false;
+  }
+}
+
+function createAgentRunId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function finishAgentActivity(status, message = "") {
+  const root = $("#agent-activity");
+  if (!root) return;
+  if (state.agentActivity.timer) {
+    clearInterval(state.agentActivity.timer);
+    state.agentActivity.timer = null;
+  }
+  state.agentActivity.polling = false;
+  const complete = status === "complete";
+  root.classList.toggle("complete", complete);
+  root.classList.toggle("error", !complete);
+  $("#agent-activity-title").textContent = complete ? "AI 本轮已完成" : "AI 本轮中断";
+  $("#agent-activity-note").textContent = complete
+    ? "回复已写入当前会话历史。"
+    : (message || "请求未完成，请检查模型连接或稍后重试。");
+  $("#agent-activity-elapsed").textContent = formatDuration(
+    Math.max(0, Math.floor((Date.now() - state.agentActivity.startedAt) / 1000)),
+  );
+  $$("#agent-activity-steps li").forEach((item) => {
+    item.classList.toggle("done", complete);
+    item.classList.remove("active");
+  });
+  state.agentActivity.hideTimer = setTimeout(() => {
+    root.hidden = true;
+    root.classList.remove("complete", "error", "long-running", "possibly-stuck");
+  }, complete ? 2200 : 5200);
+}
+
+function summarizeAgentActivityMessage(message) {
+  const compact = String(message || "").replace(/\s+/g, " ").trim();
+  if (!compact) return "保持此页打开，完成后会自动写入当前会话。";
+  return compact.length > 58
+    ? `本轮目标：${compact.slice(0, 58)}...`
+    : `本轮目标：${compact}`;
+}
+
+function formatDuration(seconds) {
+  const safe = Math.max(0, Number(seconds) || 0);
+  const minutes = Math.floor(safe / 60);
+  const rest = safe % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
 }
 
 function chooseAgent(agent) {
@@ -954,8 +1556,241 @@ function chooseAgent(agent) {
   $$('[data-agent]').forEach((button) => button.classList.toggle("active", button.dataset.agent === agent));
   $("#chat-submit").textContent = `发送给 ${agent === "goethe" ? "Goethe" : "Dante"}`;
   $("#chat-input").placeholder = agent === "goethe"
-    ? "例如：检查现有资产，帮我把第一篇推进到可写状态。"
+    ? "例如：我想写一本……先帮我收敛题材、冲突和主角。"
     : "例如：写下一章，控制在 3000 字，保持当前创作罗盘。";
+  loadAgentSurface(agent, activeAgentSessionId(agent));
+}
+
+function emptyDocumentTip(group) {
+  if (group === "chapters") {
+    return "尚无正文。资产就绪后打开 Dante，从第一章开始写。";
+  }
+  if (group === "characters") {
+    return "尚无人物。在 Goethe 说「创建主角…」，或点新建资产。";
+  }
+  if (group === "story") {
+    return "故事资产仍是模板。打开 Goethe 先聊作者意图与背景。";
+  }
+  if (group === "outline") {
+    return "大纲仍是模板。找 Goethe 生成首版可写范围大纲。";
+  }
+  if (group === "world") {
+    return "暂无世界文档。可先写人物与大纲，再补地点/组织设定。";
+  }
+  return "暂无文档";
+}
+
+function agentEmptyGuidance(agent) {
+  const readiness = state.workspace?.snapshot?.readiness || {};
+  const missing = Object.entries(readinessLabels)
+    .filter(([key]) => !readiness[key])
+    .map(([, label]) => label);
+  const items = normalizeNextActions(
+    state.workspace?.snapshot?.next_action_items || state.workspace?.snapshot?.next_actions || [],
+  );
+  const seed = items[0]?.seed || "";
+  if (agent === "goethe") {
+    const gap = missing.length ? `当前缺口：${missing.join("、")}。` : "主要资产已就绪，可检查后交接 Dante。";
+    return [
+      "Goethe 负责把脑洞收敛成可写资产。",
+      gap,
+      "建议顺序：书名题材 → 一句话冲突 → 风格禁忌 → 背景人物大纲 → 交接 Dante。",
+      seed ? `可以直接发送：${seed}` : "直接描述你的想法即可开始。",
+    ].join("\n");
+  }
+  const writingReady = ["author_intent", "background", "characters", "outline"]
+    .every((key) => readiness[key]);
+  if (!writingReady) {
+    return [
+      "Dante 负责持续写正文，但当前写作资产尚未就绪。",
+      missing.length ? `缺口：${missing.join("、")}。` : "",
+      "请先切换到 Goethe 补齐，再回来预检并写章。",
+    ].filter(Boolean).join("\n");
+  }
+  return [
+    "Dante 可以基于已确认大纲推进正文。",
+    "建议：先定位章纲，再预检、写作、审查与状态结算。",
+    seed || "例如：按当前大纲写下一章。",
+  ].join("\n");
+}
+
+function activeAgentSessionId(agent = state.agent) {
+  return state.agentSessionId[agent] || "default";
+}
+
+async function loadAgentSurface(agent, sessionId = activeAgentSessionId(agent)) {
+  $("#agent-history-title").textContent = `${agent === "goethe" ? "Goethe" : "Dante"} 历史对话`;
+  $("#agent-history-status").textContent = "正在恢复…";
+  $("#agent-tools-summary").textContent = `${agent === "goethe" ? "Goethe" : "Dante"} Tools · 载入中`;
+  $("#agent-tools-list").textContent = "";
+  try {
+    const payload = await api(`/api/agents?agent=${encodeURIComponent(agent)}&session_id=${encodeURIComponent(sessionId)}&limit=80`);
+    state.agentSessionId[payload.agent] = payload.active_session_id || sessionId || "default";
+    state.agentSessions[payload.agent] = payload.sessions || [];
+    renderAgentSessions(payload.agent, state.agentSessions[payload.agent], state.agentSessionId[payload.agent]);
+    renderAgentTools(payload.agent, payload.tools || []);
+    renderAgentHistory(payload.agent, payload.history || {}, state.agentSessionId[payload.agent]);
+  } catch (error) {
+    $("#agent-history-status").textContent = error.message;
+    $("#agent-tools-summary").textContent = `${agent === "goethe" ? "Goethe" : "Dante"} Tools · 载入失败`;
+  }
+}
+
+async function createAgentSession() {
+  const button = $("#agent-session-new");
+  button.disabled = true;
+  $("#agent-history-status").textContent = "正在创建新会话…";
+  try {
+    const payload = await api("/api/agent/session", {
+      method: "POST",
+      body: JSON.stringify({ agent: state.agent }),
+    });
+    state.agentSessionId[payload.agent] = payload.active_session_id || "default";
+    state.agentSessions[payload.agent] = payload.sessions || [];
+    renderAgentSessions(payload.agent, state.agentSessions[payload.agent], state.agentSessionId[payload.agent]);
+    renderAgentTools(payload.agent, payload.tools || []);
+    renderAgentHistory(payload.agent, payload.history || {}, state.agentSessionId[payload.agent]);
+    $("#chat-input").focus();
+  } catch (error) {
+    $("#agent-history-status").textContent = error.message;
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function deleteAgentSession() {
+  const sessionId = activeAgentSessionId();
+  if (!sessionId || sessionId === "default") {
+    showToast("默认会话不能删除", true);
+    return;
+  }
+  const session = (state.agentSessions[state.agent] || []).find((item) => item.id === sessionId);
+  const title = session?.title || sessionId;
+  const agentLabel = state.agent === "goethe" ? "Goethe" : "Dante";
+  const confirmed = window.confirm(`删除 ${agentLabel} 会话「${title}」？这只会删除聊天记录，不会删除小说资产。`);
+  if (!confirmed) return;
+  const button = $("#agent-session-delete");
+  button.disabled = true;
+  $("#agent-history-status").textContent = "正在删除会话…";
+  try {
+    const payload = await api("/api/agent/session/delete", {
+      method: "POST",
+      body: JSON.stringify({ agent: state.agent, session_id: sessionId }),
+    });
+    state.agentSessionId[payload.agent] = payload.active_session_id || "default";
+    state.agentSessions[payload.agent] = payload.sessions || [];
+    renderAgentSessions(payload.agent, state.agentSessions[payload.agent], state.agentSessionId[payload.agent]);
+    renderAgentTools(payload.agent, payload.tools || []);
+    renderAgentHistory(payload.agent, payload.history || {}, state.agentSessionId[payload.agent]);
+    showToast("会话记录已删除");
+    $("#chat-input").focus();
+  } catch (error) {
+    $("#agent-history-status").textContent = error.message;
+    showToast(error.message, true);
+  } finally {
+    updateAgentSessionDeleteButton();
+  }
+}
+
+function switchAgentSession(agent, sessionId) {
+  if (!sessionId || sessionId === activeAgentSessionId(agent)) return;
+  state.agentSessionId[agent] = sessionId;
+  loadAgentSurface(agent, sessionId);
+}
+
+function updateAgentSessionDeleteButton() {
+  const button = $("#agent-session-delete");
+  if (!button) return;
+  const sessionId = activeAgentSessionId();
+  const canDelete = Boolean(sessionId && sessionId !== "default");
+  button.disabled = !canDelete;
+  button.title = canDelete ? "删除当前会话记录" : "默认会话不能删除";
+}
+
+function renderAgentSessions(agent, sessions, activeSessionId) {
+  const root = $("#agent-session-list");
+  root.replaceChildren();
+  (sessions || []).forEach((session) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "agent-session-item";
+    item.dataset.sessionId = session.id;
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(session.id === activeSessionId));
+    item.classList.toggle("active", session.id === activeSessionId);
+    const title = document.createElement("strong");
+    title.textContent = session.title || (session.is_default ? "默认会话" : "新会话");
+    const meta = document.createElement("span");
+    meta.textContent = `${Number(session.messages || 0)} 条 · ${formatAgentSessionTime(session.updated_at)}`;
+    const preview = document.createElement("small");
+    preview.textContent = session.preview || session.transcript_path || "";
+    item.append(title, meta, preview);
+    item.addEventListener("click", () => switchAgentSession(agent, session.id));
+    root.append(item);
+  });
+  updateAgentSessionDeleteButton();
+  if (!root.children.length) {
+    const empty = document.createElement("p");
+    empty.className = "form-status";
+    empty.textContent = "暂无会话";
+    root.append(empty);
+  }
+}
+
+function formatAgentSessionTime(value) {
+  if (!value) return "未开始";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value).slice(0, 16);
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(parsed);
+}
+
+function renderAgentTools(agent, tools) {
+  const label = agent === "goethe" ? "Goethe" : "Dante";
+  $("#agent-tools-summary").textContent = `${label} Tools · ${tools.length}`;
+  const root = $("#agent-tools-list");
+  root.replaceChildren();
+  tools.forEach((tool) => {
+    const item = document.createElement("article");
+    item.className = "agent-tool";
+    const name = document.createElement("strong");
+    name.textContent = tool.name;
+    const kind = document.createElement("span");
+    kind.textContent = tool.kind;
+    const description = document.createElement("p");
+    description.textContent = tool.description || "";
+    item.append(name, kind, description);
+    root.append(item);
+  });
+  if (!tools.length) root.textContent = "暂无工具";
+}
+
+function renderAgentHistory(agent, history, sessionId = "default") {
+  const messages = history.messages || [];
+  const label = agent === "goethe" ? "Goethe" : "Dante";
+  const sessionName = sessionId === "default" ? "默认会话" : "当前会话";
+  $("#agent-history-title").textContent = `${label} 历史对话`;
+  $("#agent-history-status").textContent = messages.length
+    ? `${sessionName} · 显示 ${history.shown || messages.length} / ${history.total || messages.length}`
+    : `${sessionName} · 暂无历史`;
+  $("#chat-log").replaceChildren();
+  if (!messages.length) {
+    appendChatMessage("assistant", "OpenWrite", agentEmptyGuidance(agent));
+    return;
+  }
+  messages.forEach((message) => {
+    appendChatMessage(
+      message.role,
+      message.role === "user" ? "你" : (agent === "goethe" ? "Goethe" : "Dante"),
+      message.content,
+      message.content_html || "",
+    );
+  });
 }
 
 async function loadContinuity() {
@@ -1017,11 +1852,27 @@ function renderRelationshipGraph(graph) {
   const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
   const edges = Array.isArray(graph.edges) ? graph.edges : [];
   const filter = $("#relationship-filter").value;
-  const visibleNodes = filter === "all" ? nodes : nodes.filter((node) => node.kind === filter);
+  const query = normalizeRelationshipSearch($("#relationship-search").value);
+  const typedNodes = filter === "all" ? nodes : nodes.filter((node) => node.kind === filter);
+  const typedIds = new Set(typedNodes.map((node) => node.id));
+  const typedEdges = edges.filter((edge) => typedIds.has(edge.source) && typedIds.has(edge.target));
+  const matchIds = query ? findRelationshipMatches(typedNodes, typedEdges, query) : new Set();
+  const contextIds = new Set(matchIds);
+  if (query) {
+    typedEdges.forEach((edge) => {
+      if (matchIds.has(edge.source) || matchIds.has(edge.target)) {
+        contextIds.add(edge.source);
+        contextIds.add(edge.target);
+      }
+    });
+  }
+  const visibleNodes = query ? typedNodes.filter((node) => contextIds.has(node.id)) : typedNodes;
   const ids = new Set(visibleNodes.map((node) => node.id));
-  const visibleEdges = edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target));
+  const visibleEdges = typedEdges.filter((edge) => ids.has(edge.source) && ids.has(edge.target));
   state.relationship.nodes = visibleNodes;
   state.relationship.edges = visibleEdges;
+  state.relationship.matchIds = matchIds;
+  state.relationship.query = query;
   if (!ids.has(state.relationship.selectedId)) state.relationship.selectedId = null;
 
   const totalNodes = Number(graph.totals?.nodes ?? nodes.length);
@@ -1031,9 +1882,16 @@ function renderRelationshipGraph(graph) {
     : "";
   $("#relationship-summary").textContent = `${totalNodes} 个节点 · ${totalEdges} 条关系${graph.truncated ? " · 已按性能上限截取" : ""}${relationHint}`;
   $("#relationship-visible-count").textContent = String(visibleNodes.length);
-  $("#relationship-empty").textContent = filter === "all"
-    ? "暂无实体节点。请先在人物或世界实体目录中建立 Markdown 真源。"
-    : "当前类型筛选下没有节点。";
+  $("#relationship-search-status").textContent = query
+    ? (matchIds.size
+      ? `搜索“${$("#relationship-search").value.trim()}”：匹配 ${matchIds.size} 个节点，已保留相邻上下文。按 Enter 定位第一个匹配。`
+      : `搜索“${$("#relationship-search").value.trim()}”：没有匹配节点。`)
+    : "输入名称、ID、摘要或关系文字开始搜索。";
+  $("#relationship-empty").textContent = query
+    ? "没有匹配节点。可以缩短关键词或切换节点类型。"
+    : (filter === "all"
+      ? "暂无实体节点。请先在人物或世界实体目录中建立 Markdown 真源。"
+      : "当前类型筛选下没有节点。");
   $("#relationship-empty").hidden = visibleNodes.length > 0;
 
   initializeRelationshipPositions(visibleNodes);
@@ -1047,6 +1905,41 @@ function renderRelationshipGraph(graph) {
   state.relationship.paused = reduceMotion;
   updateRelationshipPauseButton();
   if (!reduceMotion && visibleNodes.length > 1) startRelationshipSimulation();
+  if (query && matchIds.size) fitRelationshipGraph();
+}
+
+function normalizeRelationshipSearch(value) {
+  return String(value || "").trim().toLocaleLowerCase("zh-CN");
+}
+
+function findRelationshipMatches(nodes, edges, query) {
+  const matchIds = new Set();
+  const corpusById = new Map(nodes.map((node) => [node.id, [
+    node.id, node.label, node.type, node.status, node.description, node.source_path,
+  ].filter(Boolean).join(" ").toLocaleLowerCase("zh-CN")]));
+  nodes.forEach((node) => {
+    if (corpusById.get(node.id)?.includes(query)) matchIds.add(node.id);
+  });
+  edges.forEach((edge) => {
+    if (String(edge.label || "").toLocaleLowerCase("zh-CN").includes(query)) {
+      matchIds.add(edge.source);
+      matchIds.add(edge.target);
+    }
+  });
+  return matchIds;
+}
+
+function handleRelationshipSearchKeydown(event) {
+  if (event.key === "Escape" && event.currentTarget.value) {
+    event.preventDefault();
+    event.currentTarget.value = "";
+    renderRelationshipGraph(state.continuity?.relationship_graph || {});
+    return;
+  }
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  const firstMatch = state.relationship.matchIds.values().next().value;
+  if (firstMatch) focusRelationshipNode(firstMatch);
 }
 
 function initializeRelationshipPositions(nodes, reset = false) {
@@ -1071,6 +1964,11 @@ function buildRelationshipSvg(nodes, edges) {
     const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
     line.classList.add("relationship-edge");
     line.dataset.edgeId = edge.id;
+    const searchRelated = Boolean(state.relationship.query) && (
+      state.relationship.matchIds.has(edge.source) || state.relationship.matchIds.has(edge.target)
+    );
+    line.classList.toggle("search-related", searchRelated);
+    line.classList.toggle("search-context", Boolean(state.relationship.query) && !searchRelated);
     const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
     title.textContent = edge.label;
     line.append(title);
@@ -1079,6 +1977,11 @@ function buildRelationshipSvg(nodes, edges) {
   nodes.forEach((node) => {
     const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
     group.classList.add("relationship-node");
+    group.classList.toggle("search-match", state.relationship.matchIds.has(node.id));
+    group.classList.toggle(
+      "search-context",
+      Boolean(state.relationship.query) && !state.relationship.matchIds.has(node.id),
+    );
     group.dataset.nodeId = node.id;
     group.dataset.kind = node.kind;
     group.setAttribute("tabindex", "0");
@@ -1307,10 +2210,24 @@ function selectRelationshipNode(id) {
   renderRelationshipDetail();
 }
 
+function focusRelationshipNode(id) {
+  const point = state.relationship.positions.get(id);
+  if (!point) return;
+  selectRelationshipNode(id);
+  state.relationship.scale = Math.max(state.relationship.scale, 1.15);
+  state.relationship.tx = 480 - point.x * state.relationship.scale;
+  state.relationship.ty = 280 - point.y * state.relationship.scale;
+  applyRelationshipTransform();
+  $$(".relationship-node").find((node) => node.dataset.nodeId === id)?.focus();
+}
+
 function renderRelationshipNodeList() {
   const root = $("#relationship-node-list");
   root.replaceChildren();
-  state.relationship.nodes.forEach((node) => {
+  const nodes = [...state.relationship.nodes].sort((a, b) => (
+    Number(state.relationship.matchIds.has(b.id)) - Number(state.relationship.matchIds.has(a.id))
+  ));
+  nodes.forEach((node) => {
     const item = document.createElement("div");
     item.setAttribute("role", "listitem");
     const button = document.createElement("button");
@@ -1319,8 +2236,11 @@ function renderRelationshipNodeList() {
     const label = document.createElement("span"); label.textContent = node.label;
     const meta = document.createElement("small");
     const degree = state.relationship.edges.filter((edge) => edge.source === node.id || edge.target === node.id).length;
-    meta.textContent = `${relationshipKinds[node.kind] || "其他"} · ${degree} 条相邻关系`;
-    button.append(label, meta); button.addEventListener("click", () => selectRelationshipNode(node.id));
+    const searchPrefix = state.relationship.query
+      ? (state.relationship.matchIds.has(node.id) ? "匹配 · " : "相邻 · ")
+      : "";
+    meta.textContent = `${searchPrefix}${relationshipKinds[node.kind] || "其他"} · ${degree} 条相邻关系`;
+    button.append(label, meta); button.addEventListener("click", () => focusRelationshipNode(node.id));
     item.append(button); root.append(item);
   });
   if (!state.relationship.nodes.length) root.textContent = "没有可列出的节点";
@@ -1529,6 +2449,14 @@ function toggleInspector(open) {
   $("#inspector-toggle").setAttribute("aria-expanded", String(open));
 }
 
+function toggleInspectorCollapsed(collapsed) {
+  state.inspectorCollapsed = collapsed;
+  $("#app").classList.toggle("inspector-collapsed", collapsed);
+  $("#inspector-restore").hidden = !collapsed;
+  $("#inspector-collapse").setAttribute("aria-expanded", String(!collapsed));
+  localStorage.setItem("openwrite-inspector-collapsed", collapsed ? "1" : "0");
+}
+
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   $(".brand-logo").src = theme === "dark" ? "/brand/logo-dark.svg" : "/brand/logo.svg";
@@ -1553,9 +2481,14 @@ function bindEvents() {
     if (state.document) openDocument(state.document.path, false);
   });
   $("#focus-form").addEventListener("submit", saveFocus);
-  $("#model-state").addEventListener("click", () => $("#model-dialog").showModal());
+  $("#model-state").addEventListener("click", openModelDialog);
+  $("#model-settings-open").addEventListener("click", openModelDialog);
+  $("#project-settings-open").addEventListener("click", openProjectDialog);
   $("#model-close").addEventListener("click", () => $("#model-dialog").close());
   $("#model-cancel").addEventListener("click", () => $("#model-dialog").close());
+  $("#model-preset").addEventListener("change", applyModelPreset);
+  $("#model-test").addEventListener("click", testModelConnection);
+  $("#model-key-toggle").addEventListener("click", toggleModelKeyVisibility);
   $("#model-form").addEventListener("submit", saveModel);
   $("#project-form").addEventListener("submit", initializeProject);
   $("#open-project-form").addEventListener("submit", openProject);
@@ -1575,6 +2508,9 @@ function bindEvents() {
   $("#outline-node-add-child").addEventListener("click", () => openOutlineEditDialog("add_child", selectedOutlineNode()));
   $("#outline-node-add-after").addEventListener("click", () => openOutlineEditDialog("add_after", selectedOutlineNode()));
   $("#outline-node-delete").addEventListener("click", () => openOutlineEditDialog("delete", selectedOutlineNode()));
+  $("#outline-detail-title").addEventListener("keydown", handleOutlineDetailTitleKeydown);
+  $("#outline-detail-title").addEventListener("paste", handleOutlineDetailTitlePaste);
+  $("#outline-detail-title").addEventListener("blur", submitOutlineDetailTitle);
   $("#outline-edit-close").addEventListener("click", () => $("#outline-edit-dialog").close());
   $("#outline-edit-cancel").addEventListener("click", () => $("#outline-edit-dialog").close());
   $("#outline-edit-form").addEventListener("submit", submitOutlineEdit);
@@ -1588,8 +2524,13 @@ function bindEvents() {
   $("#create-document-form").addEventListener("submit", createDocument);
   $("#chat-form").addEventListener("submit", submitChat);
   $$('[data-agent]').forEach((button) => button.addEventListener("click", () => chooseAgent(button.dataset.agent)));
+  $("#agent-session-new").addEventListener("click", createAgentSession);
+  $("#agent-session-delete").addEventListener("click", deleteAgentSession);
+  $("#agent-history-refresh").addEventListener("click", () => loadAgentSurface(state.agent, activeAgentSessionId()));
   $("#continuity-refresh").addEventListener("click", loadContinuity);
   $("#relationship-filter").addEventListener("change", () => renderRelationshipGraph(state.continuity?.relationship_graph || {}));
+  $("#relationship-search").addEventListener("input", () => renderRelationshipGraph(state.continuity?.relationship_graph || {}));
+  $("#relationship-search").addEventListener("keydown", handleRelationshipSearchKeydown);
   $("#relationship-fit").addEventListener("click", fitRelationshipGraph);
   $("#relationship-layout").addEventListener("click", toggleRelationshipSimulation);
   $("#relationship-reset").addEventListener("click", resetRelationshipLayout);
@@ -1606,6 +2547,8 @@ function bindEvents() {
   });
   $("#inspector-toggle").addEventListener("click", () => toggleInspector(true));
   $("#inspector-close").addEventListener("click", () => toggleInspector(false));
+  $("#inspector-collapse").addEventListener("click", () => toggleInspectorCollapsed(true));
+  $("#inspector-restore").addEventListener("click", () => toggleInspectorCollapsed(false));
   $("#theme-toggle").addEventListener("click", () => {
     applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
   });
@@ -1643,6 +2586,7 @@ async function start() {
   const systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   applyTheme(storedTheme || (systemDark ? "dark" : "light"));
   bindEvents();
+  toggleInspectorCollapsed(localStorage.getItem("openwrite-inspector-collapsed") === "1");
   try {
     await loadWorkspace();
     await routeFromLocation();

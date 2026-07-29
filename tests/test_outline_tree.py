@@ -181,6 +181,30 @@ def test_outline_tree_can_rename_add_and_delete_one_local_subtree(tmp_path: Path
     assert "连续重编号 2 个" in deleted["message"]
 
 
+def test_outline_tree_can_update_node_content_without_touching_children(tmp_path: Path):
+    _write_outline(tmp_path)
+    outline_path = tmp_path / "src" / "outline.md"
+    structure = build_outline_structure(tmp_path)
+
+    edited = mutate_outline_structure(
+        tmp_path,
+        operation="update_summary",
+        revision=structure["revision"],
+        node_id="section_001",
+        summary="这一节改成直接在树上维护。\n- 保留两个子章",
+    )
+
+    assert "这一节让主角发现钟楼异动。" not in edited["content"]
+    assert "这一节改成直接在树上维护。" in edited["content"]
+    assert "- 保留两个子章" in edited["content"]
+    assert "#### 第一章：雨夜" in edited["content"]
+    assert "#### 第二章：少掉的十三秒" in edited["content"]
+    outline_path.write_text(edited["content"], encoding="utf-8")
+    section = build_outline_structure(tmp_path)["roots"][0]["children"][0]["children"][0]
+    assert section["content"] == "这一节改成直接在树上维护。\n- 保留两个子章"
+    assert "保留两个子章" in section["summary"]
+
+
 def test_deleting_chapter_fourteen_continuously_renumbers_later_chapters(
     tmp_path: Path,
 ):

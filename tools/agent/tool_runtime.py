@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
+import os
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -77,17 +79,32 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
                     "snapshots": len(snapshots),
                 }
             if operation == "get_context":
+                from tools.context_builder import ContextBuilder
+
                 chapter_id = str(args.get("chapter_id") or "next")
                 preview = NovelApplicationService(project_root).context_preview(
                     chapter_id
                 )
                 packet = cast(dict[str, Any], preview["packet"])
                 sections = packet.get("prompt_sections", {})
+                try:
+                    window_size = max(1, min(20, int(args.get("window_size") or 5)))
+                except (TypeError, ValueError):
+                    window_size = 5
+                generation_context = ContextBuilder(
+                    project_root, novel_id
+                ).build_generation_context(
+                    str(preview["chapter_id"]), window_size=window_size
+                )
                 return {
                     "chapter_id": preview["chapter_id"],
                     "target_words": preview["target_words"],
                     "chapter_goals": packet.get("chapter_goals", []),
                     "sections": list(sections) if isinstance(sections, dict) else [],
+                    "compression": {
+                        "message_budget": dict(generation_context.compression),
+                        "packet_documents": dict(packet.get("compression", {}) or {}),
+                    },
                     "context_packet": packet,
                 }
             if operation == "search_project":
@@ -99,6 +116,10 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
                     scope=str(args.get("scope") or "all"),
                     limit=int(args.get("limit") or 20),
                 )
+            if operation == "read_project_document":
+                return _read_project_document(project_root, novel_id, args)
+            if operation == "edit_project_document":
+                return _edit_project_document(project_root, novel_id, args)
             if operation == "list_chapters":
                 from tools.novel_workspace import list_chapters
 
@@ -166,6 +187,7 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
                         revision=str(args.get("revision") or ""),
                         node_id=str(args.get("node_id") or ""),
                         title=str(args.get("title") or ""),
+                        summary=str(args.get("summary") or ""),
                         kind=str(args.get("kind") or ""),
                     )
                 except OutlineEditError as exc:
@@ -280,6 +302,16 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
                     "total_entities": graph["totals"]["nodes"],
                     "total_relations": graph["totals"]["edges"],
                 }
+            if operation == "search_relation_targets":
+                from tools.world_query import search_relation_targets
+
+                return search_relation_targets(
+                    novel_id,
+                    str(args.get("query") or ""),
+                    project_root=project_root,
+                    entity_type=str(args.get("type") or args.get("entity_type") or ""),
+                    limit=int(args.get("limit") or 20),
+                )
             if operation == "edit_world_relation":
                 from tools.world_query import edit_world_relation
 
@@ -292,6 +324,20 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
                     action=str(args.get("action") or "upsert"),
                     base_revision=str(args.get("base_revision") or ""),
                     confirm=bool(args.get("confirm")),
+                )
+            if operation == "edit_world_relations":
+                from tools.world_query import edit_world_relations
+
+                return edit_world_relations(
+                    novel_id,
+                    args.get("relations") if isinstance(args.get("relations"), list) else [],
+                    project_root=project_root,
+                    confirm=bool(args.get("confirm")),
+                    base_revisions=(
+                        args.get("base_revisions")
+                        if isinstance(args.get("base_revisions"), dict)
+                        else {}
+                    ),
                 )
             if operation in {
                 "create_foreshadowing",
@@ -321,6 +367,150 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
             return _service_error(exc)
 
     return execute
+
+
+def _read_project_document(
+    project_root: Path, novel_id: str, args: dict[str, Any]
+) -> dict[str, Any]:
+    path_result = _resolve_project_document(project_root, novel_id, args)
+    if isinstance(path_result, dict):
+        return path_result
+    path, relative = path_result
+    content = path.read_text(encoding="utf-8")
+    revision = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    try:
+        max_chars = max(1000, min(80000, int(args.get("max_chars") or 24000)))
+    except (TypeError, ValueError):
+        max_chars = 24000
+    truncated = len(content) > max_chars
+    return {
+        "ok": True,
+        "path": relative,
+        "revision": revision,
+        "content": content[:max_chars],
+        "truncated": truncated,
+        "size": len(content),
+    }
+
+
+def _edit_project_document(
+    project_root: Path, novel_id: str, args: dict[str, Any]
+) -> dict[str, Any]:
+    path_result = _resolve_project_document(project_root, novel_id, args)
+    if isinstance(path_result, dict):
+        return path_result
+    path, relative = path_result
+    edits = args.get("edits")
+    if not isinstance(edits, list) or not edits:
+        return {"ok": False, "error": "edits 不能为空"}
+    if len(edits) > 50:
+        return {"ok": False, "error": "单次最多编辑 50 个片段"}
+    original = path.read_text(encoding="utf-8")
+    revision = hashlib.sha256(original.encode("utf-8")).hexdigest()[:16]
+    revised = original
+    applied: list[dict[str, Any]] = []
+    for index, edit in enumerate(edits):
+        if not isinstance(edit, dict):
+            return {"ok": False, "error": f"第 {index + 1} 个修改不是对象"}
+        old_text = str(edit.get("old_text") or "")
+        new_text = str(edit.get("new_text") or "")
+        replace_all = bool(edit.get("replace_all"))
+        if not old_text:
+            return {"ok": False, "error": f"第 {index + 1} 个修改缺少 old_text"}
+        occurrences = revised.count(old_text)
+        if occurrences == 0:
+            return {
+                "ok": False,
+                "error": "old_text_not_found",
+                "message": f"第 {index + 1} 个 old_text 不存在，请重新读取文件。",
+                "revision": revision,
+            }
+        if occurrences > 1 and not replace_all:
+            return {
+                "ok": False,
+                "error": "ambiguous_old_text",
+                "message": f"第 {index + 1} 个 old_text 匹配到 {occurrences} 处。",
+                "revision": revision,
+            }
+        revised = revised.replace(old_text, new_text, -1 if replace_all else 1)
+        applied.append(
+            {
+                "index": index + 1,
+                "replacements": occurrences if replace_all else 1,
+                "replace_all": replace_all,
+            }
+        )
+    diff = "".join(
+        difflib.unified_diff(
+            original.splitlines(keepends=True),
+            revised.splitlines(keepends=True),
+            fromfile=f"a/{relative}",
+            tofile=f"b/{relative}",
+        )
+    )
+    payload = {
+        "ok": True,
+        "applied": False,
+        "changed": revised != original,
+        "path": relative,
+        "revision": revision,
+        "edit_count": len(applied),
+        "edits": applied,
+        "diff": diff,
+        "next_action": "确认后使用相同 path/edits/revision，并设置 confirm=true",
+    }
+    if not bool(args.get("confirm")) or revised == original:
+        return payload
+    if str(args.get("revision") or args.get("base_revision") or "").strip() != revision:
+        return {
+            **payload,
+            "ok": False,
+            "error": "document_revision_conflict",
+            "message": "文件已变化，请重新读取后确认。",
+        }
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        handle.write(revised)
+        temporary = Path(handle.name)
+    os.replace(temporary, path)
+    return {
+        **payload,
+        "applied": True,
+        "revision": hashlib.sha256(revised.encode("utf-8")).hexdigest()[:16],
+    }
+
+
+def _resolve_project_document(
+    project_root: Path, novel_id: str, args: dict[str, Any]
+) -> tuple[Path, str] | dict[str, Any]:
+    raw_path = str(args.get("path") or args.get("source_path") or "").strip()
+    if not raw_path:
+        return {"ok": False, "error": "缺少 path"}
+    novel_root = (project_root / "data" / "novels" / novel_id).resolve()
+    candidate = (novel_root / raw_path).resolve()
+    allowed_roots = [
+        (novel_root / "src").resolve(),
+        (novel_root / "data" / "manuscript").resolve(),
+        (novel_root / "data" / "foreshadowing").resolve(),
+    ]
+    if not any(candidate == root or root in candidate.parents for root in allowed_roots):
+        return {
+            "ok": False,
+            "error": "只能读取或修改小说 src、manuscript、foreshadowing 资产",
+        }
+    if not candidate.is_file():
+        return {"ok": False, "error": f"文件不存在: {raw_path}"}
+    try:
+        relative = candidate.relative_to(novel_root).as_posix()
+    except ValueError:
+        return {"ok": False, "error": "文件不在当前小说项目内"}
+    return candidate, relative
 
 
 def _chapter_text(project_root: Path, novel_id: str, chapter_id: str) -> str:
@@ -464,10 +654,21 @@ def _compress_section(
         if section_id
         else compressor.compress_arc(arc_id)
     )
+    compressed = getattr(
+        result,
+        "compressed_text",
+        getattr(result, "merged_summary", ""),
+    )
+    total_words = getattr(
+        result,
+        "word_count",
+        getattr(result, "total_word_count", 0),
+    )
+    ratio = (len(compressed) / total_words) if total_words else 0
     payload: dict[str, Any] = {
         "arc_id": arc_id,
-        "compressed": str(result.compressed_text or "")[:500],
-        "compression_ratio": result.compression_ratio,
+        "compressed": str(compressed or "")[:500],
+        "compression_ratio": ratio,
     }
     if section_id:
         payload["section_id"] = section_id
@@ -531,8 +732,14 @@ def _workflow(
         if state is None:
             return {"ok": False, "error": f"未找到工作流: {chapter_id}"}
         stage = str(args.get("stage_name") or "")
-        scheduler.advance_to(state, stage) if stage else scheduler.advance(state)
-        scheduler.save_workflow(state)
+        if stage:
+            scheduler.start_stage(state, stage)
+        else:
+            scheduler.complete_stage(
+                state,
+                state.current_stage,
+                message="advanced via agent tool",
+            )
         return {
             "chapter_id": state.chapter_id,
             "current_stage": state.current_stage,
@@ -545,11 +752,17 @@ def _workflow(
         return {
             "chapter_id": state.chapter_id,
             "current_stage": state.current_stage,
-            "stages": {stage.name: stage.to_dict() for stage in state.stage_records},
+            "stages": {stage.name: stage.to_dict() for stage in state.stages},
             "is_complete": scheduler.is_complete(state),
         }
-    active = scheduler.list_active()
-    complete = scheduler.list_complete()
+    active_states = scheduler.list_active_workflows()
+    active = [state.chapter_id for state in active_states]
+    complete = [
+        path.stem.removeprefix("wf_")
+        for path in sorted(scheduler.workflow_dir.glob("wf_*.yaml"))
+        if (state := scheduler.load_workflow(path.stem.removeprefix("wf_")))
+        and scheduler.is_complete(state)
+    ]
     return {"active": active, "complete": complete, "active_count": len(active)}
 
 
@@ -564,6 +777,8 @@ def build_tool_executors(project_root: Path) -> dict[str, ToolExecutor]:
         "get_status",
         "get_context",
         "search_project",
+        "read_project_document",
+        "edit_project_document",
         "list_chapters",
         "create_outline",
         "get_outline_structure",
@@ -577,7 +792,9 @@ def build_tool_executors(project_root: Path) -> dict[str, ToolExecutor]:
         "validate_foreshadowing",
         "query_world",
         "get_world_relations",
+        "search_relation_targets",
         "edit_world_relation",
+        "edit_world_relations",
         "get_workflow_status",
         "start_workflow",
         "advance_workflow",

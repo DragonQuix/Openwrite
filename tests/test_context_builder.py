@@ -462,9 +462,7 @@ class TestDynamicCompression:
         assert result.recent_text == "短文本"
 
     def test_truncate_recent_text(self, builder):
-        # GenerationContext.estimate_tokens 使用 len(text)/1.5 来估算
-        # 需要让 to_prompt_sections 的总文本量超 MAX_TOKENS 对应的字符数
-        # 让文本超过当前可配置上下文预算。
+        # 超限时先保留可用于连续性的精确尾部，而不是固定砍到 300 字。
         long_text = "字" * (builder.MAX_TOKENS * 2)
         context = GenerationContext(
             novel_id="test",
@@ -472,8 +470,9 @@ class TestDynamicCompression:
             recent_text=long_text,
         )
         result = builder._compress_if_needed(context)
-        # 压缩后 recent_text 应被截断到 300 字符
-        assert len(result.recent_text) <= 300
+        assert len(result.recent_text) <= 2000
+        assert result.compression["applied"] is True
+        assert result.estimate_tokens() <= builder.MAX_TOKENS
 
     def test_reduce_outline_window(self, builder):
         # 创建大量窗口节点
@@ -495,6 +494,90 @@ class TestDynamicCompression:
         result = builder._compress_if_needed(context)
         # 窗口应被缩减
         assert len(result.outline_window) <= max(3, len(nodes))
+
+    def test_level_one_compresses_old_memory_before_exact_recent_text(self, builder):
+        builder.MAX_TOKENS = 4000
+        context = GenerationContext(
+            novel_id="test",
+            chapter_id="ch_001",
+            chapter_summaries="旧记忆。" * 1200,
+            recent_text="刚刚发生的场景。" * 50,
+        )
+        recent = context.recent_text
+
+        result = builder._compress_if_needed(context)
+
+        assert result.compression["level"] == 1
+        assert result.recent_text == recent
+        assert len(result.chapter_summaries) < len(context.chapter_summaries)
+        assert result.estimate_tokens() <= builder.MAX_TOKENS
+
+    def test_outline_compression_is_centered_and_does_not_mutate_source_nodes(self, builder):
+        builder.MAX_TOKENS = 4000
+        nodes = [
+            OutlineNode(
+                node_id=f"ch_{index:03d}",
+                node_type=OutlineNodeType.CHAPTER,
+                title=f"第{index}章",
+                summary="本章发生关键转折。" * 120,
+            )
+            for index in range(1, 12)
+        ]
+        context = GenerationContext(
+            novel_id="test",
+            chapter_id="ch_006",
+            outline_window=nodes,
+            current_chapter=nodes[5],
+        )
+
+        result = builder._compress_if_needed(context)
+
+        kept_ids = [node.node_id for node in result.outline_window]
+        assert "ch_006" in kept_ids
+        assert kept_ids[0] < "ch_006" < kept_ids[-1]
+        assert result.estimate_tokens() <= builder.MAX_TOKENS
+        assert len(nodes[5].summary) > len(result.current_chapter.summary)
+
+    def test_hard_fit_is_a_real_invariant(self, builder):
+        builder.MAX_TOKENS = 1200
+        context = GenerationContext(
+            novel_id="test",
+            chapter_id="ch_001",
+            author_intent="必须守住人物选择。" * 500,
+            creative_focus="本章完成关系反转。" * 500,
+            recent_text="最近正文。" * 2000,
+            current_state="世界状态变化。" * 1000,
+            relationships="关系变化。" * 1000,
+            chapter_summaries="历史事件。" * 2000,
+        )
+
+        result = builder._compress_if_needed(context)
+
+        assert result.compression["level"] == 4
+        assert result.compression["final_estimated_tokens"] <= 1200
+        assert result.estimate_tokens() <= 1200
+        assert context.author_intent != result.author_intent
+
+    def test_no_compression_records_budget_decision(self, builder):
+        context = GenerationContext(recent_text="短文本")
+
+        result = builder._compress_if_needed(context)
+
+        assert result.compression == {
+            "strategy": "tiered-hierarchical-v2",
+            "applied": False,
+            "level": 0,
+            "budget_tokens": builder.MAX_TOKENS,
+            "original_estimated_tokens": result.compression["final_estimated_tokens"],
+            "final_estimated_tokens": result.compression["final_estimated_tokens"],
+            "actions": [],
+        }
+
+    def test_truth_files_count_toward_context_budget(self):
+        plain = GenerationContext(current_state="")
+        with_truth = GenerationContext(current_state="状态变化。" * 100)
+
+        assert with_truth.estimate_tokens() > plain.estimate_tokens()
 
 
 # ── Recent chapters loading ──────────────────────────────────

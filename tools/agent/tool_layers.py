@@ -73,6 +73,7 @@ def build_dante_tool_layers(project_root: Path) -> dict[str, object]:
         "generate_outline_draft": lambda args: adapter.generate_outline_draft(
             _read_text_arg(args, "request_text", "text", default="帮我生成一份四级大纲")
         ),
+        "confirm_outline_scope": lambda args: adapter.confirm_outline_scope(),
         "run_chapter_preflight": lambda args: (
             adapter.run_chapter_preflight(
                 _read_text_arg(args, "chapter_id", "chapter")

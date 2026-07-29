@@ -9,6 +9,7 @@ from tools.agent.tool_runtime import build_tool_executors
 from tools.agent.toolkits import (
     DANTE_ACTION_TOOLKIT,
     DANTE_DIRECT_TOOLKIT,
+    GOETHE_DIRECT_TOOLKIT,
     ORCHESTRATOR_TOOLKIT,
     WRITING_TOOLKIT,
 )
@@ -65,7 +66,16 @@ def test_agent_direct_tools_do_not_call_cli_private_functions(monkeypatch, tmp_p
 
     executors = build_tool_executors(tmp_path)
     assert executors["get_status"]({})["novel_id"] == "demo"
-    assert executors["get_context"]({"chapter_id": "ch_001"})["chapter_id"] == "ch_001"
+    context = executors["get_context"]({"chapter_id": "ch_001"})
+    assert context["chapter_id"] == "ch_001"
+    assert (
+        context["compression"]["message_budget"]["strategy"]
+        == "tiered-hierarchical-v2"
+    )
+    assert (
+        context["compression"]["packet_documents"]["strategy"]
+        == "hierarchical-budget-v1"
+    )
     assert executors["list_chapters"]({}) == {"chapters": []}
     assert "current_state" in executors["get_truth_files"]({})
     assert executors["query_world"]({})["count"] >= 0
@@ -92,8 +102,27 @@ def test_agent_direct_tools_do_not_call_cli_private_functions(monkeypatch, tmp_p
     assert edited["ok"] is True
     assert edited["applied"] is True
     assert edited["outline"]["roots"][0]["title"] == "第一卷：增量编辑"
-
     outline_path = tmp_path / "data" / "novels" / "demo" / "src" / "outline.md"
+    outline = edited["outline"]
+    summary_args = {
+        "operation": "update_summary",
+        "revision": outline["revision"],
+        "node_id": "section_001",
+        "summary": "这一节由 Agent 直接修改节点内容。",
+    }
+    preview = executors["edit_outline_structure"](summary_args)
+    assert preview["ok"] is True
+    assert preview["applied"] is False
+    assert "+这一节由 Agent 直接修改节点内容。" in preview["diff"]
+    edited_summary = executors["edit_outline_structure"](
+        {
+            **summary_args,
+            "confirm": True,
+        }
+    )
+    assert edited_summary["applied"] is True
+    assert "这一节由 Agent 直接修改节点内容。" in outline_path.read_text(encoding="utf-8")
+
     outline_path.write_text(
         "# 第一卷\n## 第一幕\n### 第一节\n"
         "#### 第14章：删除\n#### 第15章：补位\n#### 第16章：继续\n",
@@ -156,11 +185,16 @@ def test_dante_direct_toolkit_exposes_only_light_tools():
         "get_status",
         "get_context",
         "search_project",
+        "read_project_document",
+        "edit_project_document",
         "list_chapters",
         "get_truth_files",
+        "create_character",
         "query_world",
         "get_world_relations",
+        "search_relation_targets",
         "edit_world_relation",
+        "edit_world_relations",
         "get_outline_structure",
         "edit_outline_structure",
     }
@@ -168,11 +202,184 @@ def test_dante_direct_toolkit_exposes_only_light_tools():
     assert "review_chapter" not in DANTE_DIRECT_TOOLKIT
 
 
+def test_goethe_and_dante_can_persist_persona_documents(tmp_path: Path):
+    from tools.init_project import init_project
+
+    init_project(tmp_path, "demo")
+    goethe_layers = tool_layers_module.build_goethe_tool_layers(tmp_path)
+    dante_layers = tool_layers_module.build_dante_tool_layers(tmp_path)
+
+    assert "create_character" in GOETHE_DIRECT_TOOLKIT
+    assert "create_character" in DANTE_DIRECT_TOOLKIT
+    goethe_result = goethe_layers["direct_tool_executors"]["create_character"](
+        {"name": "苔青", "description": "负责保存城市失落时间的钟楼管理员。"}
+    )
+    dante_result = dante_layers["direct_tool_executors"]["create_character"](
+        {"name": "季砚", "description": "追踪匿名信来源的年轻记者。"}
+    )
+
+    assert goethe_result["ok"] is True
+    assert dante_result["ok"] is True
+    characters = tmp_path / "data" / "novels" / "demo" / "src" / "characters"
+    assert (characters / "苔青.md").exists()
+    assert (characters / "季砚.md").exists()
+
+
+def test_agent_direct_tools_can_read_edit_and_link_project_documents(
+    tmp_path: Path,
+):
+    from tools.init_project import init_project
+
+    init_project(tmp_path, "demo")
+    novel_root = tmp_path / "data" / "novels" / "demo"
+    characters = novel_root / "src" / "characters"
+    entities = novel_root / "src" / "world" / "entities"
+    characters.mkdir(parents=True, exist_ok=True)
+    entities.mkdir(parents=True, exist_ok=True)
+    hero = characters / "hero.md"
+    hero.write_text(
+        """+++
+id = "hero"
+name = "沈烛"
+role = "主角"
+summary = "旧动机：只想远离归墟。"
++++
+
+# 沈烛
+
+旧动机：只想远离归墟。
+""",
+        encoding="utf-8",
+    )
+    (entities / "birth_city.md").write_text(
+        """+++
+id = "birth_city"
+name = "幽都转轮府"
+type = "地点"
+summary = "沈烛的出身地点。"
++++
+
+# 幽都转轮府
+""",
+        encoding="utf-8",
+    )
+    (entities / "echo_ability.md").write_text(
+        """+++
+id = "echo_ability"
+name = "折界回响"
+type = "能力"
+summary = "沈烛在回响中逐渐掌握的感知能力。"
++++
+
+# 折界回响
+""",
+        encoding="utf-8",
+    )
+    executors = build_tool_executors(tmp_path)
+
+    read = executors["read_project_document"]({"path": "src/characters/hero.md"})
+    assert read["ok"] is True
+    assert read["revision"]
+    assert "旧动机" in read["content"]
+
+    edit_args = {
+        "path": "src/characters/hero.md",
+        "edits": [
+            {
+                "old_text": "旧动机：只想远离归墟。",
+                "new_text": "新动机：查清幽都转轮府与回响异动的关联。",
+                "replace_all": True,
+            }
+        ],
+    }
+    preview = executors["edit_project_document"](edit_args)
+    assert preview["ok"] is True
+    assert preview["applied"] is False
+    assert "+新动机：查清幽都转轮府与回响异动的关联。" in preview["diff"]
+    assert "旧动机：只想远离归墟。" in hero.read_text(encoding="utf-8")
+
+    applied = executors["edit_project_document"](
+        {**edit_args, "revision": preview["revision"], "confirm": True}
+    )
+    assert applied["ok"] is True
+    assert applied["applied"] is True
+    assert "新动机：查清幽都转轮府与回响异动的关联。" in hero.read_text(
+        encoding="utf-8"
+    )
+
+    candidates = executors["search_relation_targets"](
+        {"query": "沈烛 出身 能力", "limit": 10}
+    )
+    candidate_ids = {candidate["id"] for candidate in candidates["candidates"]}
+    assert {"hero", "birth_city", "echo_ability"}.issubset(candidate_ids)
+
+    relations = [
+        {
+            "source_id": "hero",
+            "target_id": "birth_city",
+            "description": "出身地点",
+        },
+        {
+            "source_id": "hero",
+            "target_id": "echo_ability",
+            "description": "能力设定",
+        },
+    ]
+    relation_preview = executors["edit_world_relations"]({"relations": relations})
+    assert relation_preview["ok"] is True
+    assert relation_preview["applied"] is False
+    assert 'target = "birth_city"' in relation_preview["diff"]
+    assert 'target = "echo_ability"' in relation_preview["diff"]
+
+    relation_applied = executors["edit_world_relations"](
+        {
+            "relations": relations,
+            "base_revisions": relation_preview["source_revisions"],
+            "confirm": True,
+        }
+    )
+    assert relation_applied["ok"] is True
+    assert relation_applied["applied"] is True
+    updated = hero.read_text(encoding="utf-8")
+    assert 'target = "birth_city"' in updated
+    assert 'target = "echo_ability"' in updated
+
+
+def test_agent_runtime_workflow_and_arc_compression_tools_use_current_apis(
+    tmp_path: Path,
+):
+    from tools.init_project import init_project
+
+    init_project(tmp_path, "demo")
+    executors = build_tool_executors(tmp_path)
+
+    compressed = executors["compress_section"]({"arc_id": "arc_001"})
+    assert compressed["arc_id"] == "arc_001"
+    assert "compressed" in compressed
+    assert "compression_ratio" in compressed
+
+    started = executors["start_workflow"]({"chapter_id": "ch_099"})
+    assert started["chapter_id"] == "ch_099"
+    assert started["current_stage"] == "context_assembly"
+
+    advanced = executors["advance_workflow"]({"chapter_id": "ch_099"})
+    assert advanced["chapter_id"] == "ch_099"
+    assert advanced["current_stage"] == "writing"
+
+    status = executors["get_workflow_status"]({"chapter_id": "ch_099"})
+    assert status["stages"]["context_assembly"]["status"] == "completed"
+    assert status["is_complete"] is False
+
+    listed = executors["get_workflow_status"]({})
+    assert "ch_099" in listed["active"]
+
+
 def test_dante_action_toolkit_exposes_high_level_actions():
     assert DANTE_ACTION_TOOLKIT == {
         "summarize_ideation",
         "confirm_ideation_summary",
         "generate_outline_draft",
+        "confirm_outline_scope",
         "run_chapter_preflight",
         "delegate_chapter_write",
         "delegate_chapter_review",

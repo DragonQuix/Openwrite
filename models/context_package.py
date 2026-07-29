@@ -11,6 +11,20 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, model_validator
 
 
+def estimate_text_tokens(text: str) -> int:
+    """Conservatively estimate tokens for mixed Chinese/Latin text.
+
+    Providers use different tokenizers, so OpenWrite deliberately avoids
+    pretending this is exact.  Chinese characters are budgeted more
+    conservatively than Latin text to reduce late provider-side overflow.
+    """
+    if not text:
+        return 0
+    chinese_chars = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+    other_chars = len(text) - chinese_chars
+    return int(chinese_chars * 1.5 + other_chars * 0.25)
+
+
 class ForeshadowingState(BaseModel):
     """伏笔状态快照"""
 
@@ -110,6 +124,10 @@ class GenerationContext(BaseModel):
     ledger: str = Field(default="", description="资源账本（真相文件）")
     relationships: str = Field(default="", description="角色关系与动态状态（真相文件）")
     chapter_summaries: str = Field(default="", description="章节摘要列表（真相文件）")
+    compression: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="本次发送前上下文压缩报告，不参与 prompt",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -139,11 +157,19 @@ class GenerationContext(BaseModel):
         return self.relationships
 
     def estimate_tokens(self) -> int:
-        """粗略估算总 token 数（中文约 1.5 字/token）"""
-        total_chars = 0
-        for section_text in self.to_prompt_sections().values():
-            total_chars += len(section_text)
-        return int(total_chars / 1.5)
+        """估算完整写作上下文，包括独立传递的真相文件。"""
+        total = estimate_text_tokens(self.to_prompt_context())
+        # These fields are passed to writer/reviewer separately rather than
+        # duplicated in ``to_prompt_sections``.  They still consume provider
+        # context and therefore must count against the same budget.
+        for truth_text in (
+            self.current_state,
+            self.foreshadowing_summary,
+            self.ledger,
+            self.relationships,
+        ):
+            total += estimate_text_tokens(truth_text)
+        return total
 
     def to_prompt_sections(self) -> Dict[str, str]:
         """转为有序的 prompt 段落字典"""

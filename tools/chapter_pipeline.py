@@ -24,10 +24,13 @@ def _load_config(project_root: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _chapter_number(chapter_id: str) -> int:
+def _chapter_number(chapter_id: Any) -> int:
+    text = str(chapter_id or "").strip()
+    if not text:
+        return 0
     try:
-        return int(chapter_id.rsplit("_", 1)[-1])
-    except (TypeError, ValueError):
+        return int(text.rsplit("_", 1)[-1])
+    except ValueError:
         return 0
 
 

@@ -100,6 +100,7 @@ class OpenWriteOrchestrator:
             "character_documents": self._build_character_documents(context),
             "concept_documents": self._build_concept_documents(context, prompt_sections),
             "prompt_sections": prompt_sections,
+            "compression": dict(getattr(context, "compression", {}) or {}),
         }
 
         self._write_context_packet_snapshot(chapter_id, packet)
@@ -167,6 +168,33 @@ class OpenWriteOrchestrator:
     def confirm_outline_draft(self) -> OrchestratorResult:
         self.state = self.state_store.load_or_create()
         return self._handle_outline_confirmation()
+
+    def confirm_outline_scope(self) -> OrchestratorResult:
+        self.state = self.state_store.load_or_create()
+        if self.state.pending_confirmation == "outline_scope":
+            return self._handle_outline_confirmation()
+        if (
+            self.state.stage
+            in {BookStage.DISCOVERY, BookStage.FOUNDATION, BookStage.ROLLING_OUTLINE}
+            and self.story_planning_store.outline_src_path.exists()
+            and not self.story_planning_store.outline_source_is_placeholder()
+        ):
+            self._sync_runtime_caches(sync_outline=True, sync_characters=False)
+            self.state.stage = BookStage.CHAPTER_PREFLIGHT
+            self.state.pending_confirmation = ""
+            self.state.blocking_reason = ""
+            self.state.last_agent_action = "confirmed_existing_outline_scope"
+            self.state_store.save(self.state)
+            return OrchestratorResult(
+                message="已确认当前 src/outline.md 可作为写作大纲。下一步进入章节预检。",
+                stage=self.state.stage,
+                blocked=False,
+                next_action="chapter_preflight",
+            )
+        return self._stage_blocked_result(
+            "当前没有可确认的大纲范围。请先生成或补全 src/outline.md。",
+            next_action="prepare_outline_document",
+        )
 
     def run_chapter_preflight(self, chapter_id: str) -> dict[str, Any]:
         return self.run_preflight(chapter_id)
@@ -1186,6 +1214,11 @@ class OpenWriteOrchestrator:
     def _ensure_ideation_summary_confirmation(self, *, blocked: bool) -> OrchestratorResult:
         ideation = self._read_text(self.story_planning_store.ideation_path).strip()
         if not ideation:
+            inferred_ideation = self._infer_ideation_from_confirmed_assets()
+            if inferred_ideation:
+                self.story_planning_store.append_ideation(inferred_ideation)
+                ideation = self._read_text(self.story_planning_store.ideation_path).strip()
+        if not ideation:
             return OrchestratorResult(
                 message="当前还没有可整理的想法记录。请先继续补充灵感和设定方向。",
                 stage=self.state.stage,
@@ -1218,6 +1251,48 @@ class OpenWriteOrchestrator:
             blocked=blocked,
             next_action="confirm_ideation_summary",
         )
+
+    def _infer_ideation_from_confirmed_assets(self) -> str:
+        """Create a seed ideation note from already-confirmed planning assets."""
+        sections: list[tuple[str, str]] = []
+        for title, kind in (
+            ("作者意图", "author_intent"),
+            ("故事背景", "background"),
+            ("基础设定", "foundation"),
+        ):
+            text = self._usable_planning_text(
+                self.story_planning_store.read_story_document(kind, max_chars=900)
+            )
+            if text:
+                sections.append((title, text))
+
+        outline = ""
+        if not self.story_planning_store.outline_source_is_placeholder():
+            outline = self._usable_planning_text(
+                self.story_planning_store.read_outline_source()[:1200]
+            )
+            if outline:
+                sections.append(("已确认大纲", outline))
+
+        characters = self.story_planning_store.list_character_documents()
+        if characters:
+            names = "、".join(item["title"] for item in characters[:8])
+            sections.append(("主要人物", names))
+
+        if len(sections) < 2:
+            return ""
+
+        parts = ["# 从已确认资产反推的灵感记录", ""]
+        for title, text in sections:
+            parts.extend([f"## {title}", "", text.strip(), ""])
+        return "\n".join(parts).strip()
+
+    @staticmethod
+    def _usable_planning_text(text: str) -> str:
+        cleaned = re.sub(r"<!--.*?-->", "", str(text or ""), flags=re.DOTALL)
+        cleaned = re.sub(r"待填写|待定义|TODO|TBD", "", cleaned, flags=re.IGNORECASE)
+        cleaned = cleaned.strip()
+        return cleaned if len(cleaned) >= 20 else ""
 
     def _current_story_title(self) -> str:
         outline_text = self._read_text(self.story_planning_store.outline_src_path)

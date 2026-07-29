@@ -3,14 +3,14 @@ from pathlib import Path
 import yaml
 
 from tools.agent.session_state import (
+    MAX_COMPRESSION_MARKERS,
+    MAX_RECENT_TURNS,
+    MAX_SESSION_BYTES,
+    MAX_WORKING_MEMORY_KEYS,
     CompressionMarker,
     DanteSessionState,
-    SessionTurn,
     SessionStateStore,
-    MAX_RECENT_TURNS,
-    MAX_COMPRESSION_MARKERS,
-    MAX_WORKING_MEMORY_KEYS,
-    MAX_SESSION_BYTES,
+    SessionTurn,
 )
 
 
@@ -42,10 +42,38 @@ def test_append_turn_archives_full_transcript_separately_from_rolling_state(
     store.append_turn("assistant", "这是完整回复。" * 100)
 
     assert store.transcript_path.name == "agent_session.jsonl"
-    records = [yaml.safe_load(line) for line in store.transcript_path.read_text(encoding="utf-8").splitlines()]
+    records = [
+        yaml.safe_load(line)
+        for line in store.transcript_path.read_text(encoding="utf-8").splitlines()
+    ]
     assert [record["role"] for record in records] == ["user", "assistant"]
     assert len(records[0]["content"]) > 256
     assert records[0]["session_id"] == "demo"
+
+
+def test_named_session_store_writes_isolated_state_and_transcript(tmp_path: Path):
+    store = SessionStateStore(tmp_path, "demo", session_id="dante-20260729-120000-a1b2c3")
+
+    state = store.load_or_create()
+    store.append_turn("user", "推进第一章")
+
+    assert state.session_id == "dante-20260729-120000-a1b2c3"
+    assert store.path.relative_to(tmp_path).as_posix().endswith(
+        "data/workflows/sessions/dante/dante-20260729-120000-a1b2c3.yaml"
+    )
+    assert store.transcript_path.name == "dante-20260729-120000-a1b2c3.jsonl"
+    default_transcript = (
+        tmp_path
+        / "data"
+        / "novels"
+        / "demo"
+        / "data"
+        / "workflows"
+        / "agent_session.jsonl"
+    )
+    assert not default_transcript.exists()
+    record = yaml.safe_load(store.transcript_path.read_text(encoding="utf-8"))
+    assert record["session_id"] == "dante-20260729-120000-a1b2c3"
 
 
 def test_save_compresses_old_turns_into_summary(tmp_path: Path):
@@ -1025,7 +1053,10 @@ def test_load_or_create_repairs_oversized_compression_marker_payload(tmp_path: P
     assert persisted_size <= MAX_SESSION_BYTES
     assert len(state.compression_markers) == 1
     assert len(state.compression_markers[0].compressed_at.encode("utf-8")) < MAX_SESSION_BYTES
-    assert len(reloaded["compression_markers"][0]["compressed_at"].encode("utf-8")) < MAX_SESSION_BYTES
+    assert (
+        len(reloaded["compression_markers"][0]["compressed_at"].encode("utf-8"))
+        < MAX_SESSION_BYTES
+    )
 
 
 def test_load_or_create_repairs_oversized_top_level_scalars(tmp_path: Path):

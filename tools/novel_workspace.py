@@ -62,6 +62,7 @@ class WorkspaceSnapshot:
     creative_focus: CreativeFocus
     readiness: dict[str, bool]
     next_actions: list[str]
+    next_action_items: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)
@@ -325,7 +326,8 @@ def build_workspace_snapshot(project_root: Path, config: dict[str, object]) -> W
         "outline": _outline_has_chapter(outline),
         "creative_focus": not focus.is_empty,
     }
-    next_actions = _next_actions(readiness, bool(chapters))
+    action_items = build_next_action_items(readiness, bool(chapters))
+    next_actions = [item["label"] for item in action_items]
     return WorkspaceSnapshot(
         novel_id=novel_id,
         title=title,
@@ -344,6 +346,7 @@ def build_workspace_snapshot(project_root: Path, config: dict[str, object]) -> W
         creative_focus=focus,
         readiness=readiness,
         next_actions=next_actions,
+        next_action_items=action_items,
     )
 
 
@@ -451,13 +454,132 @@ def _pending_foreshadowing_count(path: Path) -> int:
     )
 
 
-def _next_actions(readiness: dict[str, bool], has_chapters: bool) -> list[str]:
-    if not readiness["author_intent"] or not readiness["background"]:
-        return ["openwrite goethe", "先把核心承诺、背景和主角冲突聊清楚"]
-    if not readiness["characters"] or not readiness["outline"]:
-        return ["openwrite goethe", "补齐主要人物与当前可写范围大纲"]
-    if not readiness["creative_focus"]:
-        return ["openwrite focus set \"本阶段目标\"", "设定近期创作罗盘"]
+READINESS_LABELS = {
+    "author_intent": "作者意图",
+    "background": "故事背景",
+    "foundation": "基础设定",
+    "characters": "主要人物",
+    "outline": "可写大纲",
+    "creative_focus": "创作罗盘",
+}
+
+
+def build_next_action_items(
+    readiness: dict[str, bool], has_chapters: bool
+) -> list[dict[str, str]]:
+    if not readiness.get("author_intent") or not readiness.get("background"):
+        return [
+            {
+                "id": "goethe_intent",
+                "label": "打开 Goethe，先聊核心承诺、背景和主角冲突",
+                "cli": "openwrite goethe",
+                "studio_action": "open_goethe",
+                "seed": "我想写一本书。先帮我收敛书名、题材、一句话冲突和必须避免的套路。",
+            }
+        ]
+    if not readiness.get("characters") or not readiness.get("outline"):
+        return [
+            {
+                "id": "goethe_assets",
+                "label": "打开 Goethe，补齐主要人物与当前可写范围大纲",
+                "cli": "openwrite goethe",
+                "studio_action": "open_goethe",
+                "seed": "请基于已有设定补齐主要人物和当前可写范围大纲，先出草案再给我确认。",
+            }
+        ]
+    if not readiness.get("creative_focus"):
+        return [
+            {
+                "id": "set_focus",
+                "label": "设定近期创作罗盘",
+                "cli": 'openwrite focus set "本阶段目标"',
+                "studio_action": "open_focus",
+                "seed": "",
+            }
+        ]
     if has_chapters:
-        return ["openwrite dante", "继续下一章，写完后审查并结算状态"]
-    return ["openwrite dante", "从第一章开始进入写作—审查—结算闭环"]
+        return [
+            {
+                "id": "dante_continue",
+                "label": "打开 Dante，继续下一章并完成审查结算",
+                "cli": "openwrite dante",
+                "studio_action": "open_dante",
+                "seed": "请根据当前大纲推进下一章：先定位章纲，再预检、写作和审查。",
+            }
+        ]
+    return [
+        {
+            "id": "dante_start",
+            "label": "打开 Dante，从第一章进入写作—审查—结算闭环",
+            "cli": "openwrite dante",
+            "studio_action": "open_dante",
+            "seed": "资产已基本就绪。请从第一章开始：get_outline_structure → preflight → write。",
+        }
+    ]
+
+
+def _next_actions(readiness: dict[str, bool], has_chapters: bool) -> list[str]:
+    return [item["label"] for item in build_next_action_items(readiness, has_chapters)]
+
+
+def build_onboarding_checklist(
+    project_root: Path,
+    novel_id: str | None = None,
+    *,
+    config: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Shared readiness checklist for desk, Studio, and agent cold starts."""
+
+    project_root = Path(project_root)
+    if config is None:
+        config_path = project_root / "novel_config.yaml"
+        if config_path.exists():
+            try:
+                config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError):
+                config = {}
+        else:
+            config = {}
+    if novel_id:
+        config = {**config, "novel_id": novel_id}
+    if not config.get("novel_id"):
+        return {
+            "ready_to_write": False,
+            "missing": ["project"],
+            "missing_labels": ["小说项目"],
+            "readiness": {},
+            "next_action_items": [
+                {
+                    "id": "init_project",
+                    "label": "先创建小说项目",
+                    "cli": "openwrite init <novel_id>",
+                    "studio_action": "open_project_dialog",
+                    "seed": "",
+                }
+            ],
+            "suggested_first_message": "我想开一本新长篇，先帮我从题材和核心冲突聊起。",
+        }
+
+    snapshot = build_workspace_snapshot(project_root, config)
+    missing = [key for key, ready in snapshot.readiness.items() if not ready]
+    missing_labels = [READINESS_LABELS.get(key, key) for key in missing]
+    ready_to_write = all(
+        snapshot.readiness.get(key)
+        for key in ("author_intent", "background", "characters", "outline")
+    )
+    suggested = "我想开一本新长篇，先帮我从题材和核心冲突聊起。"
+    if snapshot.readiness.get("author_intent") and snapshot.readiness.get("background"):
+        if not snapshot.readiness.get("characters") or not snapshot.readiness.get("outline"):
+            suggested = "请继续补齐主要人物和当前可写范围大纲，先草案后确认。"
+        elif ready_to_write:
+            suggested = "资产差不多了，请检查能否交接 Dante，并告诉我第一章怎么开写。"
+    return {
+        "ready_to_write": ready_to_write,
+        "missing": missing,
+        "missing_labels": missing_labels,
+        "readiness": snapshot.readiness,
+        "next_action_items": snapshot.next_action_items,
+        "suggested_first_message": suggested,
+        "title": snapshot.title,
+        "novel_id": snapshot.novel_id,
+    }

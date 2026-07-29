@@ -131,4 +131,18 @@ def test_workspace_snapshot_surfaces_novel_readiness(tmp_path: Path):
         "outline": True,
         "creative_focus": True,
     }
-    assert snapshot.next_actions[0] == "openwrite dante"
+    assert "Dante" in snapshot.next_actions[0]
+    assert snapshot.next_action_items[0]["studio_action"] == "open_dante"
+    assert snapshot.next_action_items[0]["cli"] == "openwrite dante"
+
+
+def test_onboarding_checklist_for_empty_project(tmp_path: Path):
+    from tools.novel_workspace import build_onboarding_checklist
+
+    init_project(tmp_path, "demo", "雾城来信")
+    checklist = build_onboarding_checklist(tmp_path, "demo")
+
+    assert checklist["ready_to_write"] is False
+    assert "作者意图" in checklist["missing_labels"]
+    assert checklist["next_action_items"][0]["studio_action"] == "open_goethe"
+    assert "题材" in checklist["suggested_first_message"]

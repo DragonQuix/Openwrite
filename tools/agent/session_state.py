@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-import hashlib
-import json
-import tempfile
 from typing import Any, Literal
 
 import yaml
@@ -16,8 +17,8 @@ from .session_limits import (
     MAX_COMPRESSION_MARKERS,
     MAX_RECENT_TURNS,
     MAX_SESSION_BYTES,
-    MAX_SUMMARY_BYTES,
     MAX_STRUCTURAL_TEXT_BYTES,
+    MAX_SUMMARY_BYTES,
     MAX_TURN_CONTENT_BYTES,
     MAX_WORKING_MEMORY_KEYS,
 )
@@ -54,24 +55,33 @@ class DanteSessionState:
 
 
 class SessionStateStore:
-    def __init__(self, project_root: Path, novel_id: str):
+    def __init__(
+        self,
+        project_root: Path,
+        novel_id: str,
+        session_id: str | None = None,
+    ):
         self.project_root = Path(project_root).resolve()
         self.novel_id = novel_id
-        self.path = (
-            self.project_root
-            / "data"
-            / "novels"
-            / novel_id
-            / "data"
-            / "workflows"
-            / "agent_session.yaml"
+        self.session_id = (
+            self._normalize_identifier_scalar(session_id, self.novel_id)
+            if str(session_id or "").strip()
+            else self.novel_id
         )
-        self.transcript_path = self.path.with_name("agent_session.jsonl")
+        workflow_root = (
+            self.project_root / "data" / "novels" / novel_id / "data" / "workflows"
+        )
+        if str(session_id or "").strip():
+            session_stem = self._session_file_stem(self.session_id)
+            self.path = workflow_root / "sessions" / DEFAULT_ACTIVE_AGENT / f"{session_stem}.yaml"
+        else:
+            self.path = workflow_root / "agent_session.yaml"
+        self.transcript_path = self.path.with_suffix(".jsonl")
 
     def append_turn(self, role: str, content: str) -> None:
         """Archive the full turn; the rolling YAML state remains bounded."""
         record = {
-            "session_id": self.novel_id,
+            "session_id": self.session_id,
             "agent": DEFAULT_ACTIVE_AGENT,
             "role": str(role),
             "content": str(content),
@@ -132,7 +142,18 @@ class SessionStateStore:
         temp_path.replace(self.path)
 
     def _default_state(self) -> DanteSessionState:
-        return DanteSessionState(session_id=self.novel_id)
+        return DanteSessionState(session_id=self.session_id)
+
+    @staticmethod
+    def _session_file_stem(session_id: str) -> str:
+        raw = str(session_id or "").strip()
+        safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip(".-")
+        if not safe:
+            safe = "session"
+        if len(safe.encode("utf-8")) <= 80:
+            return safe
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+        return f"{safe[:56].rstrip('.-')}-{digest}"
 
     def _stamp_updated_at(self, state: DanteSessionState) -> None:
         state.updated_at = datetime.now().isoformat()
@@ -151,7 +172,10 @@ class SessionStateStore:
             drop_count = len(state.recent_turns) - MAX_RECENT_TURNS
             old_turns = state.recent_turns[:drop_count]
             kept_turns = state.recent_turns[drop_count:]
-            summary_block = "\n".join(self._render_turn(turn, MAX_TURN_CONTENT_BYTES) for turn in old_turns)
+            summary_block = "\n".join(
+                self._render_turn(turn, MAX_TURN_CONTENT_BYTES)
+                for turn in old_turns
+            )
             state.conversation_summary = self._append_summary(
                 state.conversation_summary, summary_block
             )
@@ -343,7 +367,7 @@ class SessionStateStore:
     def _to_dict(self, state: DanteSessionState) -> dict[str, Any]:
         data = asdict(state)
         data["session_id"] = self._normalize_identifier_scalar(
-            data["session_id"], self.novel_id
+            data["session_id"], self.session_id
         )
         data["active_agent"] = self._normalize_structural_scalar(
             data["active_agent"], DEFAULT_ACTIVE_AGENT
@@ -374,7 +398,7 @@ class SessionStateStore:
     def _from_dict(self, data: dict[str, Any]) -> DanteSessionState:
         return DanteSessionState(
             session_id=self._normalize_identifier_scalar(
-                data.get("session_id"), self.novel_id
+                data.get("session_id"), self.session_id
             ),
             active_agent=self._normalize_structural_scalar(
                 data.get("active_agent"), DEFAULT_ACTIVE_AGENT
@@ -415,7 +439,9 @@ class SessionStateStore:
             return {"value": self._sanitize_yaml_value(value)}
         normalized: dict[str, Any] = {}
         for key, item in value.items():
-            normalized[self._normalize_mapping_key(key, normalized)] = self._normalize_mapping_value(item)
+            normalized[self._normalize_mapping_key(key, normalized)] = (
+                self._normalize_mapping_value(item)
+            )
         return normalized
 
     def _normalize_mapping_value(self, value: Any) -> Any:
@@ -464,7 +490,7 @@ class SessionStateStore:
 
     def _normalize_state_for_persistence(self, state: DanteSessionState) -> None:
         state.session_id = self._normalize_identifier_scalar(
-            state.session_id, self.novel_id
+            state.session_id, self.session_id
         )
         state.active_agent = self._normalize_structural_scalar(
             state.active_agent, DEFAULT_ACTIVE_AGENT
@@ -551,7 +577,10 @@ class SessionStateStore:
             value = self._normalize_mapping(value)
         compacted: dict[str, Any] = {}
         for key, item in list(value.items())[-max_keys:]:
-            compacted[self._normalize_mapping_key(key, compacted)] = self._compact_value(item, budget)
+            compacted[self._normalize_mapping_key(key, compacted)] = self._compact_value(
+                item,
+                budget,
+            )
         return compacted
 
     def _compact_string_list(
@@ -598,7 +627,7 @@ class SessionStateStore:
 
         attempt = 0
         while True:
-            digest = hashlib.sha1(f"{raw}:{attempt}".encode("utf-8")).hexdigest()[:10]
+            digest = hashlib.sha1(f"{raw}:{attempt}".encode()).hexdigest()[:10]
             suffix = f"~{digest}"
             limit = MAX_STRUCTURAL_TEXT_BYTES - len(suffix.encode("utf-8"))
             prefix = self._truncate_text(raw, max(limit, 0), keep_tail=False)

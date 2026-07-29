@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .book_state import BookState, BookStateStore
+from .confirmation import guard_confirmable_executors
 from .react import OPENWRITE_TOOLS, ReActAgent, ToolDefinition
 from .toolkits import DANTE_DIRECT_TOOLKIT
 from .session_state import DanteSessionState, SessionStateStore, SessionTurn
@@ -20,12 +21,19 @@ DEFAULT_DANTE_SYSTEM_PROMPT = (
     "你是 OpenWrite 的 Dante，长期会话正文创作 Agent。"
     "你的默认职责是基于已确认的人物、设定和大纲持续推进正文写作、预检、审查与状态结算。"
     "当写作推进需要修正人物、设定或大纲时，你可以提出并执行必要回修，但不要把自己当成建书向导或一次性 wizard。"
+    "若作者意图、背景、人物或大纲明显未就绪，先明确告知用户应先回到 Goethe 补齐资产，不要硬写。"
     "优先保持对话连续性，并让一切回修都为正文推进服务。"
-    "修改人物或世界关系时，先用 edit_world_relation 且 confirm=false 预览 diff；"
-    "只有用户明确确认后，才能携带预览返回的 base_revision 并设置 confirm=true 写入。"
+    "修改人物或世界关系时，先用 search_relation_targets/get_world_relations 定位，"
+    "再用 edit_world_relation 或 edit_world_relations 且 confirm=false 预览 diff；"
+    "只有用户明确确认后，才能携带预览返回的 base_revision/source_revisions 并设置 confirm=true 写入。"
     "普通讨论、分析和未确认建议不得写入关系。"
+    "修改已有角色、故事资料、世界设定或正文时，先 read_project_document 读取 revision，"
+    "再 edit_project_document(confirm=false) 预览 diff；只有用户明确确认后才写入。"
     "写章前优先用 get_outline_structure 定位明确的章纲 ID、所属卷幕节与建议目标，"
     "不要仅按最大章节号盲目创建下一章。"
+    "如果状态显示 pending_confirmation=outline_scope，或阶段仍是 rolling_outline 但用户明确要求"
+    "“根据现在/当前大纲写下一章”、“就按这个大纲写”或等价表达，先调用 confirm_outline_scope，"
+    "再执行章节预检与写作。"
     "用户要求修改大纲时，先用 get_outline_structure 获取 revision，再用 edit_outline_structure(confirm=false) 预览；"
     "只有用户明确确认后才用相同 revision 和 confirm=true 写入；"
     "不要用 create_outline 重写整份大纲。"
@@ -57,6 +65,14 @@ _DANTE_ACTION_TOOL_DEFINITIONS = [
             },
             "required": ["request_text"],
         },
+    ),
+    ToolDefinition(
+        name="confirm_outline_scope",
+        description=(
+            "确认当前可写大纲范围可作为章节写作依据，并解除 outline_scope 阻塞。"
+            "仅在用户明确要求按当前/现有大纲继续写作或明确确认大纲时使用。"
+        ),
+        parameters={"type": "object", "properties": {}},
     ),
     ToolDefinition(
         name="run_chapter_preflight",
@@ -132,6 +148,7 @@ class DanteChatAgent:
         llm_client_factory: Callable[[], LLMClient] | None = None,
         tool_executors: dict[str, Callable[[dict[str, Any]], Any]] | None = None,
         action_executors: dict[str, Callable[[dict[str, Any]], Any]] | None = None,
+        activity_callback: Callable[[dict[str, Any]], None] | None = None,
         prompt_text: str = "\n🕯️ Dante> ",
     ):
         self.project_root = Path(project_root).resolve()
@@ -147,8 +164,10 @@ class DanteChatAgent:
         self.llm_client_factory = llm_client_factory or self._build_default_llm_client
         self.tool_executors = tool_executors or {}
         self.action_executors = action_executors or {}
+        self.activity_callback = activity_callback
         self.prompt_text = prompt_text
         self._react_agent = react_agent
+        self._active_user_instruction = ""
         self._react_agent_factory = (
             self._build_default_react_agent if react_agent is None else None
         )
@@ -177,20 +196,48 @@ class DanteChatAgent:
     def build_recovery_prompt(self) -> str:
         session_state = self._require_session_state()
         book_state = self._require_book_state()
+        onboarding = self._load_onboarding_snapshot()
+        is_first_run = not (
+            session_state.conversation_summary
+            or session_state.recent_turns
+            or session_state.last_action
+        )
 
-        lines = [
-            "Dante 已恢复，可以继续上次的长会话。",
-            f"会话: {session_state.session_id} / active_agent={session_state.active_agent}",
-            f"当前阶段: {book_state.stage.value}",
-            (
-                "当前篇/节/章: "
-                f"{book_state.current_arc or '未设置'} / "
-                f"{book_state.current_section or '未设置'} / "
-                f"{book_state.current_chapter or '未设置'}"
-            ),
-            f"当前章: {book_state.current_chapter or '未设置'}",
-        ]
+        if is_first_run:
+            lines = [
+                "Dante 首次写作会话。",
+                "默认职责：在已确认资产上推进正文写作、预检、审查与状态结算。",
+            ]
+        else:
+            lines = [
+                "Dante 已恢复，可以继续上次的长会话。",
+                f"会话: {session_state.session_id} / active_agent={session_state.active_agent}",
+            ]
 
+        lines.extend(
+            [
+                f"当前阶段: {book_state.stage.value}",
+                (
+                    "当前篇/节/章: "
+                    f"{book_state.current_arc or '未设置'} / "
+                    f"{book_state.current_section or '未设置'} / "
+                    f"{book_state.current_chapter or '未设置'}"
+                ),
+            ]
+        )
+
+        if onboarding.get("missing_labels"):
+            lines.append("资产缺口: " + "、".join(onboarding["missing_labels"]))
+            if not onboarding.get("ready_to_write"):
+                lines.append(
+                    "写作资产未就绪。请先切到 Goethe 补齐作者意图、背景、人物与可写大纲，"
+                    "再回来从 get_outline_structure → preflight → write 推进。"
+                )
+            else:
+                lines.append(
+                    "建议顺序：get_outline_structure → confirm_outline_scope（如需）"
+                    " → run_chapter_preflight → delegate_chapter_write → review。"
+                )
         if book_state.pending_confirmation:
             lines.append(f"待确认: {book_state.pending_confirmation}")
         if book_state.blocking_reason:
@@ -209,6 +256,14 @@ class DanteChatAgent:
         if session_state.recent_files:
             lines.append("最近文件: " + "；".join(session_state.recent_files))
         return "\n".join(lines)
+
+    def _load_onboarding_snapshot(self) -> dict[str, Any]:
+        try:
+            from tools.novel_workspace import build_onboarding_checklist
+
+            return build_onboarding_checklist(self.project_root, self.novel_id)
+        except Exception:
+            return {}
 
     def run(self) -> DanteRunResult:
         startup = self.startup()
@@ -300,6 +355,7 @@ class DanteChatAgent:
             tools=_build_dante_tool_definitions(),
             system_prompt=DEFAULT_DANTE_SYSTEM_PROMPT,
             max_turns=20,
+            activity_callback=self.activity_callback,
         )
         if self._combined_tool_executors():
             react_agent._register_tool_executors(self._combined_tool_executors())
@@ -339,25 +395,31 @@ class DanteChatAgent:
             react_agent.tools = merged_tools
         if self._combined_tool_executors() and hasattr(react_agent, "_register_tool_executors"):
             react_agent._register_tool_executors(self._combined_tool_executors())
+        if hasattr(react_agent, "activity_callback"):
+            react_agent.activity_callback = self.activity_callback
 
     def _run_react_agent(self, react_agent: Any, instruction: str) -> str:
-        result = react_agent.run(
-            instruction,
-            context_messages=self._build_context_messages(include_recent_turns=False),
-        )
-        if inspect.isawaitable(result):
-            result = asyncio.run(result)
-        if result is None:
-            return ""
-        if isinstance(result, str):
-            return result.strip()
-        if hasattr(result, "content"):
-            content = getattr(result, "content", "")
-            return str(content).strip()
-        if isinstance(result, dict):
-            content = result.get("content", "")
-            return str(content).strip()
-        return str(result).strip()
+        self._active_user_instruction = instruction
+        try:
+            result = react_agent.run(
+                instruction,
+                context_messages=self._build_context_messages(include_recent_turns=False),
+            )
+            if inspect.isawaitable(result):
+                result = asyncio.run(result)
+            if result is None:
+                return ""
+            if isinstance(result, str):
+                return result.strip()
+            if hasattr(result, "content"):
+                content = getattr(result, "content", "")
+                return str(content).strip()
+            if isinstance(result, dict):
+                content = result.get("content", "")
+                return str(content).strip()
+            return str(result).strip()
+        finally:
+            self._active_user_instruction = ""
 
     def _build_context_messages(self, *, include_recent_turns: bool = True) -> list[Message]:
         session_state = self._require_session_state()
@@ -418,7 +480,10 @@ class DanteChatAgent:
         combined: dict[str, Callable[[dict[str, Any]], Any]] = {}
         combined.update(self.tool_executors)
         combined.update(self.action_executors)
-        return combined
+        return guard_confirmable_executors(
+            combined,
+            instruction=lambda: self._active_user_instruction,
+        )
 
     def _append_user_turn(self, content: str) -> None:
         state = self._require_session_state()

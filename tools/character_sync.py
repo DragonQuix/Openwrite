@@ -161,6 +161,8 @@ def parse_profile_to_card(md_file: Path) -> Optional[Dict[str, Any]]:
 
     if not name:
         name = _extract_md_heading(body)
+    if not name and body.strip():
+        name = md_file.stem
     if not background:
         background = _extract_md_section(body, "背景") or _extract_md_section(body, "background")
     if not personality:

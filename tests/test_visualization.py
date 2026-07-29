@@ -347,10 +347,10 @@ class TestContextVisualization:
 
 
 class TestToolsRegistry:
-    """26工具注册验证测试"""
+    """31工具注册验证测试"""
 
     def test_all_tools_registered(self):
-        """验证所有26个工具都已注册"""
+        """验证所有31个工具都已注册"""
         print("\n" + "=" * 60)
         print("测试: 工具注册验证")
         print("=" * 60)
@@ -362,6 +362,9 @@ class TestToolsRegistry:
             "review_chapter",
             "get_status",
             "get_context",
+            "search_project",
+            "read_project_document",
+            "edit_project_document",
             "list_chapters",
             "create_outline",
             "get_outline_structure",
@@ -376,7 +379,9 @@ class TestToolsRegistry:
             "validate_truth",
             "query_world",
             "get_world_relations",
+            "search_relation_targets",
             "edit_world_relation",
+            "edit_world_relations",
             "extract_dialogue_fingerprint",
             "validate_post_write",
             "get_workflow_status",
@@ -400,7 +405,7 @@ class TestToolsRegistry:
         if extra:
             print(f"\n⚠️ 额外工具: {extra}")
 
-        assert len(registered_names) == 26, f"Expected 26 tools, got {len(registered_names)}"
+        assert len(registered_names) == 31, f"Expected 31 tools, got {len(registered_names)}"
         assert not missing, f"Missing tools: {missing}"
 
         print(f"\n✅ 所有 {len(registered_names)} 个工具已正确注册")
@@ -410,11 +415,11 @@ class TestToolsRegistry:
     not (TEST_NOVEL / "src" / "outline.md").exists(),
     reason="标准样例已从公开仓库移除",
 )
-class TestIntegration26Tools:
+class TestIntegration31Tools:
     """
-    26工具全功能集成测试
+    31工具全功能集成测试
 
-    完整测试所有26个工具的功能：
+    完整测试核心工具的功能：
     1. write_chapter - 写章节
     2. review_chapter - 审查章节
     3. get_status - 获取状态
@@ -960,27 +965,29 @@ class TestIntegration26Tools:
     def test_full_integration_summary(self):
         """全流程集成测试总结"""
         print("\n" + "=" * 60)
-        print("26工具集成测试完成")
+        print("31工具集成测试完成")
         print("=" * 60)
 
         print("""
   📊 测试覆盖:
-  
+
   ✓ 章节管理 (3): list_chapters, write_chapter, review_chapter
-  ✓ 项目状态 (1): get_status  
+  ✓ 项目状态 (1): get_status
+  ✓ 项目搜索/文档 (3): search_project, read/edit_project_document
   ✓ 上下文 (1): get_context
   ✓ 大纲 (3): create_outline, get_outline_structure, edit_outline_structure
   ✓ 角色 (1): create_character
   ✓ 真相文件 (2): get_truth_files, update_truth_file
   ✓ 伏笔 (4): create/list/update/validate_foreshadowing
   ✓ 验证 (1): validate_truth
-  ✓ 世界观 (3): query_world, get_world_relations, edit_world_relation
+  ✓ 世界观 (5): query_world, get_world_relations, search_relation_targets,
+                 edit_world_relation(s)
   ✓ 对话 (1): extract_dialogue_fingerprint
   ✓ 后置 (1): validate_post_write
   ✓ 工作流 (3): get/start/advance_workflow
   ✓ 文本 (2): chunk_text, compress_section
-  
-  ✅ 全部 26 个工具已测试
+
+  ✅ 共 31 个工具注册通过，核心流程已测试
         """)
 
 

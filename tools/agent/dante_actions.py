@@ -35,6 +35,12 @@ class DanteActionAdapter:
                 )
         return payload
 
+    def confirm_outline_scope(self) -> dict[str, Any]:
+        return self._wrap(
+            "confirm_outline_scope",
+            self.orchestrator.confirm_outline_scope(),
+        )
+
     def run_chapter_preflight(self, chapter_id: str) -> dict[str, Any]:
         state_store = getattr(self.orchestrator, "state_store", None)
         if state_store is not None:

@@ -115,15 +115,12 @@ class GoethePlanningRuntime:
             background=foundation.story_bible,
             foundation=foundation.book_rules,
         )
-        truth = self.truth_manager.load_truth_files()
-        truth.current_state = foundation.current_state
-        self.truth_manager.save_truth_files(truth)
 
-        foreshadowing_path = (
-            self.story_planning_store.runtime_planning_dir
-            / "foreshadowing_draft.md"
-        )
+        planning_dir = self.story_planning_store.runtime_planning_dir
+        foreshadowing_path = planning_dir / "foreshadowing_draft.md"
         foreshadowing_path.write_text(foundation.foreshadowing_seed, encoding="utf-8")
+        current_state_draft_path = planning_dir / "current_state_draft.md"
+        current_state_draft_path.write_text(foundation.current_state, encoding="utf-8")
 
         return {
             "ok": True,
@@ -133,13 +130,14 @@ class GoethePlanningRuntime:
             "genre": genre,
             "background_path": str(self.story_planning_store.background_draft_path),
             "foundation_path": str(self.story_planning_store.foundation_draft_path),
-            "current_state_path": str(self.truth_manager.world_dir / "current_state.md"),
+            "current_state_path": str(current_state_draft_path),
             "foreshadowing_path": str(foreshadowing_path),
             "story_bible": foundation.story_bible,
             "book_rules": foundation.book_rules,
             "current_state": foundation.current_state,
             "outline_seed": foundation.volume_outline,
             "foreshadowing_seed": foundation.foreshadowing_seed,
+            "message": "基础设定草案已写入 planning，未修改运行态 current_state。",
         }
 
     def generate_character_draft(self, request_text: str) -> dict[str, Any]:

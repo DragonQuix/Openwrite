@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from tools.agent.book_state import BookStage
+from tools.agent.book_state import BookStage, BookStateStore
 from tools.agent.react import ToolDefinition
 from tools.agent.session_state import (
     DanteSessionState,
@@ -126,7 +126,7 @@ def test_dante_startup_loads_session_and_book_state(tmp_path: Path):
     assert startup.session_state.session_id == "session-123"
     assert startup.book_state.stage == BookStage.ROLLING_OUTLINE
     assert startup.recovery_prompt.startswith("Dante 已恢复")
-    assert "当前章: ch_006" in startup.recovery_prompt
+    assert "ch_006" in startup.recovery_prompt
     assert agent.session_state.session_id == "session-123"
     assert agent.book_state.current_chapter == "ch_006"
 
@@ -209,6 +209,87 @@ def test_goethe_respond_supports_persisted_web_turn(tmp_path: Path):
     assert '"role": "assistant"' in transcript[-1]
 
 
+def test_goethe_confirmation_with_handoff_text_still_runs_react(tmp_path: Path):
+    from tools.goethe import GoetheChatAgent
+
+    react_agent = FakeReActAgent(responses=["已确认应用大纲修改，交接材料已准备。"])
+    agent = GoetheChatAgent(
+        project_root=tmp_path,
+        novel_id="demo",
+        react_agent=react_agent,
+        tool_layer_factory=lambda *args: {
+            "action_tool_executors": {
+                "prepare_dante_handoff": lambda args: {
+                    "ok": False,
+                    "missing_items": ["outline_confirmation"],
+                }
+            }
+        },
+    )
+
+    response = agent.respond("确认应用以上大纲修改，并准备交接给 Dante。")
+
+    assert response == "已确认应用大纲修改，交接材料已准备。"
+    assert react_agent.instructions == ["确认应用以上大纲修改，并准备交接给 Dante。"]
+    transcript = agent.session_store.transcript_path.read_text(encoding="utf-8")
+    assert "确认应用以上大纲修改" in transcript
+
+
+def test_goethe_handoff_shortcut_persists_web_turn(tmp_path: Path):
+    from tools.goethe import GoetheChatAgent
+
+    react_agent = FakeReActAgent(responses=["不应调用"])
+    agent = GoetheChatAgent(
+        project_root=tmp_path,
+        novel_id="demo",
+        react_agent=react_agent,
+        tool_layer_factory=lambda *args: {
+            "action_tool_executors": {
+                "prepare_dante_handoff": lambda args: {
+                    "ok": False,
+                    "missing_items": ["foundation"],
+                }
+            }
+        },
+    )
+
+    response = agent.respond("现在交接给 Dante")
+
+    assert response == "暂时不能交接给 Dante，还缺少：foundation。"
+    assert react_agent.instructions == []
+    transcript = agent.session_store.transcript_path.read_text(encoding="utf-8")
+    assert "现在交接给 Dante" in transcript
+    assert "foundation" in transcript
+
+
+def test_goethe_pending_confirmation_with_handoff_text_runs_react(tmp_path: Path):
+    from tools.goethe import GoetheChatAgent
+
+    state_store = BookStateStore(tmp_path, "demo")
+    state = state_store.load_or_create()
+    state.pending_confirmation = "ideation_summary"
+    state_store.save(state)
+    react_agent = FakeReActAgent(responses=["已确认这版汇总。"])
+    agent = GoetheChatAgent(
+        project_root=tmp_path,
+        novel_id="demo",
+        react_agent=react_agent,
+        tool_layer_factory=lambda *args: {
+            "action_tool_executors": {
+                "prepare_dante_handoff": lambda args: {
+                    "ok": False,
+                    "missing_items": ["ideation_summary"],
+                }
+            }
+        },
+    )
+
+    response = agent.respond("确认这版汇总，并准备交接给 Dante。")
+
+    assert response == "已确认这版汇总。"
+    assert react_agent.instructions == ["确认这版汇总，并准备交接给 Dante。"]
+
+
 def test_goethe_exposes_incremental_outline_react_tools():
     from tools.goethe import DEFAULT_GOETHE_SYSTEM_PROMPT, _build_goethe_tool_definitions
 
@@ -224,6 +305,19 @@ def test_goethe_exposes_incremental_outline_react_tools():
     assert "未提及内容必须逐字保留" in DEFAULT_GOETHE_SYSTEM_PROMPT
     assert "edit_world_relation" in DEFAULT_GOETHE_SYSTEM_PROMPT
     assert "confirm=false" in DEFAULT_GOETHE_SYSTEM_PROMPT
+
+
+def test_dante_exposes_outline_scope_confirmation_tool():
+    from tools.agent.dante import (
+        DEFAULT_DANTE_SYSTEM_PROMPT,
+        _build_dante_tool_definitions,
+    )
+
+    tool_names = {tool.name for tool in _build_dante_tool_definitions()}
+
+    assert "confirm_outline_scope" in tool_names
+    assert "pending_confirmation=outline_scope" in DEFAULT_DANTE_SYSTEM_PROMPT
+    assert "confirm_outline_scope" in DEFAULT_DANTE_SYSTEM_PROMPT
 
 
 def test_goethe_blocks_outline_confirmation_without_explicit_user_intent(
@@ -255,6 +349,86 @@ def test_goethe_blocks_outline_confirmation_without_explicit_user_intent(
     assert confirmed["ok"] is True
     assert short_confirmation["ok"] is True
     assert calls == [{}, {}]
+
+
+def test_goethe_shared_confirmation_guard_blocks_all_unconfirmed_mutations(
+    tmp_path: Path,
+):
+    from tools.goethe import GoetheChatAgent
+    from tools.init_project import init_project
+
+    init_project(tmp_path, "demo")
+    called: list[tuple[str, dict]] = []
+    executors = {
+        name: (lambda args, tool=name: called.append((tool, args)) or {"ok": True})
+        for name in (
+            "edit_project_document",
+            "edit_world_relation",
+            "edit_world_relations",
+            "edit_outline_structure",
+        )
+    }
+    agent = GoetheChatAgent(
+        tmp_path,
+        "demo",
+        tool_layer_factory=lambda *args: {
+            "tool_executors": executors,
+            "action_tool_executors": {},
+        },
+    )
+
+    agent._active_user_instruction = "先看看这些修改是否合适"
+    guarded = agent._combined_tool_executors()
+    blocked = {
+        name: guarded[name]({"confirm": True})
+        for name in executors
+    }
+
+    assert called == []
+    assert {
+        result["error"] for result in blocked.values()
+    } == {"explicit_user_confirmation_required"}
+
+    agent._active_user_instruction = "确认应用这些修改"
+    confirmed = agent._combined_tool_executors()["edit_world_relations"](
+        {"confirm": True}
+    )
+    assert confirmed["ok"] is True
+    assert called == [("edit_world_relations", {"confirm": True})]
+
+
+def test_dante_shared_confirmation_guard_allows_preview_then_explicit_apply(
+    tmp_path: Path,
+):
+    from tools.agent.dante import DanteChatAgent
+    from tools.init_project import init_project
+
+    init_project(tmp_path, "demo")
+    calls: list[dict] = []
+    agent = DanteChatAgent(
+        tmp_path,
+        "demo",
+        tool_executors={
+            "edit_project_document": lambda args: calls.append(args) or {"ok": True}
+        },
+        action_executors={},
+    )
+
+    agent._active_user_instruction = "帮我完善角色档案"
+    guarded = agent._combined_tool_executors()["edit_project_document"]
+    preview = guarded({"confirm": False})
+    blocked = guarded({"confirm": True})
+
+    assert preview["ok"] is True
+    assert blocked["error"] == "explicit_user_confirmation_required"
+    assert calls == [{"confirm": False}]
+
+    agent._active_user_instruction = "直接应用这版修改"
+    applied = agent._combined_tool_executors()["edit_project_document"](
+        {"confirm": True}
+    )
+    assert applied["ok"] is True
+    assert calls[-1] == {"confirm": True}
 
 
 @pytest.mark.parametrize("command", ["quit", "exit", "q", "退出"])
@@ -594,3 +768,34 @@ def test_dante_injected_real_react_agent_gets_tool_definitions_and_surface(
     assert tool_map["retain_me"].description == "保留的外部工具"
     assert hasattr(react_agent, "_tool_get_status")
     assert hasattr(react_agent, "_tool_summarize_ideation")
+
+
+def test_confirmation_markers_accept_short_and_english_forms():
+    from tools.agent.confirmation import is_explicit_mutation_confirmation
+
+    assert is_explicit_mutation_confirmation("好的")
+    assert is_explicit_mutation_confirmation("yes")
+    assert is_explicit_mutation_confirmation("ok")
+    assert is_explicit_mutation_confirmation("不要再确认，直接应用")
+    assert not is_explicit_mutation_confirmation("先不要改")
+
+
+def test_dante_and_goethe_cold_start_prompts_include_onboarding(tmp_path: Path):
+    from tools.agent.dante import DanteChatAgent, DEFAULT_DANTE_SYSTEM_PROMPT
+    from tools.goethe import GoetheChatAgent, DEFAULT_GOETHE_SYSTEM_PROMPT
+    from tools.init_project import init_project
+
+    init_project(tmp_path, "demo", "雾城来信")
+    goethe = GoetheChatAgent(tmp_path, "demo", react_agent=FakeReActAgent())
+    dante = DanteChatAgent(tmp_path, "demo", react_agent=FakeReActAgent())
+
+    goethe_prompt = goethe.startup().recovery_prompt
+    dante_prompt = dante.startup().recovery_prompt
+
+    assert "首次规划会话" in goethe_prompt
+    assert "资产缺口" in goethe_prompt
+    assert "首次写作会话" in dante_prompt
+    assert "Goethe" in dante_prompt
+    assert "edit_project_document" in DEFAULT_DANTE_SYSTEM_PROMPT
+    assert "edit_world_relations" in DEFAULT_DANTE_SYSTEM_PROMPT
+    assert "首次冷启动" in DEFAULT_GOETHE_SYSTEM_PROMPT

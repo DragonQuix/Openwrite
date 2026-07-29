@@ -97,3 +97,27 @@ note = "最信任的同事"
     assert card["background"] == "普通程序员，偶然觉醒术法。"
     assert card["personality"] == ["理工科思维", "嘴硬心软"]
     assert card["relationships"][0]["target"] == "zhao_lei"
+
+
+def test_profile_without_heading_falls_back_to_filename(tmp_path):
+    from tools.character_sync import sync_all_profiles_to_cards
+
+    src_chars = tmp_path / "src" / "characters"
+    src_chars.mkdir(parents=True)
+    (src_chars / "liang_zhiyuan.md").write_text(
+        "## UI 实测补充\n- 核心欲望：找回第十三枚齿轮。\n",
+        encoding="utf-8",
+    )
+
+    sync_all_profiles_to_cards(tmp_path / "src", tmp_path / "data")
+
+    import yaml
+
+    with open(
+        tmp_path / "data" / "characters" / "cards" / "liang_zhiyuan.yaml",
+        encoding="utf-8",
+    ) as f:
+        card = yaml.safe_load(f)
+
+    assert card["id"] == "liang_zhiyuan"
+    assert card["name"] == "liang_zhiyuan"

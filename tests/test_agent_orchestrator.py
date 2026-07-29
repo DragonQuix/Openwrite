@@ -157,6 +157,46 @@ def test_discovery_summary_request_generates_summary_and_waits_for_confirmation(
     assert "都市职场异能" in planning_store.ideation_summary_path.read_text(encoding="utf-8")
 
 
+def test_summary_request_infers_ideation_from_confirmed_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    init_project(tmp_path, "demo", "雨巷回声")
+    state_store = BookStateStore(tmp_path, "demo")
+    planning_store = StoryPlanningStore(tmp_path, "demo")
+    planning_store.save_foundation_draft(
+        background="镜雨区常年落雨，钟楼会在 23:17 停摆。",
+        foundation="雨声会影响记忆，第十三枚齿轮是找回真相的关键。",
+    )
+    planning_store.outline_src_path.write_text(
+        "# 大纲\n\n## 第一篇\n\n### 开头\n\n#### 第一章：雨巷开钟\n\n梁知遥发现停摆怀表。\n",
+        encoding="utf-8",
+    )
+    character_dir = planning_store.novel_root / "src" / "characters"
+    character_dir.mkdir(parents=True, exist_ok=True)
+    (character_dir / "梁知遥.md").write_text("# 梁知遥\n\n寻找第十三枚齿轮。\n", encoding="utf-8")
+    orchestrator = OpenWriteOrchestrator.for_testing(
+        tmp_path,
+        "demo",
+        state_store=state_store,
+        planning_store=planning_store,
+    )
+
+    def fake_chat(system_prompt: str, user_prompt: str, **kwargs) -> str:
+        assert "从已确认资产反推的灵感记录" in user_prompt
+        return "# 当前想法汇总\n\n## 核心方向\n\n- 镜雨区雨声记忆悬疑"
+
+    monkeypatch.setattr(orchestrator, "_chat_text", fake_chat)
+
+    result = orchestrator.summarize_ideation()
+
+    assert result.next_action == "confirm_ideation_summary"
+    assert state_store.load_or_create().pending_confirmation == "ideation_summary"
+    assert "从已确认资产反推" in planning_store.ideation_path.read_text(encoding="utf-8")
+    assert "镜雨区雨声记忆悬疑" in planning_store.ideation_summary_path.read_text(
+        encoding="utf-8"
+    )
+
+
 def test_dante_actions_require_summary_confirmation_before_outline_generation(
     tmp_path: Path,
 ):
@@ -746,6 +786,38 @@ def test_natural_outline_approval_promotes_outline(tmp_path: Path):
     assert state.stage == BookStage.CHAPTER_PREFLIGHT
     assert state.pending_confirmation == ""
     assert planning_store.outline_src_path.read_text(encoding="utf-8") == "# 大纲草案"
+
+
+def test_dante_can_confirm_current_outline_scope_before_preflight(tmp_path: Path):
+    _bootstrap_novel(tmp_path)
+    state_store = BookStateStore(tmp_path, "demo")
+    planning_store = StoryPlanningStore(tmp_path, "demo")
+    state = state_store.load_or_create()
+    state.stage = BookStage.ROLLING_OUTLINE
+    state.pending_confirmation = ""
+    state.current_chapter = "ch_001"
+    state_store.save(state)
+    orchestrator = OpenWriteOrchestrator.for_testing(
+        tmp_path,
+        "demo",
+        state_store=state_store,
+        planning_store=planning_store,
+    )
+    adapter = DanteActionAdapter(orchestrator)
+
+    confirmed = adapter.confirm_outline_scope()
+
+    state = state_store.load_or_create()
+    assert confirmed["ok"] is True
+    assert confirmed["action"] == "confirm_outline_scope"
+    assert confirmed["next_action"] == "chapter_preflight"
+    assert state.stage == BookStage.CHAPTER_PREFLIGHT
+    assert state.pending_confirmation == ""
+
+    preflight = adapter.run_chapter_preflight("ch_001")
+    assert preflight["ok"] is True
+    assert preflight["chapter_id"] == "ch_001"
+    assert preflight["reason"] == ""
 
 
 def test_outline_generation_request_writes_draft_and_requests_confirmation(

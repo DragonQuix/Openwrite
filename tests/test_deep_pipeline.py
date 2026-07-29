@@ -6,6 +6,7 @@ import pytest
 import tools.agent as agent_module
 import tools.cli as cli_module
 import tools.llm as llm_module
+from tools.agent.book_state import BookStateStore
 from tools.agent.reviewer import ReviewerAgent
 from tools.agent.writer import WriterAgent
 from tools.chapter_memory import ChapterMemoryStore
@@ -237,3 +238,66 @@ def test_write_commit_rolls_back_truth_and_draft_when_memory_fails(
         / "project.lock"
     )
     assert not lock_path.exists()
+
+
+def test_write_commit_handles_null_current_chapter_in_book_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    init_project(tmp_path, "demo")
+    state_path = (
+        tmp_path
+        / "data"
+        / "novels"
+        / "demo"
+        / "data"
+        / "workflows"
+        / "book_state.yaml"
+    )
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        "novel_id: demo\n"
+        "stage: chapter_preflight\n"
+        "current_arc: arc_001\n"
+        "current_chapter:\n"
+        "pending_confirmation: ''\n",
+        encoding="utf-8",
+    )
+
+    class FakeWriter:
+        def __init__(self, agent_ctx):
+            self.agent_ctx = agent_ctx
+
+        async def write_chapter(self, **kwargs):
+            return SimpleNamespace(
+                title="第一章",
+                content="正文",
+                word_count=2,
+                state_updates={},
+                chapter_summary="章节摘要",
+                observations="观察",
+                token_usage={"total_tokens": 10},
+            )
+
+    monkeypatch.setattr(agent_module, "WriterAgent", FakeWriter)
+    monkeypatch.setattr(
+        agent_module,
+        "AgentContext",
+        lambda client, model, project_root: SimpleNamespace(
+            client=client, model=model, project_root=project_root
+        ),
+    )
+    monkeypatch.setattr(
+        llm_module.LLMConfig,
+        "from_env",
+        classmethod(lambda cls: SimpleNamespace(model="fake-model")),
+    )
+    monkeypatch.setattr(llm_module, "LLMClient", lambda config: object())
+
+    result = cli_module._exec_write_chapter(
+        tmp_path,
+        {"chapter_id": "ch_001", "target_words": 500},
+    )
+
+    assert result["ok"] is True
+    assert cli_module._load_chapter(tmp_path, "demo", "ch_001") is not None
+    assert BookStateStore(tmp_path, "demo").load_or_create().current_chapter == "ch_001"

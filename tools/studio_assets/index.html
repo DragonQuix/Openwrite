@@ -22,6 +22,12 @@
       <div class="topbar-actions">
         <span id="save-state" class="save-state" aria-live="polite">已保存</span>
         <button id="inspector-toggle" class="quiet-button mobile-only" type="button" aria-expanded="false">创作罗盘</button>
+        <button id="project-settings-open" class="quiet-button" type="button" aria-haspopup="dialog">作品</button>
+        <button id="model-settings-open" class="model-settings-button" type="button" aria-haspopup="dialog">
+          <span id="model-connection-dot" class="connection-dot" aria-hidden="true"></span>
+          <span>模型设置</span>
+          <small id="model-topbar-name">未配置</small>
+        </button>
         <button id="theme-toggle" class="icon-button" type="button" aria-label="切换明暗主题" title="切换明暗主题">◐</button>
         <button id="write-open" class="primary-button" type="button">写下一章</button>
       </div>
@@ -60,7 +66,7 @@
               <p class="eyebrow">WORKSPACE</p>
               <h1 id="dashboard-title">小说总览</h1>
             </div>
-            <button id="model-state" class="status-pill" type="button" title="配置当前 Studio 会话的模型">模型未配置</button>
+            <button id="model-state" class="status-pill" type="button" title="打开模型设置">模型设置 · 未配置</button>
           </div>
 
           <div class="metric-grid" aria-label="写作统计">
@@ -209,17 +215,43 @@
               <button class="segment" type="button" data-agent="dante">Dante · 正文</button>
             </div>
           </div>
-          <div id="chat-log" class="chat-log" aria-live="polite">
-            <article class="chat-message assistant"><strong>OpenWrite</strong><p>选择 Agent 后直接描述目标。规划阶段先找 Goethe，已有可写大纲时切换到 Dante。</p></article>
-          </div>
-          <form id="chat-form" class="chat-composer">
-            <label for="chat-input">本轮目标</label>
-            <textarea id="chat-input" rows="4" maxlength="12000" placeholder="例如：检查现有资产，帮我把第一篇推进到可写状态。" required></textarea>
-            <div class="composer-actions">
-              <span id="chat-status" role="status"></span>
-              <button id="chat-submit" class="primary-button" type="submit">发送给 Goethe</button>
+          <div class="agent-console">
+            <aside class="agent-sessions-panel" aria-label="Agent 会话">
+              <div class="agent-sessions-header">
+                <strong>会话</strong>
+                <div class="agent-session-actions">
+                  <button id="agent-session-new" class="icon-button" type="button" aria-label="新建会话" title="新建会话">＋</button>
+                  <button id="agent-session-delete" class="quiet-button danger-mini-button" type="button" disabled>删除</button>
+                </div>
+              </div>
+              <div id="agent-session-list" class="agent-session-list" role="listbox" aria-label="选择历史会话"></div>
+            </aside>
+            <div class="agent-chat-panel">
+              <div class="agent-session-bar">
+                <div>
+                  <strong id="agent-history-title">Goethe 历史对话</strong>
+                  <span id="agent-history-status" role="status">正在恢复…</span>
+                </div>
+                <button id="agent-history-refresh" class="quiet-button" type="button">刷新历史</button>
+              </div>
+              <details class="agent-tools-panel">
+                <summary id="agent-tools-summary">Goethe Tools · 载入中</summary>
+                <p class="agent-tools-note">此处直接读取 Agent 当前注册表；Direct 为只读或细粒度工具，Action 为高层工作流。</p>
+                <div id="agent-tools-list" class="agent-tools-list"></div>
+              </details>
+              <div id="chat-log" class="chat-log" aria-live="polite">
+                <article class="chat-message assistant"><strong>OpenWrite</strong><p>选择 Agent 后直接描述目标。规划阶段先找 Goethe，已有可写大纲时切换到 Dante。</p></article>
+              </div>
+              <form id="chat-form" class="chat-composer">
+                <label for="chat-input">本轮目标</label>
+                <textarea id="chat-input" rows="4" maxlength="12000" placeholder="例如：检查现有资产，帮我把第一篇推进到可写状态。" required></textarea>
+                <div class="composer-actions">
+                  <span id="chat-status" role="status"></span>
+                  <button id="chat-submit" class="primary-button" type="submit">发送给 Goethe</button>
+                </div>
+              </form>
             </div>
-          </form>
+          </div>
         </section>
 
         <section id="continuity-view" class="workspace-view" hidden aria-labelledby="continuity-title">
@@ -244,6 +276,8 @@
                 <p id="relationship-summary" class="relationship-summary" aria-live="polite">正在读取实体关系…</p>
               </div>
               <div class="relationship-controls" aria-label="关系图控制">
+                <label for="relationship-search">搜索</label>
+                <input id="relationship-search" type="search" placeholder="节点、摘要或关系" autocomplete="off" spellcheck="false">
                 <label for="relationship-filter">类型</label>
                 <select id="relationship-filter">
                   <option value="all">全部节点</option>
@@ -258,6 +292,7 @@
                 <button id="relationship-reset" class="quiet-button" type="button">重置布局</button>
               </div>
             </div>
+            <p id="relationship-search-status" class="relationship-search-status" role="status" aria-live="polite"></p>
             <div class="relationship-legend" aria-label="节点图例">
               <span data-kind="character">人物 · 圆形</span>
               <span data-kind="faction">势力 · 方形</span>
@@ -390,8 +425,28 @@
             <p class="eyebrow">COMPASS</p>
             <h2>创作罗盘</h2>
           </div>
-          <button id="inspector-close" class="icon-button mobile-only" type="button" aria-label="关闭创作罗盘">×</button>
+          <div class="inspector-actions">
+            <button id="inspector-collapse" class="icon-button desktop-only" type="button" aria-label="折叠创作罗盘" title="折叠创作罗盘">›</button>
+            <button id="inspector-close" class="icon-button mobile-only" type="button" aria-label="关闭创作罗盘">×</button>
+          </div>
         </div>
+        <section id="agent-activity" class="agent-activity" aria-live="polite" hidden>
+          <div class="agent-activity-head">
+            <span class="agent-activity-pulse" aria-hidden="true"></span>
+            <div>
+              <p class="eyebrow">AI WORKING</p>
+              <h3 id="agent-activity-title">Goethe 正在工作</h3>
+            </div>
+            <strong id="agent-activity-elapsed">00:00</strong>
+          </div>
+          <ol id="agent-activity-steps" class="agent-activity-steps">
+            <li data-agent-step="0">读取项目上下文</li>
+            <li data-agent-step="1">分析本轮目标</li>
+            <li data-agent-step="2">调用工具或校验资产</li>
+            <li data-agent-step="3">整理回复与历史</li>
+          </ol>
+          <p id="agent-activity-note">保持此页打开，完成后会自动写入当前会话。</p>
+        </section>
         <form id="focus-form" class="focus-form">
           <label for="focus-goal">当前阶段目标</label>
           <textarea id="focus-goal" rows="4" required></textarea>
@@ -413,6 +468,7 @@
           <div><dt>审稿均分</dt><dd id="fact-review-score">-</dd></div>
         </dl>
       </aside>
+      <button id="inspector-restore" class="inspector-restore" type="button" aria-label="展开创作罗盘" title="展开创作罗盘" hidden>‹</button>
     </div>
   </div>
 
@@ -470,31 +526,76 @@
     </form>
   </dialog>
 
-  <dialog id="model-dialog" class="write-dialog">
+  <dialog id="model-dialog" class="write-dialog model-dialog">
     <form id="model-form" method="dialog">
       <div class="dialog-header">
         <div>
-          <p class="eyebrow">SESSION MODEL</p>
-          <h2>配置模型连接</h2>
+          <p class="eyebrow">MODEL CONNECTION</p>
+          <h2>模型与 API 设置</h2>
         </div>
         <button id="model-close" class="icon-button" type="button" aria-label="关闭">×</button>
       </div>
-      <p class="dialog-note">配置只保存在当前 Studio 服务进程，不写入项目或浏览器存储。</p>
-      <label for="model-provider">提供方</label>
-      <select id="model-provider"><option value="openai">OpenAI 兼容</option><option value="anthropic">Anthropic</option><option value="custom">自定义兼容端点</option></select>
-      <label for="model-base-url">Base URL</label>
-      <input id="model-base-url" type="url" placeholder="https://api.deepseek.com">
-      <label for="model-name">模型名称</label>
-      <input id="model-name" required placeholder="deepseek-chat">
-      <label for="model-api-key">API Key</label>
-      <input id="model-api-key" type="password" autocomplete="off" placeholder="留空则沿用当前服务配置">
-      <label for="model-api-format">API 格式</label>
-      <select id="model-api-format"><option value="chat">Chat Completions</option><option value="responses">Responses</option></select>
+      <div class="model-active-card" aria-live="polite">
+        <span id="model-dialog-status-dot" class="connection-dot" aria-hidden="true"></span>
+        <div>
+          <small>当前 Studio 进程</small>
+          <strong id="model-dialog-current">尚未配置模型</strong>
+        </div>
+      </div>
+      <p class="dialog-note model-security-note">
+        模型设置保存在本机 OpenWrite 配置目录，不写入小说项目、Git 或浏览器存储。
+        勾选下方选项时，API Key 保存为仅当前系统用户可读的本机凭据文件。
+      </p>
+
+      <div class="model-form-grid">
+        <div class="model-field full-span">
+          <label for="model-preset">快速预设</label>
+          <select id="model-preset">
+            <option value="deepseek-pro">DeepSeek · V4 Pro</option>
+            <option value="deepseek-flash">DeepSeek · V4 Flash</option>
+            <option value="openai">OpenAI 格式接口</option>
+            <option value="anthropic">Anthropic 格式接口</option>
+            <option value="custom">自定义接口</option>
+          </select>
+        </div>
+        <div class="model-field full-span">
+          <label for="model-base-url">Base URL</label>
+          <input id="model-base-url" type="url" required placeholder="https://api.deepseek.com" spellcheck="false">
+        </div>
+        <div class="model-field full-span">
+          <label for="model-name">模型名称</label>
+          <input id="model-name" required placeholder="deepseek-v4-pro" spellcheck="false">
+        </div>
+        <div class="model-field full-span">
+          <label for="model-api-key">API Key</label>
+          <div class="secret-input-row">
+            <input id="model-api-key" type="password" autocomplete="off" placeholder="留空则沿用当前进程中的 Key" spellcheck="false">
+            <button id="model-key-toggle" class="quiet-button" type="button" aria-pressed="false">显示</button>
+          </div>
+          <small id="model-key-state" class="field-help">当前进程尚无可沿用的 Key</small>
+          <label class="model-remember-key"><input id="model-remember-key" type="checkbox" checked> 重启后自动恢复 API Key</label>
+        </div>
+        <div class="model-field">
+          <label for="model-api-format">API 格式</label>
+          <select id="model-api-format"><option value="chat">Chat Completions</option><option value="responses">Responses</option></select>
+        </div>
+        <div class="model-field">
+          <label for="model-context-tokens">上下文预算</label>
+          <input id="model-context-tokens" type="number" min="12000" max="512000" step="1000" value="64000" inputmode="numeric">
+          <small class="field-help">12K–512K，下一次请求立即生效</small>
+        </div>
+        <div class="model-field">
+          <label for="model-max-tokens">最大输出</label>
+          <input id="model-max-tokens" type="number" min="256" max="131072" step="1" value="24000" inputmode="numeric">
+          <small class="field-help">独立于上下文预算</small>
+        </div>
+      </div>
       <div class="dialog-actions">
         <button id="model-cancel" class="quiet-button" type="button">取消</button>
-        <button id="model-submit" class="primary-button" type="submit">应用到当前会话</button>
+        <button id="model-test" class="quiet-button" type="button">测试连接</button>
+        <button id="model-submit" class="primary-button" type="submit">立即应用</button>
       </div>
-      <p id="model-progress" class="write-progress" role="status"></p>
+      <p id="model-progress" class="write-progress" role="status" aria-live="polite"></p>
     </form>
   </dialog>
 
@@ -529,6 +630,7 @@
       <input id="project-title" required maxlength="120" placeholder="雾城来信">
       <label for="project-id">小说 ID</label>
       <input id="project-id" required minlength="2" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_-]+" placeholder="mist_city">
+      <p class="dialog-note">创建后先配置模型，再在 AI 协作里用 Goethe 聊题材与冲突；资产就绪后切换 Dante 写正文。</p>
       <button id="project-submit" class="primary-button" type="submit">创建小说工作区</button>
       <p id="project-progress" class="write-progress" role="status"></p>
     </form>

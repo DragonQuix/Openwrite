@@ -27,3 +27,25 @@ def test_radar_agent_accepts_sync_llm_client_chat():
     assert len(result.platform_recommendations) == 1
     assert result.platform_recommendations[0].genre == "都市异能"
     assert result.platform_recommendations[0].platform == "番茄小说"
+
+
+def test_radar_agent_extracts_json_array_from_markdown_reply():
+    class FakeClient:
+        def chat(self, messages, temperature=0.6, max_tokens=4096):
+            return SimpleNamespace(
+                content=(
+                    "下面是分析结果：\n\n```json\n"
+                    '[{"platform":"external","genre":"都市怪谈","confidence":0.91,'
+                    '"concept":"雨城时间债务调查","reasoning":"样本强调都市与规则悬疑",'
+                    '"benchmarks":["样本A"]}]\n'
+                    "```\n\n以上。"
+                )
+            )
+
+    ctx = SimpleNamespace(client=FakeClient())
+    agent = RadarAgent(ctx, sources=[TextRadarSource("都市怪谈榜单样本")])
+
+    result = asyncio.run(agent.scan_market(platforms=["external"], top_n=1))
+
+    assert len(result.platform_recommendations) == 1
+    assert result.platform_recommendations[0].genre == "都市怪谈"
