@@ -27,6 +27,7 @@ const state = {
   outline: null,
   outlineSelectedId: null,
   outlineRenamingId: null,
+  productTour: { active: false, step: "" },
   relationship: {
     nodes: [], edges: [], positions: new Map(), selectedId: null,
     matchIds: new Set(), query: "",
@@ -143,20 +144,35 @@ async function loadWorkspace() {
   renderWorkspace();
   renderRecentProjects();
   document.querySelector("#app").setAttribute("aria-busy", "false");
-  if (!state.workspace.initialized && !$("#project-dialog").open) {
-    suggestProjectPath();
-    $("#project-dialog").showModal();
-  }
+  if (!state.workspace.initialized) suggestProjectPath();
 }
 
 function suggestProjectPath() {
   const project = state.workspace?.project || {};
-  if (!project.requires_external_location) return;
   const input = $("#project-path");
-  if (!input || input.value) return;
-  const home = "~/OpenWriteNovels";
-  input.value = home;
-  input.placeholder = home;
+  const hint = $("#project-path-hint");
+  if (!input) return;
+  const titleInput = $("#project-title");
+  const update = () => {
+    const title = (titleInput?.value || "").trim();
+    const slug = title
+      .toLowerCase()
+      .replace(/[^\w\u4e00-\u9fff]+/g, "_")
+      .replace(/^_|_$/g, "")
+      .slice(0, 40) || "my_novel";
+    const defaultPath = `../OpenWriteNovels/${slug}`;
+    input.placeholder = defaultPath;
+    if (hint) {
+      hint.textContent = project.requires_external_location
+        ? `留空时自动保存到 ${defaultPath}（框架目录同级）`
+        : "留空时在当前启动目录创建作品；也可在这里指定其他目录。";
+    }
+  };
+  if (titleInput && !titleInput.dataset.projectPathHintBound) {
+    titleInput.addEventListener("input", update);
+    titleInput.dataset.projectPathHintBound = "true";
+  }
+  update();
 }
 
 function renderWorkspace() {
@@ -190,6 +206,8 @@ function renderWorkspace() {
   $("#write-open").title = model.configured ? "" : "请先打开模型设置并输入 API Key";
 
   renderReadiness(snapshot.readiness);
+  $("#onboarding-open").hidden = false;
+  $("#onboarding-open").textContent = "新手引导";
   renderRecentChapters();
   renderNextActions(snapshot.next_action_items || snapshot.next_actions || []);
   fillFocus(snapshot.creative_focus);
@@ -375,7 +393,12 @@ function setView(view, pushHistory = true) {
   if (view === "agents") loadAgentSurface(state.agent);
   if (view === "continuity") loadContinuity();
   if (pushHistory) {
-    history.pushState({ view }, "", dashboard ? "/" : `/#${encodeURIComponent(view)}`);
+    const debugQuery = productTourDebugMode() ? "?debug=onboarding" : "";
+    history.pushState(
+      { view },
+      "",
+      dashboard ? `/${debugQuery}` : `/${debugQuery}#${encodeURIComponent(view)}`,
+    );
   }
 }
 
@@ -404,7 +427,8 @@ async function openDocument(path, pushHistory) {
     setSaveState("已保存", false);
     renderDocumentList(group);
     if (pushHistory) {
-      history.pushState({ path }, "", `/#doc=${encodeURIComponent(path)}`);
+      const debugQuery = productTourDebugMode() ? "?debug=onboarding" : "";
+      history.pushState({ path }, "", `/${debugQuery}#doc=${encodeURIComponent(path)}`);
     }
     $("#document-editor").focus();
   } catch (error) {
@@ -983,6 +1007,7 @@ async function saveModel(event) {
     renderWorkspace();
     $("#model-dialog").close();
     showToast(`模型已切换为 ${state.workspace.model.name}`);
+    advanceProductTourAfterAction("model");
   } catch (error) {
     $("#model-progress").textContent = error.message;
   } finally {
@@ -1088,7 +1113,6 @@ async function initializeProject(event) {
   const submit = $("#project-submit");
   submit.disabled = true;
   $("#project-progress").textContent = "正在创建小说目录、真源和运行态…";
-  const demoSeed = $("#project-demo-seed")?.checked || false;
   try {
     state.workspace = await api("/api/project/init", {
       method: "POST",
@@ -1096,13 +1120,13 @@ async function initializeProject(event) {
         project_path: $("#project-path").value.trim(),
         novel_id: $("#project-id").value.trim(),
         title: $("#project-title").value.trim(),
-        template: demoSeed ? "demo_short" : "default",
+        template: "default",
       }),
     });
     renderWorkspace();
     $("#project-dialog").close();
-    showToast(demoSeed ? "示范项目已创建，可直接写第一章" : "小说工作区已创建");
-    await guideAfterProjectReady(true, { demoSeed });
+    showToast("小说工作区已创建，从你的创作资料开始");
+    advanceProductTourAfterAction("project");
   } catch (error) {
     $("#project-progress").textContent = error.message;
   } finally {
@@ -1110,39 +1134,209 @@ async function initializeProject(event) {
   }
 }
 
-async function guideAfterProjectReady(isNewProject = false, options = {}) {
-  const model = state.workspace?.model || {};
-  if (!model.configured) {
-    openModelDialog();
-    showToast(isNewProject ? "项目已创建，请先配置模型" : "请先配置模型");
+const productTourSteps = {
+  workspace: {
+    target: "#dashboard-title",
+    title: "先认识你的写作工作台",
+    copy: "这里不是只和 AI 聊天的页面。OpenWrite 把策划、资料、正文、校验和写作都放进同一个作品工作区；先花半分钟看一圈，再开始创建你的故事。",
+    next: "浏览工作区",
+    nextStep: "navigation",
+  },
+  navigation: {
+    target: ".view-nav",
+    title: "左侧是作品的工作地图",
+    copy: "总览看进度和下一步；大纲规划章节；正文管理已写内容。故事、人物、世界保存创作资料；AI 协作和 Goethe、Dante 对话；搜索、连续性、工具箱用来查找、校验和处理项目。",
+    next: "看看规划区",
+    nextStep: "planning",
+  },
+  planning: {
+    target: '[data-view="outline"]',
+    title: "先把故事变成可写的结构",
+    copy: "大纲负责卷、幕、节、章的推进。故事、人物、世界三个区域负责保存设定和关系，它们会成为 AI 规划与写作时读取的依据。",
+    next: "看看正文区",
+    nextStep: "writing",
+  },
+  writing: {
+    target: '[data-view="chapters"]',
+    title: "正文区只处理已经落笔的内容",
+    copy: "在这里打开、编辑和审阅章节。等大纲确认后，右上角“写下一章”会让 Dante 先读取上下文，再帮你起草正文。",
+    next: "看看 AI 协作",
+    nextStep: "agents",
+  },
+  agents: {
+    target: '[data-view="agents"]',
+    title: "AI 协作分成策划和写作两位助手",
+    copy: "Goethe 用来聊灵感、人物、设定和大纲；Dante 接手已经确认的素材，推进章节创作。你始终可以修改结果，AI 不会替你悄悄定稿。",
+    next: "看看检查工具",
+    nextStep: "safeguards",
+  },
+  safeguards: {
+    target: '[data-view="continuity"]',
+    title: "搜索、连续性和工具箱负责查漏补缺",
+    copy: "搜索跨文档查资料；连续性检查人物、时间线和设定是否冲突；工具箱处理导入、导出和项目操作。它们不打断写作，但在需要时随时可用。",
+    next: "认识顶栏控制",
+    nextStep: "controls",
+  },
+  controls: {
+    target: "#project-settings-open",
+    title: "顶栏控制作品、模型和写作入口",
+    copy: "“作品”用于新建或切换书；“模型设置”连接你的 AI；“写下一章”在大纲准备好后启动正文流程。现在从连接模型开始。",
+    next: "开始设置",
+    nextStep: "model",
+  },
+  model: {
+    target: "#model-settings-open",
+    title: "先连接你的 AI",
+    copy: "点击这里，选择服务商并填入 API Key。配置成功后，引导会自动继续。",
+    next: "已配置，继续",
+    nextStep: "project",
+    nextWhen: () => Boolean(state.workspace?.model?.configured),
+  },
+  project: {
+    target: "#project-settings-open",
+    title: "创建一个空白作品",
+    copy: "点击“作品”后填写书名和小说 ID。目录可留空，创建完成会自动进入故事规划。",
+    next: "已创建，继续",
+    nextStep: "idea",
+    nextWhen: () => Boolean(state.workspace?.initialized),
+  },
+  idea: {
+    target: "#chat-input",
+    view: "agents",
+    agent: "goethe",
+    title: "告诉 Goethe 你想写什么故事",
+    copy: "像和编辑聊天一样描述题材、主角、冲突或一个画面。不用套模板；发送后引导会教你让它生成大纲。",
+  },
+  outline: {
+    target: "#chat-input",
+    view: "agents",
+    agent: "goethe",
+    title: "让 Goethe 整理成可写大纲",
+    copy: "等 Goethe 回复完刚才的构想后，再发送：“基于刚才的想法，先生成前五章可写大纲，给我确认”。发送后，去大纲页检查和编辑结果。",
+  },
+  review: {
+    target: '[data-view="outline"]',
+    view: "outline",
+    title: "检查并确认大纲",
+    copy: "在这里查看卷、幕、节、章；需要调整时直接编辑 Markdown 原文。确认有可写章节后，再开始写作。",
+    next: "准备写第一章",
+    nextStep: "write",
+  },
+  write: {
+    target: "#write-open",
+    title: "开始第一章",
+    copy: "点击“写下一章”，Dante 会先读取已确认的大纲和设定，再生成正文。",
+    next: "完成引导",
+    nextStep: "done",
+  },
+};
+
+const productTourStorageKey = "openwrite-product-tour-v2";
+const productTourStepLabels = {
+  workspace: "认识工作台",
+  navigation: "工作区导航",
+  planning: "故事规划",
+  writing: "正文写作",
+  agents: "AI 协作",
+  safeguards: "检查工具",
+  controls: "顶栏控制",
+  model: "模型配置",
+  project: "创建作品",
+  idea: "故事构想",
+  outline: "生成大纲",
+  review: "确认大纲",
+  write: "开始写作",
+};
+
+function productTourDebugMode() {
+  return new URLSearchParams(window.location.search).get("debug") === "onboarding";
+}
+
+function preferredTourStep() {
+  if (!state.workspace?.model?.configured) return "model";
+  if (!state.workspace?.initialized) return "project";
+  if (!state.workspace?.snapshot?.readiness?.outline) return "idea";
+  return "write";
+}
+
+function startProductTour(forcedStep = "") {
+  const isAutomatic = !forcedStep;
+  const debugMode = productTourDebugMode();
+  if (isAutomatic && !debugMode && localStorage.getItem(productTourStorageKey)) return;
+  const step = forcedStep || "workspace";
+  const guide = productTourSteps[step];
+  if (!guide) return;
+  if (isAutomatic && !debugMode) localStorage.setItem(productTourStorageKey, "seen");
+  state.productTour.active = true;
+  state.productTour.step = step;
+  if (guide.view && state.view !== guide.view) setView(guide.view);
+  if (guide.agent && state.agent !== guide.agent) chooseAgent(guide.agent);
+  requestAnimationFrame(renderProductTour);
+}
+
+function renderProductTour() {
+  if (!state.productTour.active) return;
+  const guide = productTourSteps[state.productTour.step];
+  const target = $(guide.target);
+  if (!target) return;
+  const rect = target.getBoundingClientRect();
+  const padding = 7;
+  const spotlight = $("#product-tour-spotlight");
+  const card = $("#product-tour-card");
+  const root = $("#product-tour");
+  root.hidden = false;
+  spotlight.style.top = `${Math.max(4, rect.top - padding)}px`;
+  spotlight.style.left = `${Math.max(4, rect.left - padding)}px`;
+  spotlight.style.width = `${rect.width + padding * 2}px`;
+  spotlight.style.height = `${rect.height + padding * 2}px`;
+  const cardWidth = Math.min(360, window.innerWidth - 28);
+  const fitsBelow = rect.bottom + 220 < window.innerHeight;
+  const top = fitsBelow ? rect.bottom + 18 : Math.max(12, rect.top - 210);
+  const left = Math.min(Math.max(14, rect.left), window.innerWidth - cardWidth - 14);
+  card.style.top = `${top}px`;
+  card.style.left = `${left}px`;
+  card.dataset.placement = fitsBelow ? "bottom" : "top";
+  const stepKeys = Object.keys(productTourSteps);
+  const stepIndex = stepKeys.indexOf(state.productTour.step);
+  const completedLabels = stepKeys
+    .slice(0, stepIndex)
+    .map((key) => productTourStepLabels[key]);
+  $("#product-tour-progress").textContent = `${stepIndex + 1} / ${stepKeys.length}${completedLabels.length ? ` · 已完成：${completedLabels.join("、")}` : ""}`;
+  $("#product-tour-title").textContent = guide.title;
+  $("#product-tour-copy").textContent = guide.copy;
+  const next = $("#product-tour-next");
+  next.hidden = !guide.next || (guide.nextWhen && !guide.nextWhen());
+  next.textContent = guide.next || "下一步";
+  $("#product-tour-back").hidden = stepIndex <= 0;
+}
+
+function advanceProductTourAfterAction(action) {
+  if (!state.productTour.active || state.productTour.step !== action) return;
+  const following = { model: "project", project: "idea", idea: "outline", outline: "review" }[action];
+  if (following) startProductTour(following);
+}
+
+function advanceProductTourManually() {
+  const guide = productTourSteps[state.productTour.step];
+  if (guide?.nextStep === "done") {
+    finishProductTour();
     return;
   }
-  if (options.demoSeed) {
-    setView("agents");
-    chooseAgent("dante");
-    $("#chat-input").value = "按大纲写第一章（约 1500-2500 字）";
-    $("#chat-input").focus();
-    showToast("示范资产已就绪，可直接让 Dante 写第一章");
-    return;
-  }
-  const items = normalizeNextActions(
-    state.workspace?.snapshot?.next_action_items || state.workspace?.snapshot?.next_actions || [],
-  );
-  const first = items[0];
-  if (first && (first.studio_action === "open_goethe" || !first.studio_action)) {
-    setView("agents");
-    chooseAgent("goethe");
-    if (first.seed) {
-      $("#chat-input").value = first.seed;
-    }
-    showToast(isNewProject ? "已打开 Goethe，从核心冲突开始规划" : "已打开 Goethe");
-    return;
-  }
-  if (first) {
-    runNextAction(first);
-    return;
-  }
-  setView("dashboard");
+  if (guide?.nextStep) startProductTour(guide.nextStep);
+}
+
+function goToPreviousProductTourStep() {
+  const stepKeys = Object.keys(productTourSteps);
+  const stepIndex = stepKeys.indexOf(state.productTour.step);
+  if (stepIndex > 0) startProductTour(stepKeys[stepIndex - 1]);
+}
+
+function finishProductTour() {
+  state.productTour.active = false;
+  state.productTour.step = "";
+  $("#product-tour").hidden = true;
+  if (!productTourDebugMode()) localStorage.setItem(productTourStorageKey, "done");
+  showToast("引导已完成。随时可从总览重新打开。");
 }
 
 function openProjectDialog() {
@@ -1426,12 +1620,14 @@ async function submitChat(event) {
   const input = $("#chat-input");
   const message = input.value.trim();
   if (!message) return;
+  const tourAction = state.agent === "goethe" ? state.productTour.step : "";
   const sessionId = activeAgentSessionId();
   appendChatMessage("user", "你", message);
   input.value = "";
   $("#chat-submit").disabled = true;
   $("#chat-status").textContent = `${state.agent === "goethe" ? "Goethe" : "Dante"} 正在读取项目并思考…`;
   const runId = startAgentActivity(state.agent, message);
+  advanceProductTourAfterAction(tourAction);
   try {
     const payload = await api("/api/chat", {
       method: "POST",
@@ -2549,6 +2745,10 @@ function bindEvents() {
   $("#model-form").addEventListener("submit", saveModel);
   $("#project-form").addEventListener("submit", initializeProject);
   $("#open-project-form").addEventListener("submit", openProject);
+  $("#onboarding-open").addEventListener("click", () => startProductTour("workspace"));
+  $("#product-tour-skip").addEventListener("click", finishProductTour);
+  $("#product-tour-back").addEventListener("click", goToPreviousProductTourStep);
+  $("#product-tour-next").addEventListener("click", advanceProductTourManually);
   $("#search-form").addEventListener("submit", searchProject);
   $("#project-dialog").addEventListener("cancel", (event) => {
     if (!state.workspace?.initialized) event.preventDefault();
@@ -2619,8 +2819,13 @@ function bindEvents() {
       setView("search");
       $("#search-query").focus();
     }
-    if (event.key === "Escape") toggleInspector(false);
+    if (event.key === "Escape") {
+      if (state.productTour.active) finishProductTour();
+      toggleInspector(false);
+    }
   });
+  window.addEventListener("resize", renderProductTour);
+  window.addEventListener("scroll", renderProductTour, true);
   window.addEventListener("beforeunload", (event) => {
     if (state.dirty) event.preventDefault();
   });
@@ -2647,6 +2852,7 @@ async function start() {
   try {
     await loadWorkspace();
     await routeFromLocation();
+    startProductTour();
   } catch (error) {
     document.querySelector("#app").setAttribute("aria-busy", "false");
     showToast(error.message, true);

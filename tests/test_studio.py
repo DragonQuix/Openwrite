@@ -54,15 +54,33 @@ def test_studio_onboarding_ui_guides_new_projects_and_next_actions():
     javascript = (assets / "app.js").read_text(encoding="utf-8")
     styles = (assets / "styles.css").read_text(encoding="utf-8")
 
-    assert "guideAfterProjectReady" in javascript
     assert "runNextAction" in javascript
     assert "agentEmptyGuidance" in javascript
     assert "next_action_items" in javascript
     assert "open_goethe" in javascript
-    assert "创建后先配置模型" in html
+    assert 'id="product-tour"' in html
+    assert 'id="product-tour-spotlight"' in html
+    assert 'id="product-tour-back"' in html
+    assert "productTourSteps" in javascript
+    assert "认识你的写作工作台" in javascript
+    assert "左侧是作品的工作地图" in javascript
+    assert "故事、人物、世界" in javascript
+    assert "goToPreviousProductTourStep" in javascript
+    assert "productTourStorageKey" in javascript
+    assert "productTourDebugMode" in javascript
+    assert 'get("debug") === "onboarding"' in javascript
+    assert '"?debug=onboarding"' in javascript
+    assert 'localStorage.setItem(productTourStorageKey, "seen")' in javascript
+    assert "startProductTour" in javascript
+    assert "advanceProductTourAfterAction" in javascript
+    assert "const tourAction" in javascript
+    assert "告诉 Goethe 你想写什么故事" in javascript
     assert "next-action-button" in styles
-    assert "demo-seed-label" in styles
-    assert "project-demo-seed" in html
+    assert ".product-tour-spotlight" in styles
+    assert ".product-tour-card" in styles
+    assert "project-demo-seed" not in html
+    assert "自定义作品目录（可选）" in html
+    assert 'id="project-path" required' not in html
     assert "suggestProjectPath" in javascript
     assert "confirmDeleteProject" in javascript
     assert "recent-project-delete" in styles
@@ -323,6 +341,21 @@ def test_studio_bootstraps_first_project_without_cli(tmp_path: Path):
     assert after["snapshot"]["title"] == "雾城来信"
     assert (tmp_path / "novel_config.yaml").exists()
     assert (tmp_path / ".openwrite" / "project.yaml").exists()
+
+
+def test_studio_uses_a_title_based_default_directory_from_framework_root(
+    tmp_path: Path,
+):
+    framework = tmp_path / "framework"
+    (framework / "tools").mkdir(parents=True)
+    (framework / "tools" / "studio.py").write_text("", encoding="utf-8")
+    (framework / "pyproject.toml").write_text('[project]\nname = "openwrite"\n', encoding="utf-8")
+    app = StudioApplication(framework)
+    result = app.initialize_project({"novel_id": "mist_city", "title": "雾城来信"})
+
+    target = tmp_path / "OpenWriteNovels" / "雾城来信"
+    assert result["project"]["root"] == str(target.resolve())
+    assert (target / "novel_config.yaml").is_file()
 
 
 def test_studio_opens_external_project_and_lists_recent_projects(tmp_path: Path):

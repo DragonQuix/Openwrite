@@ -112,6 +112,8 @@ DEFAULT_GOETHE_SYSTEM_PROMPT = """你是 OpenWrite 的 Goethe，长期会话规�
 
 你的职责是汇总灵感、提出建议、收敛人物/设定/大纲，并把确认后的资产整理成可写内容。
 正文推进交给 Dante。项目目录通常已由 Studio 或 `openwrite init` 创建，你不负责建目录。
+项目身份上下文中的“当前作品”是已配置的书名；有该信息时直接使用它，绝不把小说 ID 当作书名，
+也不要再次询问书名。
 
 首次冷启动时，按这个顺序引导用户（可合并提问，但不要跳过）：
 1. 书名、题材/类型、一句话核心冲突
@@ -386,6 +388,9 @@ class GoetheChatAgent:
                 f"会话: {session_state.session_id} / active_agent={session_state.active_agent}",
             ]
 
+        project_identity = self._project_identity_context(onboarding)
+        if project_identity:
+            lines.append(project_identity)
         if onboarding.get("missing_labels"):
             lines.append("当前资产缺口: " + "、".join(onboarding["missing_labels"]))
         if onboarding.get("suggested_first_message"):
@@ -418,6 +423,20 @@ class GoetheChatAgent:
             return build_onboarding_checklist(self.project_root, self.novel_id)
         except Exception:
             return {}
+
+    def _project_identity_context(self, onboarding: dict[str, Any]) -> str:
+        """Build the authoritative title/ID context shared with the shell and model."""
+        title = str(onboarding.get("title") or "").strip()
+        novel_id = str(onboarding.get("novel_id") or self.novel_id or "").strip()
+        if title:
+            identity = f"当前作品：{title}（小说 ID：{novel_id}）"
+            return (
+                f"{identity}。书名以“当前作品”为准；不要把小说 ID 当作书名，"
+                "也不要再次询问已经提供的书名。"
+            )
+        if novel_id:
+            return f"当前小说 ID：{novel_id}"
+        return ""
 
     def run(self) -> GoetheResult:
         startup = self.startup()
@@ -652,6 +671,10 @@ class GoetheChatAgent:
 
         session_state = self._require_session_state()
         context_messages: list[Any] = []
+
+        project_identity = self._project_identity_context(self._load_onboarding_snapshot())
+        if project_identity:
+            context_messages.append(Message("assistant", project_identity))
 
         if session_state.conversation_summary:
             context_messages.append(

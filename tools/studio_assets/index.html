@@ -66,7 +66,10 @@
               <p class="eyebrow">WORKSPACE</p>
               <h1 id="dashboard-title">小说总览</h1>
             </div>
-            <button id="model-state" class="status-pill" type="button" title="打开模型设置">模型设置 · 未配置</button>
+            <div class="dashboard-title-actions">
+              <button id="onboarding-open" class="quiet-button" type="button">继续引导</button>
+              <button id="model-state" class="status-pill" type="button" title="打开模型设置">模型设置 · 未配置</button>
+            </div>
           </div>
 
           <div class="metric-grid" aria-label="写作统计">
@@ -624,17 +627,17 @@
           <h3>创建新作品</h3>
         </div>
       </div>
-      <label for="project-path">作品目录</label>
-      <input id="project-path" required placeholder="~/OpenWriteNovels/my_novel">
-      <label class="demo-seed-label">
-        <input id="project-demo-seed" type="checkbox">
-        创建带示范资产的短篇练习（可直接写第一章）
-      </label>
+      <details class="project-location-details">
+        <summary>自定义作品目录（可选）</summary>
+        <label for="project-path">作品目录</label>
+        <input id="project-path" placeholder="../OpenWriteNovels/my_novel">
+        <small id="project-path-hint" class="field-help">留空时会自动创建独立作品目录。</small>
+      </details>
       <label for="project-title">书名</label>
-      <input id="project-title" required maxlength="120" placeholder="雾城来信">
+      <input id="project-title" required maxlength="120" placeholder="请输入你的作品名称">
       <label for="project-id">小说 ID</label>
-      <input id="project-id" required minlength="2" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_-]+" placeholder="mist_city">
-      <p class="dialog-note">创建后先配置模型，再在 AI 协作里用 Goethe 聊题材与冲突；资产就绪后切换 Dante 写正文。</p>
+      <input id="project-id" required minlength="2" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9_-]+" placeholder="例如 mist_city">
+      <p class="dialog-note">创建后会引导你向 Goethe 描述故事，再生成和确认可写大纲。</p>
       <button id="project-submit" class="primary-button" type="submit">创建小说工作区</button>
       <p id="project-progress" class="write-progress" role="status"></p>
     </form>
@@ -661,6 +664,21 @@
     </div>
   </dialog>
 
+  <div id="product-tour" class="product-tour" hidden aria-live="polite">
+    <div id="product-tour-spotlight" class="product-tour-spotlight" aria-hidden="true"></div>
+    <aside id="product-tour-card" class="product-tour-card" data-placement="bottom">
+      <p id="product-tour-progress" class="eyebrow"></p>
+      <h2 id="product-tour-title"></h2>
+      <p id="product-tour-copy"></p>
+      <div class="product-tour-actions">
+        <button id="product-tour-skip" class="quiet-button" type="button">跳过引导</button>
+        <div class="product-tour-navigation">
+          <button id="product-tour-back" class="quiet-button" type="button" hidden>上一步</button>
+          <button id="product-tour-next" class="primary-button" type="button" hidden>下一步</button>
+        </div>
+      </div>
+    </aside>
+  </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/app.js" defer></script>
 </body>

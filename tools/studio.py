@@ -545,7 +545,23 @@ class StudioApplication:
 
     def initialize_project(self, payload: dict[str, Any]) -> dict[str, Any]:
         raw_target = str(payload.get("project_path") or "").strip()
-        target = Path(raw_target).expanduser().resolve() if raw_target else self.project_root
+        novel_id = str(payload.get("novel_id") or "").strip()
+        title = str(payload.get("title") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", novel_id):
+            raise StudioError("小说 ID 需为 2-64 位字母、数字、横线或下划线")
+        if not title or len(title) > 120:
+            raise StudioError("书名不能为空且不能超过 120 字")
+        if raw_target:
+            target_path = Path(raw_target).expanduser()
+            target = (
+                target_path.resolve()
+                if target_path.is_absolute()
+                else (self.launch_root / target_path).resolve()
+            )
+        elif is_framework_root(self.launch_root):
+            target = self._default_project_directory(title, novel_id)
+        else:
+            target = self.project_root
         self._debug_event(
             "project_init_requested",
             target=str(target),
@@ -561,12 +577,6 @@ class StudioApplication:
         target.mkdir(parents=True, exist_ok=True)
         if (target / "novel_config.yaml").exists():
             raise StudioError("目标目录已经是小说项目", HTTPStatus.CONFLICT)
-        novel_id = str(payload.get("novel_id") or "").strip()
-        title = str(payload.get("title") or "").strip()
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", novel_id):
-            raise StudioError("小说 ID 需为 2-64 位字母、数字、横线或下划线")
-        if not title or len(title) > 120:
-            raise StudioError("书名不能为空且不能超过 120 字")
         template = str(payload.get("template") or "default").strip()
         if template not in {"default", "demo_short"}:
             raise StudioError("不支持的模板类型，可选 default 或 demo_short")
@@ -585,6 +595,10 @@ class StudioApplication:
             template=template,
         )
         return self.workspace()
+
+    def _default_project_directory(self, title: str, novel_id: str) -> Path:
+        slug = re.sub(r"[^\w\u4e00-\u9fff]+", "_", title.lower()).strip("_")
+        return (self.launch_root.parent / "OpenWriteNovels" / (slug[:64] or novel_id)).resolve()
 
     def open_project(self, payload: dict[str, Any]) -> dict[str, Any]:
         raw_path = str(payload.get("project_path") or "").strip()
@@ -616,10 +630,8 @@ class StudioApplication:
 
             cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
             novel_id = str(cfg.get("novel_id") or "")
-            title = str(cfg.get("title") or "")
         except (OSError, _yaml.YAMLError):
             novel_id = ""
-            title = ""
         if confirm != novel_id:
             raise StudioError(
                 f"删除确认不匹配（预期: {novel_id}）",

@@ -793,12 +793,31 @@ def test_dante_and_goethe_cold_start_prompts_include_onboarding(tmp_path: Path):
     dante_prompt = dante.startup().recovery_prompt
 
     assert "首次规划会话" in goethe_prompt
+    assert "当前作品：雾城来信（小说 ID：demo）" in goethe_prompt
+    assert "不要把小说 ID 当作书名" in goethe_prompt
     assert "资产缺口" in goethe_prompt
     assert "首次写作会话" in dante_prompt
     assert "Goethe" in dante_prompt
     assert "edit_project_document" in DEFAULT_DANTE_SYSTEM_PROMPT
     assert "edit_world_relations" in DEFAULT_DANTE_SYSTEM_PROMPT
     assert "首次冷启动" in DEFAULT_GOETHE_SYSTEM_PROMPT
+
+
+def test_goethe_passes_project_title_and_id_to_react_context(tmp_path: Path):
+    from tools.goethe import GoetheChatAgent
+    from tools.init_project import init_project
+
+    init_project(tmp_path, "bushi", "我不是坏人")
+    react_agent = FakeReActAgent()
+    goethe = GoetheChatAgent(tmp_path, "bushi", react_agent=react_agent)
+
+    assert goethe.respond("我想写轻松的修仙故事") == "收到"
+
+    context_text = "\n".join(
+        message.content for message in react_agent.calls[0]["kwargs"]["context_messages"]
+    )
+    assert "当前作品：我不是坏人（小说 ID：bushi）" in context_text
+    assert "不要把小说 ID 当作书名" in context_text
 
 
 def test_goethe_cli_refuses_without_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
