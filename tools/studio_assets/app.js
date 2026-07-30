@@ -1215,7 +1215,6 @@ function renderRecentProjects() {
 }
 
 async function confirmDeleteProject(project) {
-  const label = `${project.novel_id}/${project.title}`;
   const confirmed = window.confirm(
     `确定要永久删除作品「${project.title}」吗？\n\n此操作不可撤销。`,
   );
@@ -1225,7 +1224,7 @@ async function confirmDeleteProject(project) {
       method: "POST",
       body: JSON.stringify({
         project_path: project.path,
-        confirm: label,
+        confirm: project.novel_id,
       }),
     });
     renderWorkspace();

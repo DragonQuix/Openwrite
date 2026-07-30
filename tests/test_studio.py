@@ -109,7 +109,7 @@ def test_studio_delete_project_removes_directory(tmp_path: Path, monkeypatch: py
         app.delete_project({"project_path": str(tmp_path / "doomed_novel"), "confirm": "wrong"})
 
     app.delete_project(
-        {"project_path": str(tmp_path / "doomed_novel"), "confirm": "doomed/将删之书"}
+        {"project_path": str(tmp_path / "doomed_novel"), "confirm": "doomed"}
     )
     assert not (tmp_path / "doomed_novel").exists()
 

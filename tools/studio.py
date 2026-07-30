@@ -620,10 +620,9 @@ class StudioApplication:
         except (OSError, _yaml.YAMLError):
             novel_id = ""
             title = ""
-        expected = f"{novel_id}/{title}".strip("/")
-        if confirm != expected:
+        if confirm != novel_id:
             raise StudioError(
-                f"删除确认不匹配（预期: {expected}）",
+                f"删除确认不匹配（预期: {novel_id}）",
                 HTTPStatus.PRECONDITION_REQUIRED,
             )
         import shutil
