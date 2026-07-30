@@ -86,6 +86,31 @@ def test_studio_init_accepts_demo_short_template(tmp_path: Path, monkeypatch: py
     assert result["snapshot"]["readiness"]["author_intent"] is True
 
 
+def test_studio_delete_project_removes_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    app = StudioApplication(
+        tmp_path,
+        model_settings_store=StudioModelSettingsStore(tmp_path / "prefs"),
+    )
+    app.initialize_project(
+        {
+            "project_path": str(tmp_path / "doomed_novel"),
+            "novel_id": "doomed",
+            "title": "将删之书",
+            "template": "default",
+        }
+    )
+    assert (tmp_path / "doomed_novel" / "novel_config.yaml").exists()
+
+    with pytest.raises(StudioError, match="确认"):
+        app.delete_project({"project_path": str(tmp_path / "doomed_novel"), "confirm": "wrong"})
+
+    app.delete_project(
+        {"project_path": str(tmp_path / "doomed_novel"), "confirm": "doomed/将删之书"}
+    )
+    assert not (tmp_path / "doomed_novel").exists()
+
+
 def test_relationship_topology_includes_search_and_context_controls():
     assets = Path(__file__).parent.parent / "tools" / "studio_assets"
     html = (assets / "index.html").read_text(encoding="utf-8")

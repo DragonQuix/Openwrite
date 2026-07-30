@@ -224,6 +224,15 @@ class StudioApplication:
             log_path=str(self.debug_log_path or ""),
         )
 
+    def _deactivate_project(self) -> None:
+        self.project_root = self.launch_root
+        self.config_path = self.project_root / "novel_config.yaml"
+        self.initialized = self.config_path.exists()
+        self.config = {}
+        self.novel_id = ""
+        self.novel_root = self.project_root
+        self._novel_service = None
+
     def _configure_debug_mode(self) -> None:
         if not self.debug_enabled:
             return
@@ -588,6 +597,44 @@ class StudioApplication:
         with self._write_lock:
             self._activate_project(target)
         self._debug_event("project_open_completed", target=str(target), novel_id=self.novel_id)
+        return self.workspace()
+
+    def delete_project(self, payload: dict[str, Any]) -> dict[str, Any]:
+        raw_path = str(payload.get("project_path") or "").strip()
+        confirm = str(payload.get("confirm") or "").strip()
+        if not raw_path:
+            raise StudioError("请指定要删除的作品目录")
+        target = Path(raw_path).expanduser().resolve()
+        self._debug_event("project_delete_requested", target=str(target))
+        if target == self.launch_root and is_framework_root(target):
+            raise StudioError("不能删除框架仓库")
+        if not target.is_dir() or not (target / "novel_config.yaml").is_file():
+            raise StudioError("所选目录不是有效的 OpenWrite 作品项目")
+        config_path = target / "novel_config.yaml"
+        try:
+            import yaml as _yaml
+
+            cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            novel_id = str(cfg.get("novel_id") or "")
+            title = str(cfg.get("title") or "")
+        except (OSError, _yaml.YAMLError):
+            novel_id = ""
+            title = ""
+        expected = f"{novel_id}/{title}".strip("/")
+        if confirm != expected:
+            raise StudioError(
+                f"请在确认框输入 {expected} 以确认删除",
+                HTTPStatus.PRECONDITION_REQUIRED,
+            )
+        import shutil
+
+        with self._write_lock:
+            shutil.rmtree(target)
+        if self._project_registry is not None:
+            self._project_registry.remove(str(target))
+        if self.project_root == target:
+            self._deactivate_project()
+        self._debug_event("project_delete_completed", target=str(target))
         return self.workspace()
 
     def _project_payload(self) -> dict[str, Any]:
@@ -1959,6 +2006,9 @@ class StudioRequestHandler(SimpleHTTPRequestHandler):
                 return
             if route == "/api/project/open":
                 self._json(self.app.open_project(payload))
+                return
+            if route == "/api/project/delete":
+                self._json(self.app.delete_project(payload))
                 return
             self.app.require_project()
             if route == "/api/write":

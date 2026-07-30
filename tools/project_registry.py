@@ -119,6 +119,12 @@ class ProjectRegistry:
         records.insert(0, record)
         self._save(records[:REGISTRY_LIMIT])
 
+    def remove(self, project_path: str) -> None:
+        records = [
+            item for item in self._load() if item.path != str(Path(project_path).resolve())
+        ]
+        self._save(records)
+
     def _load(self) -> list[RecentProject]:
         if not self.path.is_file():
             return []

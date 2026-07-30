@@ -471,15 +471,20 @@ select:focus-visible {
 .demo-seed-label {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--text);
+  font-weight: 400;
   cursor: pointer;
-  margin: 2px 0;
+  margin: 0;
+  padding: 4px 0;
 }
 
 .demo-seed-label input[type="checkbox"] {
   margin: 0;
+  width: auto;
+  min-height: auto;
+  flex-shrink: 0;
 }
 
 .sidebar-footer {
@@ -2185,6 +2190,33 @@ button.next-action-button:focus-visible {
 .recent-projects {
   display: grid;
   gap: 5px;
+}
+
+.delete-project-form {
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+  padding-top: 12px;
+}
+
+.danger-button {
+  background: #dc2626;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 9px 16px;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  justify-self: start;
+}
+
+.danger-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.danger-button:hover:not(:disabled) {
+  background: #b91c1c;
 }
 
 .recent-project {

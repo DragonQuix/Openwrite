@@ -1182,6 +1182,34 @@ async function openRecentProject(projectPath) {
   await openProject(new Event("submit", { cancelable: true }));
 }
 
+async function deleteProject(event) {
+  event.preventDefault();
+  const submit = $("#delete-project-submit");
+  submit.disabled = true;
+  $("#delete-project-progress").textContent = "正在删除…";
+  try {
+    state.workspace = await api("/api/project/delete", {
+      method: "POST",
+      body: JSON.stringify({
+        project_path: $("#delete-project-path").value.trim(),
+        confirm: $("#delete-project-confirm").value.trim(),
+      }),
+    });
+    renderWorkspace();
+    renderRecentProjects();
+    $("#delete-project-path").value = "";
+    $("#delete-project-confirm").value = "";
+    showToast("作品已删除");
+    if (!state.workspace.initialized) {
+      setView("dashboard");
+    }
+  } catch (error) {
+    $("#delete-project-progress").textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
+}
+
 function renderRecentProjects() {
   const root = $("#recent-projects");
   root.replaceChildren();
@@ -2513,6 +2541,7 @@ function bindEvents() {
   $("#model-form").addEventListener("submit", saveModel);
   $("#project-form").addEventListener("submit", initializeProject);
   $("#open-project-form").addEventListener("submit", openProject);
+  $("#delete-project-form").addEventListener("submit", deleteProject);
   $("#search-form").addEventListener("submit", searchProject);
   $("#project-dialog").addEventListener("cancel", (event) => {
     if (!state.workspace?.initialized) event.preventDefault();
