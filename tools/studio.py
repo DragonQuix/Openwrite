@@ -2161,7 +2161,7 @@ def create_server(
         review_executor=review_executor,
         chat_executor=chat_executor,
         source_executor=source_executor,
-        project_registry=project_registry or ProjectRegistry(),
+        project_registry=project_registry,
         model_settings_store=model_settings_store,
         debug=debug,
     )
@@ -2178,7 +2178,12 @@ def run_studio(
     open_browser: bool = True,
     debug: bool = False,
 ) -> int:
-    server = create_server(project_root, port=port, debug=debug)
+    server = create_server(
+        project_root,
+        port=port,
+        debug=debug,
+        project_registry=ProjectRegistry(),
+    )
     url = f"http://127.0.0.1:{server.server_port}"
     print(f"OpenWrite Studio: {url}")
     if server.app.debug_enabled and server.app.debug_log_path is not None:
