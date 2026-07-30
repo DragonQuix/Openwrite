@@ -1182,39 +1182,13 @@ async function openRecentProject(projectPath) {
   await openProject(new Event("submit", { cancelable: true }));
 }
 
-async function deleteProject(event) {
-  event.preventDefault();
-  const submit = $("#delete-project-submit");
-  submit.disabled = true;
-  $("#delete-project-progress").textContent = "正在删除…";
-  try {
-    state.workspace = await api("/api/project/delete", {
-      method: "POST",
-      body: JSON.stringify({
-        project_path: $("#delete-project-path").value.trim(),
-        confirm: $("#delete-project-confirm").value.trim(),
-      }),
-    });
-    renderWorkspace();
-    renderRecentProjects();
-    $("#delete-project-path").value = "";
-    $("#delete-project-confirm").value = "";
-    showToast("作品已删除");
-    if (!state.workspace.initialized) {
-      setView("dashboard");
-    }
-  } catch (error) {
-    $("#delete-project-progress").textContent = error.message;
-  } finally {
-    submit.disabled = false;
-  }
-}
-
 function renderRecentProjects() {
   const root = $("#recent-projects");
   root.replaceChildren();
   const projects = state.workspace?.project?.recent || [];
   projects.forEach((project) => {
+    const row = document.createElement("div");
+    row.className = "recent-project-row";
     const button = document.createElement("button");
     button.type = "button";
     button.className = "recent-project";
@@ -1226,8 +1200,43 @@ function renderRecentProjects() {
     button.addEventListener("click", () => {
       openRecentProject(project.path);
     });
-    root.append(button);
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "recent-project-delete";
+    delBtn.textContent = "删除";
+    delBtn.title = `删除 ${project.title}`;
+    delBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      confirmDeleteProject(project);
+    });
+    row.append(button, delBtn);
+    root.append(row);
   });
+}
+
+async function confirmDeleteProject(project) {
+  const label = `${project.novel_id}/${project.title}`;
+  const confirmed = window.confirm(
+    `确定要永久删除作品「${project.title}」吗？\n\n此操作不可撤销。`,
+  );
+  if (!confirmed) return;
+  try {
+    state.workspace = await api("/api/project/delete", {
+      method: "POST",
+      body: JSON.stringify({
+        project_path: project.path,
+        confirm: label,
+      }),
+    });
+    renderWorkspace();
+    renderRecentProjects();
+    showToast(`已删除「${project.title}」`);
+    if (!state.workspace.initialized) {
+      setView("dashboard");
+    }
+  } catch (error) {
+    showToast(error.message, true);
+  }
 }
 
 async function searchProject(event) {
@@ -2541,7 +2550,6 @@ function bindEvents() {
   $("#model-form").addEventListener("submit", saveModel);
   $("#project-form").addEventListener("submit", initializeProject);
   $("#open-project-form").addEventListener("submit", openProject);
-  $("#delete-project-form").addEventListener("submit", deleteProject);
   $("#search-form").addEventListener("submit", searchProject);
   $("#project-dialog").addEventListener("cancel", (event) => {
     if (!state.workspace?.initialized) event.preventDefault();

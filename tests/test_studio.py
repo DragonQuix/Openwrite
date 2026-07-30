@@ -64,6 +64,9 @@ def test_studio_onboarding_ui_guides_new_projects_and_next_actions():
     assert "demo-seed-label" in styles
     assert "project-demo-seed" in html
     assert "suggestProjectPath" in javascript
+    assert "confirmDeleteProject" in javascript
+    assert "recent-project-delete" in styles
+    assert "delete-project-form" not in html
 
 
 def test_studio_init_accepts_demo_short_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

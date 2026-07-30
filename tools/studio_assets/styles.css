@@ -2192,31 +2192,27 @@ button.next-action-button:focus-visible {
   gap: 5px;
 }
 
-.delete-project-form {
-  border-top: 1px solid var(--border);
-  margin-top: 8px;
-  padding-top: 12px;
+.recent-project-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px;
+  align-items: center;
 }
 
-.danger-button {
-  background: #dc2626;
-  color: #fff;
-  border: none;
+.recent-project-delete {
+  background: none;
+  border: 1px solid transparent;
   border-radius: 4px;
-  padding: 9px 16px;
-  font-size: 12px;
-  font-weight: 650;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 4px 8px;
   cursor: pointer;
-  justify-self: start;
+  white-space: nowrap;
 }
 
-.danger-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.danger-button:hover:not(:disabled) {
-  background: #b91c1c;
+.recent-project-delete:hover {
+  color: #dc2626;
+  border-color: #dc2626;
 }
 
 .recent-project {

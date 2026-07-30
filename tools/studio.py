@@ -623,7 +623,7 @@ class StudioApplication:
         expected = f"{novel_id}/{title}".strip("/")
         if confirm != expected:
             raise StudioError(
-                f"请在确认框输入 {expected} 以确认删除",
+                f"删除确认不匹配（预期: {expected}）",
                 HTTPStatus.PRECONDITION_REQUIRED,
             )
         import shutil
