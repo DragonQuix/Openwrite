@@ -144,8 +144,19 @@ async function loadWorkspace() {
   renderRecentProjects();
   document.querySelector("#app").setAttribute("aria-busy", "false");
   if (!state.workspace.initialized && !$("#project-dialog").open) {
+    suggestProjectPath();
     $("#project-dialog").showModal();
   }
+}
+
+function suggestProjectPath() {
+  const project = state.workspace?.project || {};
+  if (!project.requires_external_location) return;
+  const input = $("#project-path");
+  if (!input || input.value) return;
+  const home = "~/OpenWriteNovels";
+  input.value = home;
+  input.placeholder = home;
 }
 
 function renderWorkspace() {
@@ -1077,6 +1088,7 @@ async function initializeProject(event) {
   const submit = $("#project-submit");
   submit.disabled = true;
   $("#project-progress").textContent = "正在创建小说目录、真源和运行态…";
+  const demoSeed = $("#project-demo-seed")?.checked || false;
   try {
     state.workspace = await api("/api/project/init", {
       method: "POST",
@@ -1084,12 +1096,13 @@ async function initializeProject(event) {
         project_path: $("#project-path").value.trim(),
         novel_id: $("#project-id").value.trim(),
         title: $("#project-title").value.trim(),
+        template: demoSeed ? "demo_short" : "default",
       }),
     });
     renderWorkspace();
     $("#project-dialog").close();
-    showToast("小说工作区已创建");
-    await guideAfterProjectReady(true);
+    showToast(demoSeed ? "示范项目已创建，可直接写第一章" : "小说工作区已创建");
+    await guideAfterProjectReady(true, { demoSeed });
   } catch (error) {
     $("#project-progress").textContent = error.message;
   } finally {
@@ -1097,11 +1110,19 @@ async function initializeProject(event) {
   }
 }
 
-async function guideAfterProjectReady(isNewProject = false) {
+async function guideAfterProjectReady(isNewProject = false, options = {}) {
   const model = state.workspace?.model || {};
   if (!model.configured) {
     openModelDialog();
     showToast(isNewProject ? "项目已创建，请先配置模型" : "请先配置模型");
+    return;
+  }
+  if (options.demoSeed) {
+    setView("agents");
+    chooseAgent("dante");
+    $("#chat-input").value = "按大纲写第一章（约 1500-2500 字）";
+    $("#chat-input").focus();
+    showToast("示范资产已就绪，可直接让 Dante 写第一章");
     return;
   }
   const items = normalizeNextActions(

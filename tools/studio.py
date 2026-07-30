@@ -558,13 +558,23 @@ class StudioApplication:
             raise StudioError("小说 ID 需为 2-64 位字母、数字、横线或下划线")
         if not title or len(title) > 120:
             raise StudioError("书名不能为空且不能超过 120 字")
+        template = str(payload.get("template") or "default").strip()
+        if template not in {"default", "demo_short"}:
+            raise StudioError("不支持的模板类型，可选 default 或 demo_short")
         try:
-            NovelApplicationService.initialize(target, novel_id, title)
+            NovelApplicationService.initialize(
+                target, novel_id, title, template=template
+            )
         except NovelServiceError as exc:
             raise self._translate_service_error(exc) from exc
         write_content_project_metadata(target)
         self._activate_project(target)
-        self._debug_event("project_init_completed", target=str(target), novel_id=novel_id)
+        self._debug_event(
+            "project_init_completed",
+            target=str(target),
+            novel_id=novel_id,
+            template=template,
+        )
         return self.workspace()
 
     def open_project(self, payload: dict[str, Any]) -> dict[str, Any]:

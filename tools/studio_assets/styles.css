@@ -468,6 +468,20 @@ select:focus-visible {
   line-height: 1.6;
 }
 
+.demo-seed-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  margin: 2px 0;
+}
+
+.demo-seed-label input[type="checkbox"] {
+  margin: 0;
+}
+
 .sidebar-footer {
   display: grid;
   padding: 10px;

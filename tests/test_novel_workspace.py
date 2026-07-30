@@ -117,6 +117,10 @@ def test_workspace_snapshot_surfaces_novel_readiness(tmp_path: Path):
         "# 基础设定\n\n进入雾城的人会失去一段记忆。", encoding="utf-8"
     )
     (root / "src" / "characters" / "lin.md").write_text("# 林岑", encoding="utf-8")
+    (root / "src" / "outline.md").write_text(
+        "# 大纲\n\n## 第一篇\n\n### 开头\n\n#### 第一章\n\n> 内容焦点: 林岑进入雾城\n",
+        encoding="utf-8",
+    )
     save_creative_focus(tmp_path, "demo", goal="完成开篇承诺")
 
     config = yaml.safe_load((tmp_path / "novel_config.yaml").read_text(encoding="utf-8"))
@@ -146,3 +150,29 @@ def test_onboarding_checklist_for_empty_project(tmp_path: Path):
     assert "作者意图" in checklist["missing_labels"]
     assert checklist["next_action_items"][0]["studio_action"] == "open_goethe"
     assert "题材" in checklist["suggested_first_message"]
+
+
+def test_outline_readiness_rejects_placeholder_template(tmp_path: Path):
+    init_project(tmp_path, "demo")
+    config = yaml.safe_load((tmp_path / "novel_config.yaml").read_text(encoding="utf-8"))
+    snapshot = build_workspace_snapshot(tmp_path, config)
+
+    assert snapshot.readiness["outline"] is False
+    assert snapshot.readiness["author_intent"] is False
+
+
+def test_demo_short_template_creates_writable_assets(tmp_path: Path):
+    init_project(tmp_path, "demo_novel", "雾城来信", template="demo_short")
+    config = yaml.safe_load((tmp_path / "novel_config.yaml").read_text(encoding="utf-8"))
+    snapshot = build_workspace_snapshot(tmp_path, config)
+
+    assert snapshot.readiness["author_intent"] is True
+    assert snapshot.readiness["background"] is True
+    assert snapshot.readiness["foundation"] is True
+    assert snapshot.readiness["characters"] is True
+    assert snapshot.readiness["outline"] is True
+    assert snapshot.readiness["creative_focus"] is True
+    assert (tmp_path / "data" / "novels" / "demo_novel" / "src" / "characters" / "lin_zhou.md").exists()
+    outline = (tmp_path / "data" / "novels" / "demo_novel" / "src" / "outline.md").read_text(encoding="utf-8")
+    assert "第一章" in outline
+    assert "待填写" not in outline

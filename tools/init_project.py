@@ -22,13 +22,21 @@ from typing import Optional
 from tools.frontmatter import compose_toml_document
 
 
-def init_project(project_root: Path, novel_id: str, title: Optional[str] = None):
+def init_project(
+    project_root: Path,
+    novel_id: str,
+    title: Optional[str] = None,
+    *,
+    template: str = "default",
+):
     """初始化小说项目
 
     Args:
         project_root: 项目根目录
         novel_id: 小说ID
         title: 小说标题（可选）
+        template: ``default`` 或 ``demo_short``。后者会写入示范资产，
+                  便于新用户直接进入写章流程。
     """
     project_root = Path(project_root)
     novel_root = project_root / f"data/novels/{novel_id}"
@@ -271,6 +279,12 @@ rhythm: "待定义"
     print(f"✓ 创建手稿目录: data/novels/{novel_id}/data/manuscript/arc_001")
 
     print(f"\n✅ 项目初始化完成: {novel_id}")
+    if template == "demo_short":
+        _seed_demo_assets(project_root, novel_id, title)
+        print("\n下一步:")
+        print("1. openwrite studio              # 打开 Studio 配置模型后写第一章")
+        print("2. openwrite dante               # CLI 直接推进正文")
+        return
     print("\n目录结构:")
     print("  src/           - 人类编辑的源文件 (source of truth)")
     print("    outline.md   - 大纲源文件")
@@ -285,6 +299,144 @@ rhythm: "待定义"
     print("2. openwrite desk     # 查看资产就绪度与建议")
     print("3. openwrite dante    # 资产就绪后再持续写正文")
     print("4. openwrite studio   # 也可用网页端完成同样流程")
+
+
+def _seed_demo_assets(project_root: Path, novel_id: str, title: Optional[str]) -> None:
+    """写入示范资产，使 demo 项目可立刻进入写章流程。"""
+    novel_root = project_root / "data" / "novels" / novel_id
+    demo_title = title or "雾城来信"
+    story_dir = novel_root / "src" / "story"
+    story_dir.mkdir(parents=True, exist_ok=True)
+    (story_dir / "author_intent.md").write_text(
+        f"""# 作者意图
+
+## 核心承诺
+
+在代价面前展现普通人如何主动选择，而不是被命运推着走。
+
+## 题材与目标读者
+
+悬疑 / 都市，面向喜欢克制叙述与情感余味的读者。
+
+## 主角与核心矛盾
+
+林舟：一个在钟表行业摸爬滚打的修表师，必须选择是揭露钟楼秘密，还是继续安稳生活。
+
+## 不可妥协
+
+- 主角必须主动承担代价
+- 避免靠新能力突然解围
+""",
+        encoding="utf-8",
+    )
+    (story_dir / "background.md").write_text(
+        f"""# 故事背景
+
+## 一句话故事
+
+林舟在祖传钟楼发现少了一拍的钟声，被迫在揭露家族秘密与维持平静之间做选择。
+
+## 核心冲突
+
+钟楼每七十年少响一拍，背后藏着林家与城中另一家族的旧契约。
+
+## 故事基调
+
+克制、冷调，以动作和细节代替情绪直述。
+""",
+        encoding="utf-8",
+    )
+    (story_dir / "foundation.md").write_text(
+        """# 基础设定
+
+## 故事发生的世界
+
+现代都市，旧城区保留着一座百年钟楼，是林舟家族的最后产业。
+
+## 核心机制
+
+钟声每七十年少响一拍，与林家签订的旧契约同步生效；
+少掉的那一拍对应一次必须有人承担的选择。
+
+## 叙事边界
+
+- 不使用超自然能力
+- 不出现全知视角
+""",
+        encoding="utf-8",
+    )
+    (novel_root / "src" / "characters" / "lin_zhou.md").write_text(
+        """# 林舟
+
+性别: 男
+年龄: 32
+职业: 修表师
+
+## 性格
+
+沉默、谨慎，习惯用行动而不是语言表达。
+对外人保持距离，对信任的人会主动承担。
+
+## 核心冲突
+
+在家族秘密与个人安稳之间选择是否揭开真相。
+""",
+        encoding="utf-8",
+    )
+    outline_path = novel_root / "src" / "outline.md"
+    outline_path.write_text(
+        f"""# {demo_title}
+
+> 核心主题: 主动选择与代价
+> 故事简介: 修表师林舟在祖传钟楼发现异常，被迫在真相与安稳间抉择
+> 目标字数: 9000
+
+## 第一篇
+
+> 篇情感弧线: 从安稳到动摇
+> 起止章节: ch_001-ch_003
+
+### 开头
+
+> 节结构: 引入日常、触发异常
+> 节情感: 平静 → 怀疑
+
+#### 第一章 钟声少了一拍
+
+> 预估字数: 3000
+> 戏剧位置: 开篇
+> 内容焦点: 林舟夜修钟楼，第一次听见少掉的一拍，并发现祖父日志里的空白页
+
+#### 第二章 日志里的空白
+
+> 预估字数: 3000
+> 戏剧位置: 发展
+> 内容焦点: 林舟调查日志，接触到另一个家族的后人，开始怀疑祖辈契约
+
+#### 第三章 选择之前
+
+> 预估字数: 3000
+> 戏剧位置: 收束
+> 内容焦点: 林舟在真相与安稳之间做出第一次主动选择
+""",
+        encoding="utf-8",
+    )
+
+    from tools.outline_sync import sync_outline_to_hierarchy
+
+    sync_outline_to_hierarchy(novel_root / "src", novel_root / "data")
+
+    from tools.novel_workspace import CreativeFocus, current_focus_path, render_creative_focus
+
+    focus = CreativeFocus(
+        goal="完成第一篇：让林舟主动承担第一次代价",
+        must_keep=["克制的叙述视角", "师徒关系的信任裂缝"],
+        must_avoid=["靠新能力强行解围"],
+    )
+    current_focus_path(project_root, novel_id).write_text(
+        render_creative_focus(focus), encoding="utf-8"
+    )
+    print(f"✓ 写入示范资产: {novel_id}")
 
 
 if __name__ == "__main__":

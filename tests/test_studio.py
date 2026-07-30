@@ -61,6 +61,29 @@ def test_studio_onboarding_ui_guides_new_projects_and_next_actions():
     assert "open_goethe" in javascript
     assert "创建后先配置模型" in html
     assert "next-action-button" in styles
+    assert "demo-seed-label" in styles
+    assert "project-demo-seed" in html
+    assert "suggestProjectPath" in javascript
+
+
+def test_studio_init_accepts_demo_short_template(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    app = StudioApplication(
+        tmp_path,
+        model_settings_store=StudioModelSettingsStore(tmp_path / "prefs"),
+    )
+    result = app.initialize_project(
+        {
+            "project_path": str(tmp_path / "demo_book"),
+            "novel_id": "demo_novel",
+            "title": "雾城来信",
+            "template": "demo_short",
+        }
+    )
+    assert result["initialized"] is True
+    assert result["snapshot"]["readiness"]["characters"] is True
+    assert result["snapshot"]["readiness"]["outline"] is True
+    assert result["snapshot"]["readiness"]["author_intent"] is True
 
 
 def test_relationship_topology_includes_search_and_context_controls():

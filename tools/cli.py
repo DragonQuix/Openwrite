@@ -185,7 +185,12 @@ def _add_init_command(subparsers):
     p = subparsers.add_parser("init", help="初始化新项目")
     p.add_argument("novel_id", help="小说 ID")
     p.add_argument("--title", default="", help="小说标题（可选）")
-    p.add_argument("--template", "-t", default="default", help="模板类型")
+    p.add_argument(
+        "--template",
+        "-t",
+        default="default",
+        help="模板：default 或 demo_short（带示范资产）",
+    )
 
 
 def _add_goethe_command(subparsers):
@@ -401,13 +406,17 @@ def _cmd_init(args) -> int:
     novel_id = args.novel_id
     project_root = Path.cwd()
     title = str(getattr(args, "title", "") or "").strip() or None
+    template = str(getattr(args, "template", "default") or "default").strip()
 
     logger.info(f"初始化项目: {novel_id}")
-    if getattr(args, "template", "default") != "default":
-        logger.info("当前仅支持 default 模板，已按默认模板初始化。")
+    if template not in {"default", "demo_short"}:
+        logger.warning("未知模板，将按 default 处理。")
+        template = "default"
 
     try:
-        NovelApplicationService.initialize(project_root, novel_id, title)
+        NovelApplicationService.initialize(
+            project_root, novel_id, title, template=template
+        )
     except NovelServiceError as exc:
         logger.error(str(exc))
         return 1

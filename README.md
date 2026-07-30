@@ -100,9 +100,24 @@ cd Openwrite
 python3.10 -m venv .venv
 source .venv/bin/activate
 pip install -e .
+openwrite studio
 ```
 
-### 2. 配置模型
+Studio 会自动提示你选择作品目录（默认 `~/OpenWriteNovels/<书名>`），配置模型后即可开始。
+
+### 2. 快速体验（带示范资产）
+
+如果想跳过规划直接写一章：
+
+```bash
+openwrite init demo_novel --title "雾城来信" --template demo_short
+openwrite studio
+```
+
+或在 Studio 创建对话框勾选「创建带示范资产的短篇练习」。
+示范资产包含已填写的作者意图、背景、人物、三章大纲和创作罗盘，可直接进入 Dante 写第一章。
+
+### 3. 配置模型
 
 使用网页端时，直接点击 Studio 顶栏常驻的 **模型设置**，可以即时填写或切换
 DeepSeek V4 Pro / V4 Flash、OpenAI 格式接口、Anthropic 格式接口或自定义接口，

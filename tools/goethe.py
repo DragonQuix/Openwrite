@@ -795,6 +795,14 @@ class GoetheChatAgent:
 
 def run_goethe() -> int:
     """运行 Goethe 长会话规划 Shell。"""
+    config_path = Path.cwd() / "novel_config.yaml"
+    if not config_path.exists():
+        print(
+            "❌ 当前目录不是小说项目。\n"
+            "请先运行 `openwrite init <novel_id>` 或 `openwrite studio` 创建作品，"
+            "再进入 Goethe 规划会话。"
+        )
+        return 1
     agent = GoetheChatAgent()
     result = agent.run()
 

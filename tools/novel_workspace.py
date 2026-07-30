@@ -424,11 +424,22 @@ def _read(path: Path) -> str:
 
 def _is_substantive(text: str) -> bool:
     stripped = re.sub(r"[`#>*_\-\s]", "", text)
-    return bool(stripped) and "待填写" not in stripped[:80]
+    if not stripped:
+        return False
+    head = stripped[:80]
+    for marker in ("待填写", "待填充", "待定义"):
+        if marker in head:
+            return False
+    return True
 
 
 def _outline_has_chapter(text: str) -> bool:
-    return bool(re.search(r"^####\s+.+", text, re.MULTILINE))
+    if not re.search(r"^####\s+.+", text, re.MULTILINE):
+        return False
+    for marker in ("内容焦点: 待填写", "内容焦点：待填写"):
+        if marker in text:
+            return False
+    return True
 
 
 def _target_units(outline: str) -> int:

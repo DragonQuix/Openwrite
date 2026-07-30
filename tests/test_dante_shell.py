@@ -799,3 +799,12 @@ def test_dante_and_goethe_cold_start_prompts_include_onboarding(tmp_path: Path):
     assert "edit_project_document" in DEFAULT_DANTE_SYSTEM_PROMPT
     assert "edit_world_relations" in DEFAULT_DANTE_SYSTEM_PROMPT
     assert "首次冷启动" in DEFAULT_GOETHE_SYSTEM_PROMPT
+
+
+def test_goethe_cli_refuses_without_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from tools.goethe import run_goethe
+
+    monkeypatch.chdir(tmp_path)
+    assert (tmp_path / "novel_config.yaml").exists() is False
+    exit_code = run_goethe()
+    assert exit_code == 1
