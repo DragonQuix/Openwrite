@@ -125,6 +125,7 @@ class SourceReportV2(BaseModel):
     relative_name: str
     source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     prompt_version: str
+    models: list[str] = Field(default_factory=list)
     status: Literal["completed", "incomplete"]
     summary: str
     findings: list[SourceFindingV2]

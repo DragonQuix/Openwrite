@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
-
 
 REGISTRY_LIMIT = 12
 
@@ -29,6 +29,18 @@ def is_framework_root(path: Path) -> bool:
     except OSError:
         return False
     return 'name = "openwrite"' in head.lower()
+
+
+def is_ephemeral_project_path(path: Path) -> bool:
+    """Return whether a project lives under an OS-managed temporary directory."""
+    root = Path(path).resolve()
+    temporary_roots = {
+        Path(tempfile.gettempdir()).resolve(),
+        Path("/tmp").resolve(),
+        Path("/private/tmp").resolve(),
+        Path("/var/tmp").resolve(),
+    }
+    return any(root == candidate or candidate in root.parents for candidate in temporary_roots)
 
 
 def project_metadata_path(project_root: Path) -> Path:
@@ -86,20 +98,25 @@ class RecentProject:
 class ProjectRegistry:
     """Small local-only registry; it never writes into a Git repository."""
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, *, allow_ephemeral: bool = False) -> None:
         self.path = Path(path or default_registry_path()).resolve()
+        self.allow_ephemeral = allow_ephemeral
 
     def list(self) -> list[dict[str, str]]:
         records = self._load()
-        available: list[dict[str, str]] = []
+        available: list[RecentProject] = []
         for record in records:
-            root = Path(record.path)
-            if (root / "novel_config.yaml").is_file():
-                available.append(record.to_dict())
-        return available[:REGISTRY_LIMIT]
+            root = Path(record.path).resolve()
+            if self._should_remember(root) and (root / "novel_config.yaml").is_file():
+                available.append(record)
+        if available != records:
+            self._save(available[:REGISTRY_LIMIT])
+        return [record.to_dict() for record in available[:REGISTRY_LIMIT]]
 
     def remember(self, project_root: Path) -> None:
         root = Path(project_root).resolve()
+        if not self._should_remember(root):
+            return
         config_path = root / "novel_config.yaml"
         if not config_path.is_file():
             return
@@ -118,6 +135,11 @@ class ProjectRegistry:
         records = [item for item in self._load() if item.path != record.path]
         records.insert(0, record)
         self._save(records[:REGISTRY_LIMIT])
+
+    def _should_remember(self, root: Path) -> bool:
+        if is_framework_root(root):
+            return False
+        return self.allow_ephemeral or not is_ephemeral_project_path(root)
 
     def remove(self, project_path: str) -> None:
         records = [

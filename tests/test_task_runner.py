@@ -22,7 +22,7 @@ def _wait_for(store: TaskStore, task_id: str, status: str, timeout: float = 3.0)
 def test_task_store_externalizes_large_input_and_redacts_credentials(tmp_path: Path):
     init_project(tmp_path, "demo")
     store = TaskStore(tmp_path, "demo")
-    content = "长" * 9000
+    content = ("长文本\r\n" * 1800) + "没有末尾换行"
 
     task = store.create(
         "source_extract",

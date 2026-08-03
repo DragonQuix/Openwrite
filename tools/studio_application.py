@@ -42,8 +42,10 @@ from tools.model_profiles import (
 )
 from tools.novel_service import NovelApplicationService, NovelServiceError
 from tools.novel_workspace import (
+    count_writing_units,
     list_chapters,
     novel_root,
+    split_manuscript,
 )
 from tools.outline_tree import (
     OutlineEditError,
@@ -146,7 +148,9 @@ class StudioApplication:
             self._task_runner = None
         self.project_root = Path(project_root).resolve()
         self.config_path = self.project_root / "novel_config.yaml"
-        self.initialized = self.config_path.exists()
+        self.initialized = self.config_path.exists() and not is_framework_root(
+            self.project_root
+        )
         self.config = self._load_config() if self.initialized else {}
         self.novel_id = str(self.config.get("novel_id") or "")
         if self.initialized and not self.novel_id:
@@ -762,6 +766,12 @@ class StudioApplication:
                                 "change_status": str(
                                     loaded.get("change_status") or ""
                                 ),
+                                "relative_name": str(loaded.get("relative_name") or ""),
+                                "total_chars": int(loaded.get("total_chars") or 0),
+                                "input_budget_tokens": int(
+                                    loaded.get("input_budget_tokens") or 0
+                                ),
+                                "updated_at": str(loaded.get("updated_at") or ""),
                                 "source_sha256": str(
                                     loaded.get("source_sha256") or ""
                                 ),
@@ -1468,6 +1478,68 @@ class StudioApplication:
             "workspace": self.workspace(),
         }
 
+    def preview_import(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Parse an import without writing chapters or advancing project state."""
+        self.require_project()
+        filename = str(payload.get("filename") or "import.md").strip()
+        content = str(payload.get("content") or "")
+        if not content.strip():
+            raise StudioError("导入内容不能为空")
+        suffix = Path(filename).suffix.lower()
+        if suffix not in {".txt", ".md", ".markdown"}:
+            raise StudioError("当前仅支持 TXT 和 Markdown 导入")
+        arc_id = str(payload.get("arc_id") or self.config.get("current_arc") or "arc_001")
+        if not re.fullmatch(r"arc_\d+", arc_id):
+            raise StudioError("篇 ID 必须形如 arc_001")
+
+        existing = list_chapters(self.project_root, self.novel_id)
+        start_number = payload.get("start_number")
+        if start_number in {None, ""}:
+            numbers = [
+                int(match.group(1))
+                for item in existing
+                if (match := re.fullmatch(r"ch_(\d+)", item.chapter_id))
+            ]
+            start = max(numbers, default=0) + 1
+        else:
+            try:
+                start = int(start_number)
+            except (TypeError, ValueError) as exc:
+                raise StudioError("起始章节必须是整数") from exc
+        if start < 1:
+            raise StudioError("起始章节号必须大于 0")
+
+        chunks = split_manuscript(content.strip(), fallback_title=Path(filename).stem)
+        target_dir = self.novel_root / "data" / "manuscript" / arc_id
+        chapters: list[dict[str, Any]] = []
+        for offset, (title, body) in enumerate(chunks):
+            chapter_id = f"ch_{start + offset:03d}"
+            normalized = f"# {title.strip()}\n\n{body.strip()}\n"
+            path = target_dir / f"{chapter_id}.md"
+            chapters.append(
+                {
+                    "chapter_id": chapter_id,
+                    "title": title.strip(),
+                    "writing_units": count_writing_units(normalized),
+                    "exists": path.exists(),
+                    "preview": re.sub(r"\s+", " ", body.strip())[:160],
+                }
+            )
+        conflicts = [item["chapter_id"] for item in chapters if item["exists"]]
+        force = bool(payload.get("force"))
+        return {
+            "filename": filename,
+            "arc_id": arc_id,
+            "start_number": start,
+            "chapter_count": len(chapters),
+            "writing_units": sum(int(item["writing_units"]) for item in chapters),
+            "detected_headings": len(chunks) > 1,
+            "conflicts": conflicts,
+            "can_import": not conflicts or force,
+            "force": force,
+            "chapters": chapters,
+        }
+
     def context_preview(self, chapter_id: str) -> dict[str, Any]:
         try:
             result = self._service().context_preview(chapter_id)
@@ -1632,14 +1704,14 @@ class StudioApplication:
         self.require_project()
         agent_name = self._normalize_agent_name(payload.get("agent") or "goethe")
         session_id = self._normalize_agent_session_id(payload.get("session_id"))
-        if session_id == "default":
-            raise StudioError("默认会话不能删除")
+        clearing_default = session_id == "default"
         store = self._agent_session_store(agent_name, session_id)
         session_root = self.novel_root / "data" / "workflows" / "sessions" / agent_name
         self._debug_event(
             "agent_session_delete_requested",
             agent=agent_name,
             session_id=session_id,
+            clearing_default=clearing_default,
             state_path=self._project_relative_path(store.path),
             transcript_path=self._project_relative_path(store.transcript_path),
         )
@@ -1659,7 +1731,8 @@ class StudioApplication:
             deleted_files.append(self._project_relative_path(path))
         result = {
             **self.agent_surface(agent_name, limit=80, session_id="default"),
-            "deleted": True,
+            "deleted": not clearing_default,
+            "cleared": clearing_default,
             "deleted_session_id": session_id,
             "deleted_files": deleted_files,
         }
@@ -1667,6 +1740,7 @@ class StudioApplication:
             "agent_session_delete_completed",
             agent=agent_name,
             session_id=session_id,
+            clearing_default=clearing_default,
             deleted_files=deleted_files,
         )
         return result
@@ -1759,7 +1833,7 @@ class StudioApplication:
         updated_at = transcript.get("updated_at") or state_updated
         first_user = str(transcript.get("first_user") or "").strip()
         last_preview = str(transcript.get("last_preview") or "").strip()
-        label = "默认会话" if is_default else "新会话"
+        label = "初始会话" if is_default else "新会话"
         title_source = first_user or last_preview
         title = self._agent_session_title(title_source, label)
         return {
@@ -2563,7 +2637,26 @@ class StudioApplication:
         response = self.source_action(payload)
         context.phase("validating", "整理来源结果")
         context.checkpoint()
-        return {"result": response.get("result", {})}
+        result = response.get("result", {})
+        if str(payload.get("action") or "") == "analyze_v2" and isinstance(result, dict):
+            analysis = result.get("analysis")
+            if isinstance(analysis, dict) and analysis.get("ok") is False:
+                failures = analysis.get("failures")
+                failure_list = failures if isinstance(failures, list) else []
+                first = failure_list[0] if failure_list else {}
+                first = first if isinstance(first, dict) else {}
+                message = str(first.get("message") or "来源分块分析未完成")
+                raise StudioError(
+                    f"参考分析未完成：{message}",
+                    HTTPStatus.BAD_GATEWAY,
+                    code=str(first.get("code") or "SOURCE_ANALYSIS_FAILED"),
+                    recoverable=True,
+                    details={
+                        "source_id": str(payload.get("source_id") or ""),
+                        "failures": failure_list,
+                    },
+                )
+        return {"result": result}
 
     def _task_research(
         self, payload: dict[str, Any], context: TaskContext
@@ -3283,6 +3376,9 @@ class LegacyStudioRequestHandler(SimpleHTTPRequestHandler):
                 return
             if route == "/api/import":
                 self._json(self.app.import_text(payload))
+                return
+            if route == "/api/import/preview":
+                self._json(self.app.preview_import(payload))
                 return
             if route == "/api/foreshadowing":
                 self._json(self.app.manage_foreshadowing(payload))

@@ -52,7 +52,9 @@ def test_studio_end_to_end_novel_crud_lifecycle(tmp_path: Path, monkeypatch: pyt
         project_root,
         writer_executor=writer,
         review_executor=reviewer,
-        project_registry=ProjectRegistry(tmp_path / "recent.yaml"),
+        project_registry=ProjectRegistry(
+            tmp_path / "recent.yaml", allow_ephemeral=True
+        ),
         model_settings_store=StudioModelSettingsStore(tmp_path / "studio-settings"),
     )
 
@@ -209,7 +211,10 @@ def test_studio_end_to_end_novel_crud_lifecycle(tmp_path: Path, monkeypatch: pyt
     review = app.review_chapter({"path": "data/manuscript/arc_001/ch_001.md"})
     assert review["result"]["score"] == 91
     assert review_calls == [{"chapter_id": "ch_001"}]
-    assert BookStateStore(project_root, "e2e_novel").load_or_create().stage == BookStage.CHAPTER_PREFLIGHT
+    assert (
+        BookStateStore(project_root, "e2e_novel").load_or_create().stage
+        == BookStage.CHAPTER_PREFLIGHT
+    )
 
     created_hook = app.manage_foreshadowing(
         {

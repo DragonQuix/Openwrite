@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>OpenWrite Studio</title>
   <link rel="stylesheet" href="/vendor/vditor/dist/index.css">
-  <link rel="stylesheet" href="/styles.css?v=vditor-1">
+  <link rel="stylesheet" href="/styles.css?v=outline-7">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true">
@@ -78,7 +78,10 @@
               <button class="nav-item" type="button" data-view="continuity"><svg><use href="#icon-network"/></svg><span>连续性</span></button>
               <button class="nav-item" type="button" data-view="research"><svg><use href="#icon-search"/></svg><span>深度研究</span></button>
               <button class="nav-item" type="button" data-view="search"><svg><use href="#icon-search"/></svg><span>项目搜索</span></button>
-              <button class="nav-item" type="button" data-view="tools"><svg><use href="#icon-tools"/></svg><span>导入导出</span></button>
+              <button class="nav-item" type="button" data-view="transfer"><svg><use href="#icon-file"/></svg><span>导入导出</span></button>
+              <button class="nav-item" type="button" data-view="deconstruct"><svg><use href="#icon-book"/></svg><span>拆书</span></button>
+              <button class="nav-item" type="button" data-view="skills"><svg><use href="#icon-sparkles"/></svg><span>Skills</span></button>
+              <button class="nav-item" type="button" data-view="tools"><svg><use href="#icon-tools"/></svg><span>高级工具</span></button>
               <button class="nav-item" type="button" data-nav-command="tasks"><svg><use href="#icon-tasks"/></svg><span>任务中心</span></button>
               <button class="nav-item" type="button" data-nav-command="settings"><svg><use href="#icon-settings"/></svg><span>模型与设置</span></button>
             </div>
@@ -96,11 +99,6 @@
           </select>
         </div>
         <div id="document-list" class="document-list" role="list"></div>
-        <div class="sidebar-footer">
-          <a class="export-link" href="/api/export?format=md">导出 MD</a>
-          <a class="export-link" href="/api/export?format=txt">导出 TXT</a>
-          <a class="export-link" href="/api/export?format=epub">导出 EPUB</a>
-        </div>
       </aside>
       <button id="mobile-nav-backdrop" class="mobile-nav-backdrop" type="button" aria-label="关闭导航" hidden></button>
       <button id="inspector-backdrop" class="inspector-backdrop" type="button" aria-label="关闭助手背景层" hidden></button>
@@ -329,43 +327,71 @@
 
         <section id="outline-view" class="outline-view" hidden aria-labelledby="outline-title">
           <div class="outline-header">
-            <div>
-              <p class="eyebrow">STRUCTURED OUTLINE</p>
-              <h1 id="outline-title">大纲结构</h1>
-              <p class="section-description">从 <code>src/outline.md</code> 实时生成，不维护第二份大纲。</p>
+            <div class="outline-title-block">
+              <div class="outline-title-row">
+                <svg aria-hidden="true"><use href="#icon-outline"/></svg>
+                <h1 id="outline-title">大纲</h1>
+                <code>src/outline.md</code>
+              </div>
+              <div id="outline-stats" class="outline-stats" aria-live="polite"></div>
             </div>
             <div class="outline-header-actions">
-              <button id="outline-add-volume" class="quiet-button" type="button">新增卷</button>
-              <button id="outline-source" class="quiet-button" type="button">编辑 Markdown 原文</button>
-              <button id="outline-refresh" class="quiet-button" type="button">刷新结构</button>
-              <button id="outline-smart-create" class="primary-button" type="button">创建建议章节</button>
+              <button id="outline-add-volume" class="quiet-button" type="button"><span aria-hidden="true">＋</span>新增卷</button>
+              <button id="outline-source" class="quiet-button" type="button"><svg aria-hidden="true"><use href="#icon-file"/></svg>编辑原文</button>
+              <button id="outline-refresh" class="icon-button" type="button" aria-label="刷新大纲" title="刷新大纲"><span aria-hidden="true">↻</span></button>
+              <button id="outline-smart-create" class="primary-button" type="button">写推荐章节</button>
             </div>
           </div>
-          <div id="outline-stats" class="outline-stats" aria-live="polite"></div>
-          <div class="outline-workspace">
+          <div class="outline-mobile-switch segmented" role="tablist" aria-label="大纲工作区">
+            <button class="segment active" type="button" role="tab" aria-selected="true" data-outline-pane="tree">结构</button>
+            <button class="segment" type="button" role="tab" aria-selected="false" data-outline-pane="detail">节点</button>
+          </div>
+          <div class="outline-workspace" data-mobile-pane="tree">
             <nav class="outline-tree-panel" aria-label="大纲层级">
               <div class="outline-panel-heading">
-                <strong>结构树</strong>
-                <span id="outline-tree-count">0</span>
+                <div><strong>结构</strong><span id="outline-tree-count">0</span></div>
+                <div class="outline-panel-actions">
+                  <button id="outline-expand-all" class="icon-button" type="button" aria-label="展开全部节点" title="展开全部"><svg aria-hidden="true"><use href="#icon-chevron-right"/></svg></button>
+                  <button id="outline-collapse-all" class="icon-button" type="button" aria-label="收起全部节点" title="收起全部"><svg aria-hidden="true"><use href="#icon-chevron-right"/></svg></button>
+                </div>
               </div>
+              <div class="outline-tree-tools">
+                <label class="outline-search-field">
+                  <svg aria-hidden="true"><use href="#icon-search"/></svg>
+                  <input id="outline-search" type="search" autocomplete="off" placeholder="搜索节点" aria-label="搜索大纲节点">
+                </label>
+                <div class="outline-status-filter segmented" role="group" aria-label="章节状态">
+                  <button class="segment active" type="button" aria-pressed="true" data-outline-status="all">全部</button>
+                  <button class="segment" type="button" aria-pressed="false" data-outline-status="planned">待写</button>
+                  <button class="segment" type="button" aria-pressed="false" data-outline-status="drafted">已写</button>
+                </div>
+              </div>
+              <p id="outline-filter-status" class="outline-filter-status" role="status"></p>
               <ul id="outline-tree" class="outline-tree" role="tree"></ul>
             </nav>
             <article id="outline-detail" class="outline-detail" aria-labelledby="outline-detail-title">
-              <p class="eyebrow">NODE CONTEXT</p>
-              <h2 id="outline-detail-title">选择一个节点</h2>
-              <p id="outline-breadcrumb" class="outline-breadcrumb">从左侧结构树查看卷、幕、节或章。</p>
-              <div id="outline-node-meta" class="outline-node-meta"></div>
+              <header class="outline-detail-header">
+                <nav id="outline-breadcrumb" class="outline-breadcrumb" aria-label="当前大纲路径">选择一个节点</nav>
+                <div class="outline-detail-title-row">
+                  <h2 id="outline-detail-title">选择一个节点</h2>
+                  <div class="outline-detail-utility">
+                    <button id="outline-node-rename" class="icon-button" type="button" aria-label="重命名节点" title="重命名" disabled><svg aria-hidden="true"><use href="#icon-pen"/></svg></button>
+                    <button id="outline-node-delete" class="danger-button" type="button" disabled>删除</button>
+                  </div>
+                </div>
+                <div id="outline-node-meta" class="outline-node-meta"></div>
+                <div class="outline-detail-command-row">
+                  <div class="outline-edit-actions" aria-label="编辑所选大纲节点">
+                    <button id="outline-node-add-child" class="quiet-button" type="button" disabled>新增下级</button>
+                    <button id="outline-node-add-after" class="quiet-button" type="button" disabled>新增同级</button>
+                  </div>
+                  <div class="outline-detail-actions">
+                    <button id="outline-node-source" class="quiet-button" type="button" disabled><svg aria-hidden="true"><use href="#icon-file"/></svg>原文定位</button>
+                    <button id="outline-node-create" class="primary-button" type="button" disabled>用此章创建正文</button>
+                  </div>
+                </div>
+              </header>
               <div id="outline-node-summary" class="outline-node-summary"></div>
-              <div class="outline-edit-actions" aria-label="编辑所选大纲节点">
-                <button id="outline-node-rename" class="quiet-button" type="button" disabled>改名</button>
-                <button id="outline-node-add-child" class="quiet-button" type="button" disabled>新增下级</button>
-                <button id="outline-node-add-after" class="quiet-button" type="button" disabled>新增同级</button>
-                <button id="outline-node-delete" class="danger-button" type="button" disabled>删除</button>
-              </div>
-              <div class="outline-detail-actions">
-                <button id="outline-node-source" class="quiet-button" type="button" disabled>在原文中定位</button>
-                <button id="outline-node-create" class="primary-button" type="button" disabled>用此章创建正文</button>
-              </div>
             </article>
           </div>
         </section>
@@ -413,7 +439,7 @@
                 <strong>会话</strong>
                 <div class="agent-session-actions">
                   <button id="agent-session-new" class="icon-button" type="button" aria-label="新建会话" title="新建会话">＋</button>
-                  <button id="agent-session-delete" class="quiet-button danger-mini-button" type="button" disabled>删除</button>
+                  <button id="agent-session-delete" class="quiet-button danger-mini-button" type="button" disabled>清空</button>
                 </div>
               </div>
               <div id="agent-session-list" class="agent-session-list" role="listbox" aria-label="选择历史会话"></div>
@@ -539,12 +565,184 @@
           </div>
         </section>
 
+        <section id="transfer-view" class="workspace-view" hidden aria-labelledby="transfer-title">
+          <div class="section-title-row workspace-view-header">
+            <div>
+              <p class="eyebrow">MANUSCRIPT DELIVERY</p>
+              <h1 id="transfer-title">导入导出</h1>
+            </div>
+            <div class="transfer-metrics" aria-label="当前正文概况">
+              <span><strong id="transfer-chapter-count">0</strong> 章</span>
+              <span><strong id="transfer-writing-units">0</strong> 字</span>
+            </div>
+          </div>
+          <div class="transfer-layout">
+            <section class="transfer-panel" aria-labelledby="import-title">
+              <div class="workspace-panel-heading">
+                <div><p class="eyebrow">IMPORT</p><h2 id="import-title">导入正文</h2></div>
+                <span class="format-badge">TXT / MD</span>
+              </div>
+              <form id="import-form" class="compact-form transfer-form">
+                <label for="import-file">正文文件</label>
+                <input id="import-file" type="file" accept=".txt,.md,.markdown" required>
+                <div class="form-grid two">
+                  <label>目标篇<input id="import-arc" value="arc_001" pattern="arc_[0-9]+"></label>
+                  <label>起始章节<input id="import-start" type="number" min="1" placeholder="自动追加"></label>
+                </div>
+                <label class="check-row"><input id="import-force" type="checkbox">覆盖冲突章节</label>
+                <div class="row-actions transfer-actions">
+                  <button id="import-preview-button" class="quiet-button" type="button">解析预览</button>
+                  <button id="import-submit" class="primary-button" type="submit" disabled>确认导入</button>
+                </div>
+              </form>
+              <p id="import-status" class="form-status" role="status"></p>
+              <div id="import-preview" class="import-preview" aria-live="polite">
+                <p class="empty-state">选择正文文件后解析章节。</p>
+              </div>
+            </section>
+
+            <section class="transfer-panel" aria-labelledby="export-title">
+              <div class="workspace-panel-heading">
+                <div><p class="eyebrow">EXPORT</p><h2 id="export-title">导出整书</h2></div>
+                <span id="export-readiness" class="status-badge">等待正文</span>
+              </div>
+              <div class="export-book-summary">
+                <strong id="export-book-title">当前作品</strong>
+                <span id="export-book-range">0 章 · 0 字</span>
+              </div>
+              <fieldset id="export-format-options" class="export-format-options">
+                <legend>文件格式</legend>
+                <label class="export-format active">
+                  <input type="radio" name="export-format" value="md" checked>
+                  <strong>Markdown</strong><span>保留标题层级</span><small>.md</small>
+                </label>
+                <label class="export-format">
+                  <input type="radio" name="export-format" value="txt">
+                  <strong>纯文本</strong><span>适合通用阅读</span><small>.txt</small>
+                </label>
+                <label class="export-format">
+                  <input type="radio" name="export-format" value="epub">
+                  <strong>EPUB</strong><span>电子书阅读器</span><small>.epub</small>
+                </label>
+              </fieldset>
+              <a id="export-download" class="primary-button export-download-button" href="/api/export?format=md" download>下载 Markdown</a>
+              <p id="export-status" class="form-status" role="status"></p>
+            </section>
+          </div>
+        </section>
+
+        <section id="deconstruct-view" class="workspace-view" hidden aria-labelledby="deconstruct-title">
+          <div class="section-title-row workspace-view-header">
+            <div>
+              <p class="eyebrow">BOOK DECONSTRUCTION</p>
+              <h1 id="deconstruct-title">拆书</h1>
+            </div>
+            <div class="deconstruct-stats" aria-label="拆书来源状态">
+              <span><strong id="source-count">0</strong> 个来源</span>
+              <span><strong id="source-complete-count">0</strong> 已完成</span>
+            </div>
+          </div>
+          <div class="deconstruct-layout">
+            <section class="deconstruct-intake" aria-labelledby="source-intake-title">
+              <div class="workspace-panel-heading">
+                <div><p class="eyebrow">NEW SOURCE</p><h2 id="source-intake-title">新建拆书任务</h2></div>
+              </div>
+              <form id="source-form" class="compact-form source-form">
+                <div class="form-grid two">
+                  <label>来源 ID<input id="source-id" required placeholder="reference_01"></label>
+                  <label>分析重点<select id="source-focus"><option value="all">全面拆解</option><option value="narrative">结构、节奏与声音</option><option value="setting">人物、冲突与风险</option></select></label>
+                </div>
+                <label for="source-file">来源文件</label>
+                <input id="source-file" type="file" accept=".txt,.md,.markdown">
+                <label for="source-content">文本内容</label>
+                <textarea id="source-content" rows="7" placeholder="也可直接粘贴文本"></textarea>
+                <div class="form-grid two source-analysis-submit-row">
+                  <label>单块输入预算<input id="source-input-budget" type="number" min="256" max="100000" step="1" value="12000" inputmode="numeric"></label>
+                  <button id="source-extract" class="primary-button" type="submit">开始拆解</button>
+                </div>
+              </form>
+              <p id="source-status" class="form-status" role="status"></p>
+            </section>
+
+            <section class="deconstruct-library" aria-labelledby="source-library-title">
+              <div class="workspace-panel-heading">
+                <div><p class="eyebrow">SOURCE LIBRARY</p><h2 id="source-library-title">来源库</h2></div>
+                <button id="source-synthesize" class="quiet-button" type="button" disabled>综合所选</button>
+              </div>
+              <div id="source-list" class="source-list"></div>
+            </section>
+          </div>
+          <section class="deconstruct-report" aria-labelledby="source-report-title">
+            <div class="workspace-panel-heading">
+              <div><p class="eyebrow">EVIDENCE REPORT</p><h2 id="source-report-title">证据报告</h2></div>
+              <div class="source-analysis-toolbar">
+                <select id="source-promotion-target" aria-label="应用目标">
+                  <option value="style">风格方法</option>
+                  <option value="rules">项目规则候选</option>
+                  <option value="inspiration">灵感候选</option>
+                  <option value="setting_candidates">设定候选</option>
+                </select>
+                <button id="source-promotion-preview" class="quiet-button" type="button" disabled>预览应用</button>
+                <button id="source-promotion-apply" class="primary-button" type="button" disabled>确认应用</button>
+              </div>
+            </div>
+            <div id="source-report-actions" class="row-actions source-report-actions"></div>
+            <div id="source-report" class="source-report-view"><p class="empty-state">从来源库打开一份证据报告。</p></div>
+          </section>
+        </section>
+
+        <section id="skills-view" class="workspace-view" hidden aria-labelledby="skills-title">
+          <div class="section-title-row workspace-view-header">
+            <div>
+              <p class="eyebrow">RUNTIME POLICY</p>
+              <h1 id="skills-title">Skills</h1>
+            </div>
+            <div class="skill-stats" aria-label="Skill 状态">
+              <span><strong id="skill-available-count">0</strong> 可用</span>
+              <span><strong id="skill-active-count">0</strong> 本次启用</span>
+              <span><strong id="skill-diagnostic-count">0</strong> 诊断</span>
+            </div>
+          </div>
+          <div class="skills-layout">
+            <section class="skill-catalog" aria-labelledby="skill-catalog-title">
+              <div class="workspace-panel-heading">
+                <div><p class="eyebrow">CATALOG</p><h2 id="skill-catalog-title">已发现 Skills</h2></div>
+              </div>
+              <div id="runtime-skill-list" class="runtime-skill-list"></div>
+            </section>
+            <section class="skill-simulator" aria-labelledby="skill-simulator-title">
+              <div class="workspace-panel-heading">
+                <div><p class="eyebrow">RESOLUTION</p><h2 id="skill-simulator-title">运行模拟</h2></div>
+              </div>
+              <div class="form-grid two">
+                <label>Agent<select id="runtime-skill-agent"><option value="studio">Studio</option><option value="dante">Dante</option><option value="goethe">Goethe</option><option value="writer">Writer</option><option value="reviewer">Reviewer</option></select></label>
+                <label>任务<select id="runtime-skill-task"><option value="">通用任务</option><option value="chapter.write">章节写作</option><option value="chapter.review">章节审稿</option><option value="planning">故事规划</option><option value="review">审查</option></select></label>
+              </div>
+              <div class="row-actions">
+                <button id="runtime-skill-resolve" class="primary-button" type="button">解析本次运行</button>
+                <button id="runtime-skill-diagnose" class="quiet-button" type="button">运行诊断</button>
+              </div>
+              <p id="runtime-skill-status" class="form-status" role="status"></p>
+              <div id="runtime-skill-report" class="runtime-skill-report"><p class="empty-state">选择 Agent 与任务查看实际运行边界。</p></div>
+            </section>
+          </div>
+          <section class="runtime-rules-panel" aria-labelledby="runtime-rules-title">
+            <div class="workspace-panel-heading">
+              <div><p class="eyebrow">PROJECT RULES</p><h2 id="runtime-rules-title">项目规则</h2></div>
+              <div class="row-actions">
+                <button id="runtime-rules-preview" class="quiet-button" type="button">生成规则差异</button>
+                <button id="runtime-rules-apply" class="primary-button" type="button" disabled>确认应用</button>
+              </div>
+            </div>
+            <pre id="runtime-rules-diff" class="context-preview">尚未生成规则差异</pre>
+          </section>
+        </section>
+
         <section id="tools-view" class="workspace-view" hidden aria-labelledby="tools-title">
           <div class="section-title-row workspace-view-header">
             <div>
               <p class="eyebrow">OPERATIONS</p>
-              <h1 id="tools-title">小说工具箱</h1>
-              <p class="section-description">导入旧稿、同步真源、检查上下文、创建资产，以及管理风格/设定来源包。</p>
+              <h1 id="tools-title">高级工具</h1>
             </div>
           </div>
           <div class="tool-grid">
@@ -565,20 +763,6 @@
               <pre id="context-preview" class="context-preview">尚未组装</pre>
             </section>
             <section class="tool-card">
-              <h2>导入已有正文</h2>
-              <form id="import-form" class="compact-form">
-                <label for="import-file">TXT / Markdown 文件</label>
-                <input id="import-file" type="file" accept=".txt,.md,.markdown" required>
-                <div class="form-grid two">
-                  <label>目标篇<input id="import-arc" value="arc_001" pattern="arc_[0-9]+"></label>
-                  <label>起始章节<input id="import-start" type="number" min="1" placeholder="自动追加"></label>
-                </div>
-                <label class="check-row"><input id="import-force" type="checkbox">允许覆盖已有章节</label>
-                <button class="primary-button" type="submit">导入正文</button>
-              </form>
-              <p id="import-status" class="form-status" role="status"></p>
-            </section>
-            <section class="tool-card">
               <h2>新建小说资产</h2>
               <form id="create-document-form" class="compact-form">
                 <label for="create-kind">文档类型</label>
@@ -590,21 +774,6 @@
                 <button class="primary-button" type="submit">创建并打开</button>
               </form>
               <p id="create-status" class="form-status" role="status"></p>
-            </section>
-            <section class="tool-card">
-              <h2>Runtime Skill 与规则</h2>
-              <div class="form-grid two">
-                <label>解析 Agent<select id="runtime-skill-agent"><option value="studio">Studio</option><option value="dante">Dante</option><option value="goethe">Goethe</option><option value="writer">Writer</option><option value="reviewer">Reviewer</option></select></label>
-                <label class="check-row"><input id="runtime-skill-show-diagnostics" type="checkbox">显示诊断</label>
-              </div>
-              <div class="row-actions">
-                <button id="runtime-skill-resolve" class="quiet-button" type="button">解析当前 Skill</button>
-                <button id="runtime-skill-diagnose" class="quiet-button" type="button">检查 Skill</button>
-                <button id="runtime-rules-preview" class="quiet-button" type="button">预览规则</button>
-                <button id="runtime-rules-apply" class="primary-button" type="button" disabled>确认应用规则</button>
-              </div>
-              <p id="runtime-skill-status" class="form-status" role="status"></p>
-              <pre id="runtime-skill-report" class="context-preview">选择解析或预览后显示结果</pre>
             </section>
             <section class="tool-card tool-card-wide">
               <div class="subsection-heading"><h2>章节运行与干预</h2><span id="chapter-run-count">0</span></div>
@@ -644,37 +813,6 @@
                 <button id="rolling-plan-goethe" class="primary-button" type="button" disabled>交给 Goethe</button>
               </div>
               <p id="rolling-plan-status" class="form-status" role="status"></p>
-            </section>
-            <section class="tool-card tool-card-wide">
-              <div class="subsection-heading"><h2>参考分析</h2><span id="source-count">0</span></div>
-              <form id="source-form" class="compact-form source-form">
-                <div class="form-grid two">
-                  <label>来源 ID<input id="source-id" required placeholder="reference_01"></label>
-                  <label>分析重点<select id="source-focus"><option value="all">全面分析</option><option value="narrative">结构、节奏与声音</option><option value="setting">人物、冲突与风险</option></select></label>
-                </div>
-                <label for="source-file">来源文件（也可直接粘贴）</label>
-                <input id="source-file" type="file" accept=".txt,.md,.markdown">
-                <textarea id="source-content" rows="7" placeholder="粘贴你有权使用的样文或设定材料"></textarea>
-                <div class="form-grid two source-analysis-submit-row">
-                  <label>分块预算<input id="source-input-budget" type="number" min="256" max="100000" step="256" value="12000" inputmode="numeric"></label>
-                  <button id="source-extract" class="primary-button" type="submit">开始证据分析</button>
-                </div>
-              </form>
-              <p id="source-status" class="form-status" role="status"></p>
-              <div class="source-analysis-toolbar">
-                <button id="source-synthesize" class="quiet-button" type="button" disabled>综合所选</button>
-                <select id="source-promotion-target" aria-label="晋升目标">
-                  <option value="style">风格方法</option>
-                  <option value="rules">项目规则候选</option>
-                  <option value="inspiration">灵感候选</option>
-                  <option value="setting_candidates">设定候选</option>
-                </select>
-                <button id="source-promotion-preview" class="quiet-button" type="button" disabled>预览晋升</button>
-                <button id="source-promotion-apply" class="primary-button" type="button" disabled>确认应用</button>
-              </div>
-              <div id="source-list" class="source-list"></div>
-              <div id="source-report-actions" class="row-actions source-report-actions"></div>
-              <pre id="source-report" class="context-preview">选择“查看证据”后显示分析报告</pre>
             </section>
           </div>
         </section>
@@ -1198,6 +1336,6 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script id="openwrite-vditor-icons" src="/vendor/vditor/dist/js/icons/ant.js"></script>
   <script src="/vendor/vditor/dist/index.min.js"></script>
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/app.js?v=outline-6"></script>
 </body>
 </html>

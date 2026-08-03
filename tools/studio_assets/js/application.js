@@ -182,6 +182,7 @@ function renderWorkspace() {
   $("#onboarding-open").textContent = "新手引导";
   renderRecentChapters();
   renderNextActions(snapshot.next_action_items || snapshot.next_actions || []);
+  renderTransferSummary();
   fillFocus(snapshot.creative_focus);
   $("#fact-arc").textContent = snapshot.current_arc;
   $("#fact-chapter").textContent = snapshot.current_chapter;
@@ -191,7 +192,7 @@ function renderWorkspace() {
   $("#fact-review-score").textContent = snapshot.reviewed_chapters
     ? `${snapshot.average_review_score} / 100`
     : "-";
-  renderDocumentList(state.view === "dashboard" ? "chapters" : state.view);
+  renderDocumentList(documentListGroupForView(state.view));
   renderOperations();
   renderInspectorContext();
 }
@@ -432,6 +433,12 @@ function normalizeView(view) {
   return legacyLibraryViews[view] || view;
 }
 
+function documentListGroupForView(view) {
+  const normalized = normalizeView(view);
+  if (normalized === "outline") return "outline";
+  return ["chapters", ...libraryViews].includes(normalized) ? normalized : "chapters";
+}
+
 function syncNavigationState(view = state.view) {
   view = normalizeView(view);
   const section = navSection(view);
@@ -469,7 +476,7 @@ function setView(view, pushHistory = true) {
   }
   syncNavigationState(view);
   const toolsNav = $(".nav-tools");
-  if (toolsNav && ["continuity", "research", "search", "tools"].includes(view)) toolsNav.open = true;
+  if (toolsNav && ["continuity", "research", "search", "transfer", "deconstruct", "skills", "tools"].includes(view)) toolsNav.open = true;
   const dashboard = view === "dashboard";
   const outlineView = view === "outline";
   const reviewView = view === "review";
@@ -483,8 +490,11 @@ function setView(view, pushHistory = true) {
   $("#search-view").hidden = view !== "search";
   $("#agents-view").hidden = view !== "agents";
   $("#continuity-view").hidden = view !== "continuity";
+  $("#transfer-view").hidden = view !== "transfer";
+  $("#deconstruct-view").hidden = view !== "deconstruct";
+  $("#skills-view").hidden = view !== "skills";
   $("#tools-view").hidden = view !== "tools";
-  renderDocumentList(outlineView ? "outline" : (dashboard || reviewView || !documentView ? "chapters" : view));
+  renderDocumentList(documentListGroupForView(view));
   const activePath = state.library.editorMode === "asset"
     ? state.assets.draft?.path
     : state.document?.path;
@@ -542,6 +552,9 @@ async function openDocument(path, pushHistory) {
     $("#search-view").hidden = true;
     $("#agents-view").hidden = true;
     $("#continuity-view").hidden = true;
+    $("#transfer-view").hidden = true;
+    $("#deconstruct-view").hidden = true;
+    $("#skills-view").hidden = true;
     $("#tools-view").hidden = true;
     showDocumentEditor();
     $("#editor-path").textContent = doc.path;
@@ -589,6 +602,9 @@ function activateStructuredAssetEditor(asset, options = {}) {
   $("#search-view").hidden = true;
   $("#agents-view").hidden = true;
   $("#continuity-view").hidden = true;
+  $("#transfer-view").hidden = true;
+  $("#deconstruct-view").hidden = true;
+  $("#skills-view").hidden = true;
   $("#tools-view").hidden = true;
   $("#document-editor-pane").hidden = true;
   $("#asset-editor-pane").hidden = false;
@@ -653,6 +669,9 @@ async function loadOutline(chapterId = "") {
       state.outlineExpandedIds = new Set();
       state.outlineExpansionInitialized = false;
       state.outlineSelectedId = null;
+      state.outlineQuery = "";
+      state.outlineStatusFilter = "all";
+      state.outlineMobilePane = "tree";
     }
     if (chapterId) state.outlineSelectedId = chapterId;
     const nodeIds = new Set(flattenOutline(state.outline.roots || []).map((node) => node.id));
@@ -719,31 +738,87 @@ function renderOutline() {
   const outline = state.outline;
   if (!outline) return;
   const counts = outline.counts || {};
-  $("#outline-stats").textContent = `${counts.volume || 0} 卷 · ${counts.act || 0} 幕 · ${counts.section || 0} 节 · ${counts.chapter || 0} 章 · ${outline.drafted_chapters || 0} 章已有正文`;
-  $("#outline-tree-count").textContent = String((counts.volume || 0) + (counts.act || 0) + (counts.section || 0) + (counts.chapter || 0));
+  const stats = $("#outline-stats");
+  stats.replaceChildren();
+  [
+    [counts.volume || 0, "卷"],
+    [counts.act || 0, "幕"],
+    [counts.section || 0, "节"],
+    [counts.chapter || 0, "章"],
+    [outline.drafted_chapters || 0, "已写"],
+  ].forEach(([value, label]) => {
+    const item = document.createElement("span");
+    const number = document.createElement("strong");
+    number.textContent = String(value);
+    item.append(number, document.createTextNode(label));
+    stats.append(item);
+  });
   if (state.outlineRenamingId && !outlineNodeById(state.outlineRenamingId)) {
     state.outlineRenamingId = null;
   }
-  const root = $("#outline-tree");
-  root.replaceChildren();
-  (outline.roots || []).forEach((node) => root.append(buildOutlineTreeItem(node)));
+  renderOutlineTree();
   renderOutlineDetail();
+  syncOutlineMobilePane();
   const smart = $("#outline-smart-create");
   smart.disabled = !outline.recommendation || !state.workspace.model.configured;
   smart.title = state.workspace.model.configured ? "" : "请先配置模型";
 }
 
-function buildOutlineTreeItem(node) {
+function outlineNodeDirectMatch(node) {
+  const query = state.outlineQuery.trim().toLocaleLowerCase();
+  const status = state.outlineStatusFilter;
+  const queryMatch = !query || [node.title, node.id, node.label, ...(node.path || [])]
+    .join(" ")
+    .toLocaleLowerCase()
+    .includes(query);
+  const statusMatch = status === "all" || (node.kind === "chapter" && node.status === status);
+  return queryMatch && statusMatch;
+}
+
+function outlineNodeVisible(node) {
+  return outlineNodeDirectMatch(node)
+    || (node.children || []).some((child) => outlineNodeVisible(child));
+}
+
+function renderOutlineTree() {
+  const outline = state.outline;
+  if (!outline) return;
+  const roots = (outline.roots || []).filter((node) => outlineNodeVisible(node));
+  const filtered = Boolean(state.outlineQuery.trim()) || state.outlineStatusFilter !== "all";
+  const visibleCount = flattenOutline(roots).filter((node) => outlineNodeVisible(node)).length;
+  const totalCount = flattenOutline(outline.roots || []).length;
+  $("#outline-tree-count").textContent = filtered ? `${visibleCount}/${totalCount}` : String(totalCount);
+  $("#outline-filter-status").textContent = filtered
+    ? (visibleCount ? `显示 ${visibleCount} 个节点` : "没有匹配节点")
+    : "";
+  $("#outline-search").value = state.outlineQuery;
+  $$("[data-outline-status]").forEach((button) => {
+    const active = button.dataset.outlineStatus === state.outlineStatusFilter;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  const root = $("#outline-tree");
+  root.replaceChildren();
+  roots.forEach((node) => root.append(buildOutlineTreeItem(node, filtered)));
+  if (!roots.length) {
+    const empty = document.createElement("li");
+    empty.className = "outline-tree-empty";
+    empty.textContent = "没有匹配节点";
+    root.append(empty);
+  }
+}
+
+function buildOutlineTreeItem(node, filtered = false) {
   const item = document.createElement("li");
   item.className = `outline-tree-item kind-${node.kind}`;
   item.setAttribute("role", "treeitem");
   item.dataset.nodeId = node.id;
   const row = document.createElement("div");
   row.className = "outline-tree-row";
-  const children = node.children || [];
+  const children = (node.children || []).filter((child) => outlineNodeVisible(child));
   const group = document.createElement("ul");
   group.setAttribute("role", "group");
-  const expanded = state.outlineExpandedIds.has(node.id);
+  const expanded = filtered || state.outlineExpandedIds.has(node.id);
   if (children.length) {
     const toggle = document.createElement("button");
     toggle.type = "button";
@@ -818,6 +893,7 @@ function buildOutlineTreeItem(node) {
     nodeControl.addEventListener("click", async () => {
       state.outlineSelectedId = node.id;
       revealOutlineNode(node.id, true);
+      if (window.matchMedia("(max-width: 820px)").matches) state.outlineMobilePane = "detail";
       if (node.kind === "chapter") await loadOutline(node.id); else renderOutline();
     });
     nodeControl.addEventListener("dblclick", (event) => {
@@ -860,9 +936,34 @@ function buildOutlineTreeItem(node) {
     row.append(actions);
   }
   item.append(row);
-  children.forEach((child) => group.append(buildOutlineTreeItem(child)));
+  children.forEach((child) => group.append(buildOutlineTreeItem(child, filtered)));
   if (children.length) item.append(group);
   return item;
+}
+
+function setAllOutlineExpanded(expanded) {
+  if (!state.outline) return;
+  state.outlineExpandedIds = expanded
+    ? new Set(flattenOutline(state.outline.roots || [])
+      .filter((node) => (node.children || []).length)
+      .map((node) => node.id))
+    : new Set();
+  renderOutlineTree();
+}
+
+function setOutlineMobilePane(pane) {
+  state.outlineMobilePane = pane === "detail" ? "detail" : "tree";
+  syncOutlineMobilePane();
+}
+
+function syncOutlineMobilePane() {
+  const pane = state.outlineMobilePane === "detail" ? "detail" : "tree";
+  $(".outline-workspace").dataset.mobilePane = pane;
+  $$("[data-outline-pane]").forEach((button) => {
+    const active = button.dataset.outlinePane === pane;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
 }
 
 function renderOutlineDetail() {
@@ -874,8 +975,25 @@ function renderOutlineDetail() {
   title.classList.toggle("editable", Boolean(node?.editable));
   title.dataset.nodeId = node?.id || "";
   title.dataset.originalTitle = node?.title || "";
-  $("#outline-breadcrumb").textContent = node ? [...node.path, node.title].join(" / ") : "从左侧结构树查看卷、幕、节或章。";
-  $("#outline-node-meta").textContent = node ? `${node.label} · 原文第 ${node.line} 行${node.kind === "chapter" ? ` · ${node.status === "drafted" ? "已有正文" : "尚未写作"}` : ""}` : "";
+  renderOutlineBreadcrumb(node);
+  const meta = $("#outline-node-meta");
+  meta.replaceChildren();
+  if (node) {
+    const kind = document.createElement("span");
+    kind.className = `outline-meta-kind kind-${node.kind}`;
+    kind.textContent = node.label;
+    const id = document.createElement("code");
+    id.textContent = node.id;
+    const line = document.createElement("span");
+    line.textContent = `第 ${node.line} 行`;
+    meta.append(kind, id, line);
+    if (node.kind === "chapter") {
+      const status = document.createElement("span");
+      status.className = `outline-meta-status ${node.status}`;
+      status.textContent = node.status === "drafted" ? "已有正文" : "待写";
+      meta.append(status);
+    }
+  }
   renderOutlineSummaryEditor(node);
   $("#outline-node-source").disabled = !node;
   $("#outline-node-rename").disabled = !node?.editable;
@@ -888,6 +1006,36 @@ function renderOutlineDetail() {
   const create = $("#outline-node-create");
   create.disabled = !node || node.kind !== "chapter" || (node.status !== "drafted" && !state.workspace.model.configured);
   create.textContent = node?.status === "drafted" ? "打开已写正文" : "用此章创建正文";
+}
+
+function renderOutlineBreadcrumb(node) {
+  const root = $("#outline-breadcrumb");
+  root.replaceChildren();
+  if (!node) {
+    root.textContent = "选择一个节点";
+    return;
+  }
+  const pathIds = [...(outlineNodePathIds(state.outline?.roots || [], node.id) || []), node.id];
+  pathIds.forEach((nodeId, index) => {
+    const pathNode = outlineNodeById(nodeId);
+    if (!pathNode) return;
+    if (index) {
+      const separator = document.createElement("span");
+      separator.setAttribute("aria-hidden", "true");
+      separator.textContent = "/";
+      root.append(separator);
+    }
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = pathNode.title;
+    button.setAttribute("aria-current", pathNode.id === node.id ? "page" : "false");
+    button.addEventListener("click", async () => {
+      state.outlineSelectedId = pathNode.id;
+      revealOutlineNode(pathNode.id, true);
+      if (pathNode.kind === "chapter") await loadOutline(pathNode.id); else renderOutline();
+    });
+    root.append(button);
+  });
 }
 
 function renderOutlineSummaryEditor(node) {
@@ -2201,20 +2349,154 @@ function renderRuntimeSkillStatus(operations) {
   const runtime = operations.runtime_skills || {};
   const ruleStatus = operations.runtime_rules || {};
   const skills = runtime.skills || [];
+  const diagnostics = runtime.diagnostics || [];
+  state.runtimeSkill.skills = skills;
+  state.runtimeSkill.diagnostics = diagnostics;
   const active = ruleStatus.active === false ? "未启用" : (ruleStatus.revision ? `已启用 · ${ruleStatus.revision}` : "未启用");
   $("#runtime-skill-status").textContent = `可用 Skill ${skills.length} · 规则 ${active}`;
-  if (!state.runtimeSkill.resolution) {
-    $("#runtime-skill-report").textContent = skills.map((skill) => `${skill.id}@${skill.version} · ${skill.layer}`).join("\n") || "没有可用 Skill";
+  $("#skill-available-count").textContent = String(skills.length);
+  $("#skill-active-count").textContent = String(state.runtimeSkill.resolution?.skills?.length || 0);
+  $("#skill-diagnostic-count").textContent = String(diagnostics.length);
+  renderRuntimeSkillCatalog();
+}
+
+function runtimeSkillLayerLabel(layer) {
+  return { builtin: "内置", global: "全局", project: "本作品" }[layer] || layer;
+}
+
+function renderRuntimeSkillCatalog() {
+  const root = $("#runtime-skill-list");
+  root.replaceChildren();
+  const activeIds = new Set((state.runtimeSkill.resolution?.skills || []).map((skill) => skill.id));
+  if (!state.runtimeSkill.skills.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "没有发现可用 Skill";
+    root.append(empty);
+    return;
   }
+  state.runtimeSkill.skills.forEach((skill) => {
+    const row = document.createElement("article");
+    row.className = `runtime-skill-row${activeIds.has(skill.id) ? " active" : ""}`;
+    const header = document.createElement("div");
+    const name = document.createElement("strong");
+    name.textContent = skill.name || skill.id;
+    const version = document.createElement("code");
+    version.textContent = `${skill.id}@${skill.version}`;
+    header.append(name, version);
+    const description = document.createElement("p");
+    description.textContent = skill.description || "未提供说明";
+    const meta = document.createElement("div");
+    meta.className = "skill-meta";
+    [
+      runtimeSkillLayerLabel(skill.layer),
+      `${skill.budget?.max_tool_calls || 0} 次工具上限`,
+      skill.output_contract || "text",
+    ].forEach((value) => {
+      const badge = document.createElement("span");
+      badge.textContent = value;
+      meta.append(badge);
+    });
+    if ((skill.requires || []).length) {
+      const dependency = document.createElement("small");
+      dependency.textContent = `依赖：${skill.requires.join("、")}`;
+      meta.append(dependency);
+    }
+    row.append(header, description, meta);
+    root.append(row);
+  });
+}
+
+function appendSkillDiagnostics(root, diagnostics) {
+  if (!diagnostics?.length) return;
+  const section = document.createElement("section");
+  section.className = "skill-resolution-section diagnostics";
+  const heading = document.createElement("h3");
+  heading.textContent = "诊断";
+  section.append(heading);
+  diagnostics.forEach((diagnostic) => {
+    const row = document.createElement("p");
+    row.className = `skill-diagnostic ${diagnostic.severity || "error"}`;
+    row.textContent = `${diagnostic.skill_id ? `${diagnostic.skill_id} · ` : ""}${diagnostic.message}`;
+    section.append(row);
+  });
+  root.append(section);
+}
+
+function renderRuntimeSkillResolution(payload) {
+  const root = $("#runtime-skill-report");
+  root.replaceChildren();
+  const summary = document.createElement("div");
+  summary.className = "skill-resolution-summary";
+  [
+    [payload.skills?.length || 0, "启用 Skills"],
+    [payload.allowed_tools?.length || 0, "允许工具"],
+    [payload.budget?.max_tool_calls || 0, "工具调用上限"],
+  ].forEach(([value, label]) => {
+    const metric = document.createElement("span");
+    const number = document.createElement("strong");
+    number.textContent = String(value);
+    metric.append(number, document.createTextNode(label));
+    summary.append(metric);
+  });
+  root.append(summary);
+
+  const selected = document.createElement("section");
+  selected.className = "skill-resolution-section";
+  const selectedTitle = document.createElement("h3");
+  selectedTitle.textContent = "本次启用";
+  selected.append(selectedTitle);
+  const selectedList = document.createElement("div");
+  selectedList.className = "skill-token-list";
+  (payload.skills || []).forEach((skill) => {
+    const token = document.createElement("span");
+    token.textContent = skill.name || skill.id;
+    selectedList.append(token);
+  });
+  if (!(payload.skills || []).length) selectedList.textContent = "没有匹配当前运行的 Skill";
+  selected.append(selectedList);
+  root.append(selected);
+
+  if ((payload.reasons || []).length) {
+    const reasons = document.createElement("section");
+    reasons.className = "skill-resolution-section";
+    const heading = document.createElement("h3");
+    heading.textContent = "启用依据";
+    const list = document.createElement("ul");
+    payload.reasons.forEach((reason) => {
+      const item = document.createElement("li");
+      item.textContent = reason;
+      list.append(item);
+    });
+    reasons.append(heading, list);
+    root.append(reasons);
+  }
+
+  const tools = document.createElement("details");
+  tools.className = "skill-tool-boundary";
+  const toolsSummary = document.createElement("summary");
+  toolsSummary.textContent = `工具边界 · ${payload.allowed_tools?.length || 0}`;
+  const toolList = document.createElement("div");
+  toolList.className = "skill-token-list tools";
+  (payload.allowed_tools || []).forEach((tool) => {
+    const token = document.createElement("code");
+    token.textContent = tool;
+    toolList.append(token);
+  });
+  tools.append(toolsSummary, toolList);
+  root.append(tools);
+  appendSkillDiagnostics(root, payload.diagnostics || []);
 }
 
 async function resolveRuntimeSkills() {
   $("#runtime-skill-status").textContent = "正在解析 Runtime Skill…";
   try {
-    const payload = await api("/api/runtime-skills", {method: "POST", body: JSON.stringify({action: "resolve", agent: $("#runtime-skill-agent").value})});
+    const payload = await api("/api/runtime-skills", {method: "POST", body: JSON.stringify({action: "resolve", agent: $("#runtime-skill-agent").value, task: $("#runtime-skill-task").value})});
     state.runtimeSkill.resolution = payload;
-    $("#runtime-skill-report").textContent = JSON.stringify(payload, null, 2);
-    $("#runtime-skill-status").textContent = `解析完成 · ${payload.resolution_id}`;
+    renderRuntimeSkillResolution(payload);
+    renderRuntimeSkillCatalog();
+    $("#skill-active-count").textContent = String(payload.skills?.length || 0);
+    $("#runtime-skill-status").textContent = `解析完成 · ${payload.skills?.length || 0} 个 Skill 生效`;
   } catch (error) { $("#runtime-skill-status").textContent = error.message; }
 }
 
@@ -2222,7 +2504,16 @@ async function diagnoseRuntimeSkills() {
   $("#runtime-skill-status").textContent = "正在检查 Runtime Skill…";
   try {
     const payload = await api("/api/runtime-skills", {method: "POST", body: JSON.stringify({action: "diagnose"})});
-    $("#runtime-skill-report").textContent = JSON.stringify(payload, null, 2);
+    const root = $("#runtime-skill-report");
+    root.replaceChildren();
+    if (payload.diagnostics?.length) appendSkillDiagnostics(root, payload.diagnostics);
+    else {
+      const clean = document.createElement("p");
+      clean.className = "skill-diagnostic clean";
+      clean.textContent = `${payload.skills || 0} 个 Skill 均通过依赖、冲突与资源路径检查`;
+      root.append(clean);
+    }
+    $("#skill-diagnostic-count").textContent = String(payload.diagnostics?.length || 0);
     $("#runtime-skill-status").textContent = payload.diagnostics?.length ? "发现需要处理的诊断" : "Skill 检查通过";
   } catch (error) { $("#runtime-skill-status").textContent = error.message; }
 }
@@ -2233,7 +2524,7 @@ async function previewRuntimeRules() {
     const payload = await api("/api/rules", {method: "POST", body: JSON.stringify({action: "preview"})});
     state.runtimeSkill.rulePreview = payload;
     $("#runtime-rules-apply").disabled = false;
-    $("#runtime-skill-report").textContent = payload.unified_diff || "规则没有变化";
+    $("#runtime-rules-diff").textContent = payload.unified_diff || "规则没有变化";
     $("#runtime-skill-status").textContent = `规则预览已生成 · ${payload.preview_id}`;
   } catch (error) { $("#runtime-skill-status").textContent = error.message; }
 }
@@ -2245,7 +2536,7 @@ async function applyRuntimeRules() {
   try {
     const payload = await api("/api/rules", {method: "POST", body: JSON.stringify({action: "apply", preview_id: preview.preview_id, confirm: true})});
     state.runtimeSkill.rulePreview = null;
-    $("#runtime-skill-report").textContent = `已启用规则 revision: ${payload.revision}`;
+    $("#runtime-rules-diff").textContent = `已启用规则 revision: ${payload.revision}`;
     $("#runtime-skill-status").textContent = "规则已确认应用";
     await loadWorkspace();
   } catch (error) { $("#runtime-rules-apply").disabled = false; $("#runtime-skill-status").textContent = error.message; }
@@ -2255,6 +2546,9 @@ function renderSourcePacks(packs) {
   const root = $("#source-list");
   root.replaceChildren();
   $("#source-count").textContent = String(packs.length);
+  $("#source-complete-count").textContent = String(
+    packs.filter((pack) => pack.analysis_v2?.status === "completed").length,
+  );
   const currentSources = new Map(packs.map((pack) => [pack.source_id, pack]));
   Array.from(state.sourceAnalysis.selectedSourceIds).forEach((sourceId) => {
     if (!currentSources.has(sourceId)) state.sourceAnalysis.selectedSourceIds.delete(sourceId);
@@ -2279,7 +2573,7 @@ function renderSourcePacks(packs) {
   }
   packs.forEach((pack) => {
     const row = document.createElement("article");
-    row.className = "source-row";
+    row.className = `source-row${state.sourceAnalysis.activeSourceId === pack.source_id ? " active" : ""}`;
     const copy = document.createElement("div");
     copy.className = "source-row-select";
     const selection = document.createElement("input");
@@ -2293,15 +2587,29 @@ function renderSourcePacks(packs) {
       syncSourceAnalysisControls();
     });
     const sourceCopy = document.createElement("div");
-    const title = document.createElement("strong");
-    title.textContent = pack.source_id;
-    const meta = document.createElement("span");
     const analysis = pack.analysis_v2 || {};
+    const title = document.createElement("strong");
+    title.textContent = analysis.relative_name || pack.source_id;
+    const sourceId = document.createElement("code");
+    sourceId.textContent = pack.source_id;
+    const meta = document.createElement("span");
+    const statusLabel = {
+      pending: "等待分析", running: "分析中", completed: "已完成",
+      failed: "部分失败", stale: "需要更新", invalid: "数据异常",
+    }[analysis.status] || analysis.status;
     meta.textContent = analysis.status
-      ? `${analysis.status} · ${analysis.completed_chunks || 0}/${analysis.total_chunks || 0} 块${analysis.failed_chunks ? ` · ${analysis.failed_chunks} 失败` : ""}`
+      ? `${statusLabel} · ${analysis.completed_chunks || 0}/${analysis.total_chunks || 0} 块 · ${formatNumber(analysis.total_chars || 0)} 字符${analysis.failed_chunks ? ` · ${analysis.failed_chunks} 失败` : ""}`
       : [pack.style_ready ? "V1 风格" : "", pack.setting_ready ? "V1 设定" : ""]
         .filter(Boolean).join(" + ") || "待分析";
-    sourceCopy.append(title, meta);
+    const progress = document.createElement("span");
+    progress.className = "source-progress";
+    const progressFill = document.createElement("i");
+    const percent = analysis.total_chunks
+      ? Math.round(((analysis.completed_chunks || 0) / analysis.total_chunks) * 100)
+      : 0;
+    progressFill.style.width = `${percent}%`;
+    progress.append(progressFill);
+    sourceCopy.append(title, sourceId, meta, progress);
     copy.append(selection, sourceCopy);
     const actions = document.createElement("div");
     actions.className = "row-actions";
@@ -2313,7 +2621,10 @@ function renderSourcePacks(packs) {
       button.type = "button";
       button.className = "text-button";
       button.textContent = label;
-      button.addEventListener("click", () => runSourceAction(action, pack.source_id));
+      button.addEventListener("click", () => {
+        state.sourceAnalysis.activeSourceId = pack.source_id;
+        runSourceAction(action, pack.source_id);
+      });
       actions.append(button);
     });
     row.append(copy, actions);
@@ -2339,27 +2650,74 @@ function renderSourceAnalysis(result) {
   const manifest = result?.manifest || result?.analysis?.manifest || null;
   const root = $("#source-report-actions");
   root.replaceChildren();
+  const reportRoot = $("#source-report");
+  reportRoot.replaceChildren();
   if (!report) {
-    $("#source-report").textContent = JSON.stringify(result || {}, null, 2);
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "当前来源还没有可用报告";
+    reportRoot.append(empty);
     return;
   }
-  const lines = [
-    `状态：${report.status}`,
-    `来源：${report.source_id}`,
-    `摘要：${report.summary || "（无）"}`,
-    "",
-    "证据化结论：",
-  ];
+  const summary = document.createElement("div");
+  summary.className = "source-report-summary";
+  const summaryHeader = document.createElement("div");
+  const summaryTitle = document.createElement("strong");
+  summaryTitle.textContent = manifest?.relative_name || report.source_id;
+  const summaryStatus = document.createElement("span");
+  summaryStatus.className = `status-badge${report.status === "completed" ? " ready" : ""}`;
+  summaryStatus.textContent = report.status === "completed" ? "证据完整" : "报告不完整";
+  summaryHeader.append(summaryTitle, summaryStatus);
+  const summaryText = document.createElement("p");
+  summaryText.textContent = report.summary || "暂无摘要";
+  const summaryMeta = document.createElement("span");
+  const reportModels = (report.models || []).filter(Boolean);
+  summaryMeta.textContent = [
+    `${report.findings?.length || 0} 条结论`,
+    `${manifest?.chunks?.length || 0} 个分块`,
+    reportModels.length ? `模型 ${reportModels.join("、")}` : "",
+  ].filter(Boolean).join(" · ");
+  summary.append(summaryHeader, summaryText, summaryMeta);
+  reportRoot.append(summary);
+
+  const categories = {
+    promise: "作品承诺", structure: "结构", character: "人物", conflict: "冲突",
+    hook: "钩子", pacing: "节奏", voice: "声音", reader_drive: "阅读驱动",
+    method: "可复用方法", risk: "风险",
+  };
+  const findings = document.createElement("div");
+  findings.className = "source-findings";
   (report.findings || []).forEach((finding) => {
-    lines.push(`- [${finding.category}] ${finding.claim}`);
+    const item = document.createElement("article");
+    item.className = "source-finding";
+    const findingHeader = document.createElement("div");
+    const category = document.createElement("span");
+    category.className = "finding-category";
+    category.textContent = categories[finding.category] || finding.category;
+    const confidence = document.createElement("span");
+    confidence.textContent = `${Math.round(Number(finding.confidence || 0) * 100)}% 置信度`;
+    findingHeader.append(category, confidence);
+    const claim = document.createElement("strong");
+    claim.textContent = finding.claim;
+    item.append(findingHeader, claim);
     (finding.evidence || []).forEach((evidence) => {
-      lines.push(`  L${evidence.line_start}-${evidence.line_end} · ${evidence.quote}`);
+      const quote = document.createElement("blockquote");
+      const quoteText = document.createElement("p");
+      quoteText.textContent = evidence.quote;
+      const location = document.createElement("cite");
+      location.textContent = `L${evidence.line_start}-${evidence.line_end}`;
+      quote.append(quoteText, location);
+      item.append(quote);
     });
+    findings.append(item);
   });
-  if (report.failed_chunks?.length) {
-    lines.push("", `失败分块：${report.failed_chunks.join(", ")}`);
+  if (!(report.findings || []).length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "没有生成证据化结论";
+    findings.append(empty);
   }
-  $("#source-report").textContent = lines.join("\n");
+  reportRoot.append(findings);
   (manifest?.chunks || []).filter((chunk) => chunk.status === "failed").forEach((chunk) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -2406,22 +2764,140 @@ async function inspectContext(event) {
   }
 }
 
+function renderTransferSummary() {
+  const snapshot = state.workspace?.snapshot || {};
+  const chapterCount = Number(snapshot.chapters || 0);
+  const writingUnits = Number(snapshot.writing_units || 0);
+  $("#transfer-chapter-count").textContent = formatNumber(chapterCount);
+  $("#transfer-writing-units").textContent = formatNumber(writingUnits);
+  $("#export-book-title").textContent = snapshot.title || "当前作品";
+  $("#export-book-range").textContent = `${formatNumber(chapterCount)} 章 · ${formatNumber(writingUnits)} 字`;
+  $("#export-readiness").textContent = chapterCount ? "可导出" : "等待正文";
+  $("#export-readiness").classList.toggle("ready", chapterCount > 0);
+  syncExportFormat();
+}
+
+function syncExportFormat() {
+  const selected = $('input[name="export-format"]:checked')?.value || "md";
+  const chapters = Number(state.workspace?.snapshot?.chapters || 0);
+  const labels = { md: "下载 Markdown", txt: "下载纯文本", epub: "下载 EPUB" };
+  $$(".export-format").forEach((item) => {
+    item.classList.toggle("active", item.querySelector("input")?.checked);
+  });
+  const download = $("#export-download");
+  download.textContent = labels[selected];
+  download.classList.toggle("disabled", !chapters);
+  download.setAttribute("aria-disabled", String(!chapters));
+  if (chapters) download.href = `/api/export?format=${encodeURIComponent(selected)}`;
+  else download.removeAttribute("href");
+}
+
+function invalidateImportPreview() {
+  state.transfer.importPreview = null;
+  state.transfer.importContent = "";
+  $("#import-submit").disabled = true;
+  $("#import-preview").replaceChildren();
+  const empty = document.createElement("p");
+  empty.className = "empty-state";
+  empty.textContent = "重新解析后可确认导入。";
+  $("#import-preview").append(empty);
+}
+
+async function importPayload() {
+  const file = $("#import-file").files[0];
+  if (!file) throw new Error("请选择 TXT 或 Markdown 正文文件");
+  const content = await file.text();
+  return {
+    filename: file.name,
+    content,
+    arc_id: $("#import-arc").value.trim(),
+    start_number: $("#import-start").value,
+    force: $("#import-force").checked,
+  };
+}
+
+function renderImportPreview(preview) {
+  const root = $("#import-preview");
+  root.replaceChildren();
+  const summary = document.createElement("div");
+  summary.className = `import-preview-summary${preview.can_import ? " ready" : " conflict"}`;
+  const copy = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = `${preview.chapter_count} 章 · ${formatNumber(preview.writing_units)} 字`;
+  const detail = document.createElement("span");
+  detail.textContent = `${preview.arc_id} · 从 ch_${String(preview.start_number).padStart(3, "0")} 开始`;
+  copy.append(title, detail);
+  const status = document.createElement("span");
+  status.className = "status-badge";
+  status.textContent = preview.can_import ? "可以导入" : `${preview.conflicts.length} 个冲突`;
+  summary.append(copy, status);
+  root.append(summary);
+
+  const list = document.createElement("ol");
+  list.className = "import-chapter-list";
+  preview.chapters.forEach((chapter) => {
+    const item = document.createElement("li");
+    item.classList.toggle("conflict", chapter.exists);
+    const id = document.createElement("code");
+    id.textContent = chapter.chapter_id;
+    const chapterCopy = document.createElement("div");
+    const chapterTitle = document.createElement("strong");
+    chapterTitle.textContent = chapter.title;
+    const chapterMeta = document.createElement("span");
+    chapterMeta.textContent = `${formatNumber(chapter.writing_units)} 字${chapter.exists ? " · 已存在" : ""}`;
+    chapterCopy.append(chapterTitle, chapterMeta);
+    item.append(id, chapterCopy);
+    list.append(item);
+  });
+  root.append(list);
+  $("#import-submit").disabled = !preview.can_import;
+}
+
+async function previewImport() {
+  const button = $("#import-preview-button");
+  button.disabled = true;
+  $("#import-status").textContent = "正在解析章节边界…";
+  try {
+    const payload = await importPayload();
+    const preview = await api("/api/import/preview", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    state.transfer.importPreview = preview;
+    state.transfer.importContent = payload.content;
+    renderImportPreview(preview);
+    $("#import-status").textContent = preview.can_import
+      ? "解析完成，请核对章节后确认导入"
+      : "发现已存在章节；调整起始章节，或启用覆盖后重新解析";
+  } catch (error) {
+    invalidateImportPreview();
+    $("#import-status").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 async function importText(event) {
   event.preventDefault();
+  const preview = state.transfer.importPreview;
+  if (!preview?.can_import || !state.transfer.importContent) {
+    $("#import-status").textContent = "请先解析并核对导入预览";
+    return;
+  }
   const file = $("#import-file").files[0];
   if (!file) return;
-  const button = event.currentTarget.querySelector("button[type=submit]");
+  const button = $("#import-submit");
   button.disabled = true;
-  $("#import-status").textContent = "正在解析并导入章节…";
+  $("#import-status").textContent = "正在导入已确认的章节…";
   try {
     await enqueueTask(
       "manuscript_import",
       {
         filename: file.name,
-        content: await file.text(),
-        arc_id: $("#import-arc").value.trim(),
-        start_number: $("#import-start").value,
-        force: $("#import-force").checked,
+        content: state.transfer.importContent,
+        arc_id: preview.arc_id,
+        start_number: preview.start_number,
+        force: preview.force,
       },
       {
         label: "旧稿导入任务已加入队列",
@@ -2429,6 +2905,8 @@ async function importText(event) {
           await loadWorkspace();
           const count = task.result?.imported?.length || 0;
           $("#import-status").textContent = `已导入 ${count} 章`;
+          $("#import-file").value = "";
+          invalidateImportPreview();
           showToast(`已导入 ${count} 章正文`);
         },
       },
@@ -2437,7 +2915,6 @@ async function importText(event) {
   } catch (error) {
     $("#import-status").textContent = error.message;
     showToast(error.message, true);
-  } finally {
     button.disabled = false;
   }
 }
@@ -2770,14 +3247,15 @@ async function createAgentSession() {
 
 async function deleteAgentSession() {
   const sessionId = activeAgentSessionId();
-  if (!sessionId || sessionId === "default") {
-    showToast("默认会话不能删除", true);
-    return;
-  }
+  if (!sessionId) return;
   const session = (state.agentSessions[state.agent] || []).find((item) => item.id === sessionId);
   const title = session?.title || sessionId;
   const agentLabel = state.agent === "goethe" ? "Goethe" : "Dante";
-  const confirmed = window.confirm(`删除 ${agentLabel} 会话「${title}」？这只会删除聊天记录，不会删除小说资产。`);
+  const clearingDefault = sessionId === "default";
+  const prompt = clearingDefault
+    ? `清空 ${agentLabel} 初始会话的全部记录？\n\n聊天、上下文摘要和工作记忆都会清除，小说资产不受影响。此操作不可撤销。`
+    : `删除 ${agentLabel} 会话「${title}」？这只会删除聊天记录，不会删除小说资产。`;
+  const confirmed = window.confirm(prompt);
   if (!confirmed) return;
   const button = $("#agent-session-delete");
   button.disabled = true;
@@ -2792,7 +3270,7 @@ async function deleteAgentSession() {
     renderAgentSessions(payload.agent, state.agentSessions[payload.agent], state.agentSessionId[payload.agent]);
     renderAgentTools(payload.agent, payload.tools || []);
     renderAgentHistory(payload.agent, payload.history || {}, state.agentSessionId[payload.agent]);
-    showToast("会话记录已删除");
+    showToast(clearingDefault ? "初始会话已清空" : "会话记录已删除");
     $("#chat-input").focus();
   } catch (error) {
     $("#agent-history-status").textContent = error.message;
@@ -2812,9 +3290,14 @@ function updateAgentSessionDeleteButton() {
   const button = $("#agent-session-delete");
   if (!button) return;
   const sessionId = activeAgentSessionId();
-  const canDelete = Boolean(sessionId && sessionId !== "default");
+  const session = (state.agentSessions[state.agent] || []).find((item) => item.id === sessionId);
+  const clearingDefault = sessionId === "default";
+  const canDelete = Boolean(sessionId && (!clearingDefault || session?.exists));
   button.disabled = !canDelete;
-  button.title = canDelete ? "删除当前会话记录" : "默认会话不能删除";
+  button.textContent = clearingDefault ? "清空" : "删除";
+  button.title = canDelete
+    ? (clearingDefault ? "清空初始会话记录" : "删除当前会话记录")
+    : "初始会话暂无记录";
 }
 
 function renderAgentSessions(agent, sessions, activeSessionId) {
@@ -2829,7 +3312,7 @@ function renderAgentSessions(agent, sessions, activeSessionId) {
     item.setAttribute("aria-selected", String(session.id === activeSessionId));
     item.classList.toggle("active", session.id === activeSessionId);
     const title = document.createElement("strong");
-    title.textContent = session.title || (session.is_default ? "默认会话" : "新会话");
+    title.textContent = session.title || (session.is_default ? "初始会话" : "新会话");
     const meta = document.createElement("span");
     meta.textContent = `${Number(session.messages || 0)} 条 · ${formatAgentSessionTime(session.updated_at)}`;
     const preview = document.createElement("small");
@@ -2882,7 +3365,7 @@ function renderAgentTools(agent, tools) {
 function renderAgentHistory(agent, history, sessionId = "default") {
   const messages = history.messages || [];
   const label = agent === "goethe" ? "Goethe" : "Dante";
-  const sessionName = sessionId === "default" ? "默认会话" : "当前会话";
+  const sessionName = sessionId === "default" ? "初始会话" : "当前会话";
   $("#agent-history-title").textContent = `${label} 历史对话`;
   $("#agent-history-status").textContent = messages.length
     ? `${sessionName} · 显示 ${history.shown || messages.length} / ${history.total || messages.length}`
@@ -3482,6 +3965,62 @@ async function retrySourceChunk(sourceId, chunkId) {
   }
 }
 
+function renderReferenceProfile(profile) {
+  const root = $("#source-report");
+  root.replaceChildren();
+  const summary = document.createElement("div");
+  summary.className = "source-report-summary profile";
+  const heading = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = "多来源综合画像";
+  const badge = document.createElement("span");
+  badge.className = "status-badge ready";
+  badge.textContent = `${profile.source_ids?.length || 0} 个来源`;
+  heading.append(title, badge);
+  const sourceNames = document.createElement("p");
+  sourceNames.textContent = (profile.source_ids || []).join("、");
+  summary.append(heading, sourceNames);
+  root.append(summary);
+
+  [
+    ["共通方法", profile.common_methods || []],
+    ["差异", profile.differences || []],
+    ["可选变体", profile.optional_variants || []],
+  ].forEach(([label, items]) => {
+    const section = document.createElement("section");
+    section.className = "profile-section";
+    const sectionTitle = document.createElement("h3");
+    sectionTitle.textContent = `${label} · ${items.length}`;
+    section.append(sectionTitle);
+    items.forEach((entry) => {
+      const row = document.createElement("div");
+      row.className = "profile-item";
+      const claim = document.createElement("strong");
+      claim.textContent = entry.claim;
+      const sources = document.createElement("span");
+      sources.textContent = (entry.source_ids || []).join("、");
+      row.append(claim, sources);
+      section.append(row);
+    });
+    if (items.length) root.append(section);
+  });
+
+  if ((profile.conflicts || []).length || (profile.excluded_items || []).length) {
+    const exclusions = document.createElement("section");
+    exclusions.className = "profile-section exclusions";
+    const title = document.createElement("h3");
+    title.textContent = "冲突与排除";
+    const list = document.createElement("ul");
+    [...(profile.conflicts || []), ...(profile.excluded_items || [])].forEach((value) => {
+      const item = document.createElement("li");
+      item.textContent = value;
+      list.append(item);
+    });
+    exclusions.append(title, list);
+    root.append(exclusions);
+  }
+}
+
 async function synthesizeSelectedSources() {
   const sourceIds = Array.from(state.sourceAnalysis.selectedSourceIds);
   if (!sourceIds.length) return;
@@ -3494,7 +4033,7 @@ async function synthesizeSelectedSources() {
     state.sourceAnalysis.profile = payload.result;
     state.sourceAnalysis.promotionPreview = null;
     $("#source-report-actions").replaceChildren();
-    $("#source-report").textContent = JSON.stringify(payload.result, null, 2);
+    renderReferenceProfile(payload.result);
     $("#source-status").textContent = "多来源画像已生成";
     syncSourceAnalysisControls();
   } catch (error) {
@@ -3517,8 +4056,23 @@ async function previewSourcePromotion() {
     });
     state.sourceAnalysis.promotionPreview = payload.result;
     $("#source-report-actions").replaceChildren();
-    $("#source-report").textContent = payload.result.unified_diff || "目标内容无变化";
-    $("#source-status").textContent = "晋升 diff 已生成";
+    const root = $("#source-report");
+    root.replaceChildren();
+    const summary = document.createElement("div");
+    summary.className = "source-report-summary";
+    const heading = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = `应用预览 · ${payload.result.target_ref}`;
+    const badge = document.createElement("span");
+    badge.className = "status-badge";
+    badge.textContent = `${payload.result.included_claims?.length || 0} 条候选`;
+    heading.append(title, badge);
+    summary.append(heading);
+    const diff = document.createElement("pre");
+    diff.className = "context-preview promotion-diff";
+    diff.textContent = payload.result.unified_diff || "目标内容无变化";
+    root.append(summary, diff);
+    $("#source-status").textContent = "应用差异已生成，尚未写入作品";
     syncSourceAnalysisControls();
   } catch (error) {
     $("#source-status").textContent = error.message;
@@ -3540,7 +4094,16 @@ async function applySourcePromotion() {
       }),
     });
     state.sourceAnalysis.promotionPreview = null;
-    $("#source-report").textContent = `已应用到 ${payload.result.target_ref}`;
+    const root = $("#source-report");
+    root.replaceChildren();
+    const applied = document.createElement("div");
+    applied.className = "source-application-success";
+    const title = document.createElement("strong");
+    title.textContent = "候选已应用";
+    const path = document.createElement("code");
+    path.textContent = payload.result.target_ref;
+    applied.append(title, path);
+    root.append(applied);
     $("#source-status").textContent = "晋升候选已确认应用";
     syncSourceAnalysisControls();
   } catch (error) {
@@ -4024,6 +4587,21 @@ function bindEvents() {
   $("#outline-source").addEventListener("click", () => openOutlineSource());
   $("#outline-refresh").addEventListener("click", () => loadOutline());
   $("#outline-smart-create").addEventListener("click", () => openSmartWriteDialog());
+  $("#outline-search").addEventListener("input", (event) => {
+    state.outlineQuery = event.target.value;
+    renderOutlineTree();
+  });
+  $$("[data-outline-status]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.outlineStatusFilter = button.dataset.outlineStatus || "all";
+      renderOutlineTree();
+    });
+  });
+  $("#outline-expand-all").addEventListener("click", () => setAllOutlineExpanded(true));
+  $("#outline-collapse-all").addEventListener("click", () => setAllOutlineExpanded(false));
+  $$("[data-outline-pane]").forEach((button) => {
+    button.addEventListener("click", () => setOutlineMobilePane(button.dataset.outlinePane));
+  });
   $("#outline-node-source").addEventListener("click", () => openOutlineSource(selectedOutlineNode()?.line || 1));
   $("#outline-node-create").addEventListener("click", () => openSmartWriteDialog(selectedOutlineNode()?.id || ""));
   $("#outline-node-rename").addEventListener("click", () => openOutlineEditDialog("rename", selectedOutlineNode()));
@@ -4052,6 +4630,16 @@ function bindEvents() {
   $("#sync-project").addEventListener("click", runSync);
   $("#context-form").addEventListener("submit", inspectContext);
   $("#import-form").addEventListener("submit", importText);
+  $("#import-preview-button").addEventListener("click", previewImport);
+  ["#import-file", "#import-arc", "#import-start", "#import-force"].forEach((selector) => {
+    $(selector).addEventListener("change", invalidateImportPreview);
+  });
+  $$('input[name="export-format"]').forEach((input) => {
+    input.addEventListener("change", syncExportFormat);
+  });
+  $("#export-download").addEventListener("click", () => {
+    $("#export-status").textContent = "正在生成整书文件…";
+  });
   $("#create-document-form").addEventListener("submit", createDocument);
   $("#chat-form").addEventListener("submit", submitChat);
   $$('[data-agent]').forEach((button) => button.addEventListener("click", () => chooseAgent(button.dataset.agent)));
@@ -4094,7 +4682,17 @@ function bindEvents() {
   $("#rolling-plan-goethe").addEventListener("click", sendRollingPlanToGoethe);
   $("#source-file").addEventListener("change", async (event) => {
     const file = event.target.files[0];
-    if (file) $("#source-content").value = await file.text();
+    if (file) {
+      $("#source-content").value = await file.text();
+      if (!$("#source-id").value.trim()) {
+        $("#source-id").value = file.name
+          .replace(/\.[^.]+$/, "")
+          .toLocaleLowerCase()
+          .replace(/[^a-z0-9_-]+/g, "_")
+          .replace(/^_+|_+$/g, "")
+          .slice(0, 64) || `source_${Date.now()}`;
+      }
+    }
   });
   $("#inspector-toggle").addEventListener("click", () => toggleInspector(true));
   $("#inspector-close").addEventListener("click", () => toggleInspector(false));
@@ -4189,7 +4787,7 @@ async function routeFromLocation() {
       (item) => item.asset_kind === kind && item.asset_id === id,
     ) || { kind, id, asset_kind: kind, asset_id: id, scope };
     await openStructuredAsset(summary, false);
-  } else if (["search", "outline", "chapters", "review", "core", "story", "characters", "settings", "world", "assets", "agents", "continuity", "tools", "research"].includes(hash)) {
+  } else if (["search", "outline", "chapters", "review", "core", "story", "characters", "settings", "world", "assets", "agents", "continuity", "transfer", "deconstruct", "skills", "tools", "research"].includes(hash)) {
     setView(hash, false);
   } else {
     setView("dashboard", false);

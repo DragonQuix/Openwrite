@@ -69,7 +69,7 @@ def test_project_registry_keeps_only_existing_projects(tmp_path: Path):
     project = tmp_path / "novel"
     project.mkdir()
     init_project(project, "demo", "雾城来信")
-    registry = ProjectRegistry(tmp_path / "registry.yaml")
+    registry = ProjectRegistry(tmp_path / "registry.yaml", allow_ephemeral=True)
 
     registry.remember(project)
 
@@ -77,6 +77,47 @@ def test_project_registry_keeps_only_existing_projects(tmp_path: Path):
     assert registry.list()[0]["title"] == "雾城来信"
     project.rename(tmp_path / "moved")
     assert registry.list() == []
+
+
+def test_project_registry_does_not_remember_ephemeral_projects(tmp_path: Path):
+    project = tmp_path / "novel"
+    init_project(project, "demo", "临时验收小说")
+    registry = ProjectRegistry(tmp_path / "registry.yaml")
+
+    registry.remember(project)
+
+    assert registry.list() == []
+    assert not registry.path.exists()
+
+
+def test_project_registry_prunes_framework_and_ephemeral_history(tmp_path: Path):
+    framework = tmp_path / "framework"
+    (framework / "tools").mkdir(parents=True)
+    (framework / "tools" / "studio.py").write_text("", encoding="utf-8")
+    (framework / "pyproject.toml").write_text(
+        '[project]\nname = "openwrite"\n', encoding="utf-8"
+    )
+    init_project(framework, "framework_demo", "框架误记录")
+    temporary = tmp_path / "temporary"
+    init_project(temporary, "temporary_demo", "临时验收小说")
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "projects": [
+                    {"path": str(framework), "title": "框架误记录"},
+                    {"path": str(temporary), "title": "临时验收小说"},
+                ],
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    registry = ProjectRegistry(registry_path)
+
+    assert registry.list() == []
+    assert yaml.safe_load(registry_path.read_text(encoding="utf-8"))["projects"] == []
 
 
 def test_framework_detection_requires_package_and_studio(tmp_path: Path):

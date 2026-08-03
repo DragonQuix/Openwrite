@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+import tools.llm as llm_module
 from models.source_analysis import EvidenceRef
 from tools.init_project import init_project
 from tools.source_analysis import SourceAnalysisError, SourceAnalysisService
@@ -116,6 +119,128 @@ def test_analysis_persists_evidence_and_unchanged_source_uses_zero_calls(tmp_pat
     assert calls == []
 
 
+def test_source_snapshot_preserves_crlf_without_trailing_newline(tmp_path: Path):
+    service = _service(tmp_path)
+    text = "第一章\r\n\r\n钟声响了三次。\r\n没有末尾换行"
+
+    prepared = service.prepare(
+        "reference_crlf",
+        text,
+        relative_name="reference-crlf.txt",
+        input_budget_tokens=500,
+    )
+    manifest = prepared["manifest"]
+    snapshot = service.source_root("reference_crlf") / manifest["source_snapshot_ref"]
+
+    assert snapshot.read_bytes() == text.encode("utf-8")
+    assert service.analyze("reference_crlf", analyzer=_analyzer)["ok"] is True
+
+
+def test_deepseek_flash_source_analysis_disables_thinking(monkeypatch, tmp_path: Path):
+    service = _service(tmp_path)
+    service.prepare(
+        "reference_flash",
+        "第一章\n\n钟声响了三次。",
+        relative_name="reference-flash.txt",
+        input_budget_tokens=500,
+    )
+    config = SimpleNamespace(
+        provider="openai",
+        base_url="https://api.deepseek.com",
+        model="deepseek-v4-flash",
+        extra={},
+    )
+
+    class FakeClient:
+        def __init__(self, received_config):
+            assert received_config is config
+
+        def chat(self, messages, **kwargs):
+            assert messages and kwargs["stream"] is False
+            return SimpleNamespace(
+                content='{"summary":"测试摘要","findings":[]}',
+                model="deepseek-v4-flash",
+                finish_reason="stop",
+                reasoning="",
+            )
+
+    monkeypatch.setattr(
+        llm_module.LLMConfig,
+        "from_env",
+        classmethod(lambda cls: config),
+    )
+    monkeypatch.setattr(llm_module, "LLMClient", FakeClient)
+
+    result = service.analyze("reference_flash")
+
+    assert result["ok"] is True
+    assert result["report"]["models"] == ["deepseek-v4-flash"]
+    assert config.extra["extra_body"]["thinking"] == {"type": "disabled"}
+    assert config.extra["response_format"] == {"type": "json_object"}
+
+
+def test_generated_report_rejects_repeated_evidence_after_one_repair(
+    monkeypatch, tmp_path: Path
+):
+    service = _service(tmp_path)
+    text = "第一章\n\n钟声响了三次，雨也停了。"
+    service.prepare(
+        "reference_repeated",
+        text,
+        relative_name="reference-repeated.txt",
+        input_budget_tokens=500,
+    )
+    quote = text[:4]
+    payload = {
+        "summary": "测试摘要",
+        "findings": [
+            {
+                "category": category,
+                "claim": f"结论 {index}",
+                "confidence": 0.8,
+                "reusable": True,
+                "source_bound": False,
+                "evidence": [{"start": 0, "end": 4, "quote": quote}],
+            }
+            for index, category in enumerate(("hook", "pacing", "method"), start=1)
+        ],
+    }
+    config = SimpleNamespace(
+        provider="openai",
+        base_url="https://api.openai.com/v1",
+        model="fixture-model",
+        extra={},
+    )
+    calls = 0
+
+    class FakeClient:
+        def __init__(self, received_config):
+            assert received_config is config
+
+        def chat(self, messages, **kwargs):
+            nonlocal calls
+            calls += 1
+            return SimpleNamespace(
+                content=json.dumps(payload, ensure_ascii=False),
+                model="fixture-model",
+                finish_reason="stop",
+                reasoning="",
+            )
+
+    monkeypatch.setattr(
+        llm_module.LLMConfig,
+        "from_env",
+        classmethod(lambda cls: config),
+    )
+    monkeypatch.setattr(llm_module, "LLMClient", FakeClient)
+
+    result = service.analyze("reference_repeated")
+
+    assert result["ok"] is False
+    assert result["failures"][0]["code"] == "INVALID_EVIDENCE"
+    assert calls == 2
+
+
 def test_changed_source_reuses_unchanged_chunks(tmp_path: Path):
     service = _service(tmp_path)
     original = _text(chapters=7, body_size=80)
@@ -189,6 +314,31 @@ def test_invalid_evidence_is_bounded_failure(tmp_path: Path):
     assert result["ok"] is False
     assert result["failures"][0]["code"] == "INVALID_EVIDENCE"
     assert len(result["failures"][0]["message"]) <= 800
+
+
+def test_evidence_quote_repairs_incorrect_model_offsets(tmp_path: Path):
+    service = _service(tmp_path)
+    text = "第一章\n\n雨停之后，钟声响了三次。"
+    service.prepare(
+        "reference_offsets",
+        text,
+        relative_name="offsets.txt",
+        input_budget_tokens=500,
+    )
+
+    def misplaced(chunk: str, context: dict) -> dict:
+        payload = _analyzer(chunk, context)
+        payload["findings"][0]["evidence"] = [
+            {"start": 0, "end": 2, "quote": "钟声响了三次"}
+        ]
+        return payload
+
+    result = service.analyze("reference_offsets", analyzer=misplaced)
+    evidence = result["report"]["findings"][0]["evidence"][0]
+
+    assert result["ok"] is True
+    assert evidence["start"] == text.index("钟声响了三次")
+    assert text[evidence["start"] : evidence["end"]] == evidence["quote"]
 
 
 def test_synthesis_excludes_bound_content_and_promotion_requires_confirmation(

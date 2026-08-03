@@ -66,6 +66,7 @@ POST_ROUTES = {
     "/api/sync": StudioPostRoute("sync_project", accepts_payload=False),
     "/api/document/create": StudioPostRoute("create_document"),
     "/api/import": StudioPostRoute("import_text"),
+    "/api/import/preview": StudioPostRoute("preview_import"),
     "/api/foreshadowing": StudioPostRoute("manage_foreshadowing"),
     "/api/chat": StudioPostRoute("chat_turn"),
     "/api/agent/session": StudioPostRoute("create_agent_session"),

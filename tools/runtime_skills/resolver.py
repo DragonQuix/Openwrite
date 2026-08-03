@@ -156,10 +156,16 @@ class RuntimeSkillResolver:
                     "id": record.manifest.id,
                     "version": record.manifest.version,
                     "name": record.manifest.name,
+                    "description": record.manifest.description,
                     "layer": record.layer,
                     "enabled": record.manifest.enabled,
                     "agents": list(record.manifest.agents),
                     "tasks": list(record.manifest.tasks),
+                    "allow_tools": list(record.manifest.allow_tools),
+                    "requires": list(record.manifest.requires),
+                    "conflicts_with": list(record.manifest.conflicts_with),
+                    "output_contract": record.manifest.output_contract,
+                    "budget": record.manifest.budget.model_dump(mode="json"),
                     "source": record.source,
                 }
                 for record in records.values()

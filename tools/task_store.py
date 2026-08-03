@@ -387,11 +387,14 @@ class TaskStore:
                 path = (self.root / artifact).resolve()
                 if self.root.resolve() not in path.parents or not path.is_file():
                     raise TaskStoreError("Task artifact is missing")
-                content = path.read_text(encoding="utf-8")
-                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                raw_content = path.read_bytes()
+                digest = hashlib.sha256(raw_content).hexdigest()
                 if digest != value.get("sha256"):
                     raise TaskStoreError("Task artifact checksum mismatch")
-                return content
+                try:
+                    return raw_content.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise TaskStoreError("Task artifact is not valid UTF-8") from exc
             return {str(key): self._materialize(item) for key, item in value.items()}
         if isinstance(value, list):
             return [self._materialize(item) for item in value]
@@ -415,14 +418,13 @@ class TaskStore:
         temp_path: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
+                mode="wb",
                 dir=path.parent,
                 prefix=f".{path.name}.",
                 suffix=".tmp",
                 delete=False,
             ) as handle:
-                handle.write(content)
+                handle.write(content.encode("utf-8"))
                 handle.flush()
                 os.fsync(handle.fileno())
                 temp_path = Path(handle.name)

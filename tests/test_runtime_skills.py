@@ -148,6 +148,10 @@ def test_studio_exposes_same_runtime_resolution_and_rule_preview(tmp_path: Path)
     app = StudioApplication(tmp_path)
     operations = app.operation_status()
     assert operations["runtime_skills"]["skills"]
+    listed = operations["runtime_skills"]["skills"][0]
+    assert "description" in listed
+    assert "requires" in listed
+    assert listed["budget"]["max_tool_calls"] > 0
     resolved = app.runtime_skill_action(
         {"action": "resolve", "agent": "dante", "task": "chapter.write"}
     )

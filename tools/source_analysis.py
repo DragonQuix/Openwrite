@@ -29,7 +29,7 @@ from models.source_analysis import (
     SourceReportV2,
 )
 
-PROMPT_VERSION = "source-analysis-v2.0"
+PROMPT_VERSION = "source-analysis-v2.1"
 DEFAULT_INPUT_BUDGET = 12000
 FOCUS_VALUES = {
     "promise",
@@ -579,8 +579,16 @@ class SourceAnalysisService:
         first_payload: dict[str, Any] | None = None
         try:
             first_payload = self._llm_analyze(text, context)
-            return self._coerce_report(first_payload, text, context, chunk)
+            report = self._coerce_report(first_payload, text, context, chunk)
+            self._validate_generated_report_quality(report)
+            return report
         except Exception as first_error:
+            if str(getattr(first_error, "code", "")) in {
+                "MODEL_EMPTY_RESPONSE",
+                "MODEL_OUTPUT_TRUNCATED",
+                "MODEL_REASONING_ONLY",
+            }:
+                raise
             repaired = self._llm_analyze(
                 text,
                 context,
@@ -589,7 +597,9 @@ class SourceAnalysisService:
                     "validation_error": self._bounded_error(first_error),
                 },
             )
-            return self._coerce_report(repaired, text, context, chunk)
+            report = self._coerce_report(repaired, text, context, chunk)
+            self._validate_generated_report_quality(report)
+            return report
 
     def _llm_analyze(
         self,
@@ -598,8 +608,25 @@ class SourceAnalysisService:
         repair: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         from tools.llm import LLMClient, LLMConfig, Message
+        from tools.llm.response import classify_response
 
         config = LLMConfig.from_env()
+        provider = str(getattr(config, "provider", "") or "").lower()
+        base_url = str(getattr(config, "base_url", "") or "").lower()
+        model = str(getattr(config, "model", "") or "").lower()
+        if (
+            provider in {"openai", "custom"}
+            and "api.deepseek.com" in base_url
+            and model == "deepseek-v4-flash"
+        ):
+            extra = dict(getattr(config, "extra", {}) or {})
+            extra_body = dict(extra.get("extra_body") or {})
+            thinking = extra_body.get("thinking")
+            if not (isinstance(thinking, dict) and thinking.get("type")):
+                extra_body["thinking"] = {"type": "disabled"}
+                extra["extra_body"] = extra_body
+            extra.setdefault("response_format", {"type": "json_object"})
+            config.extra = extra
         client = LLMClient(config)
         schema_hint = {
             "summary": "本块摘要",
@@ -619,6 +646,12 @@ class SourceAnalysisService:
             "所有 evidence start/end 都是当前片段内的 0-based [start,end) 字符偏移，"
             "quote 必须逐字等于该范围；每个结论至少一个证据。"
             "区分可复用方法与来源绑定内容，后者 source_bound=true 且 reusable=false。"
+            "输出 4 到 8 条 findings，最多 8 条；summary 不超过 180 字，claim 不超过 120 字；"
+            "每条 finding 只保留 1 到 2 个最强证据，每段 quote 不超过 120 字；"
+            "不同结论优先使用不同证据，同一引文最多支持两条结论；证据必须直接支持 claim，"
+            "不要只引用标题、称呼或与结论无关的句子；长片段应从开头、中段、后段取证，"
+            "至少覆盖三个不同位置；"
+            "完整 JSON 不超过 6000 字，不要复述大段原文。"
             f"允许 category: {', '.join(sorted(FOCUS_VALUES))}。"
         )
         user = (
@@ -642,6 +675,11 @@ class SourceAnalysisService:
             [Message("system", system), Message("user", user)],
             temperature=0.2,
             stream=False,
+        )
+        classify_response(
+            response.content,
+            finish_reason=getattr(response, "finish_reason", ""),
+            reasoning=getattr(response, "reasoning", ""),
         )
         payload = self._parse_json_object(response.content)
         payload["model"] = response.model or config.model
@@ -674,12 +712,29 @@ class SourceAnalysisService:
                     raise SourceAnalysisError("evidence 必须是对象", code="INVALID_MODEL_OUTPUT")
                 local_start = int(evidence.get("start", -1))
                 local_end = int(evidence.get("end", -1))
-                if local_start < 0 or local_end <= local_start or local_end > len(chunk_text):
-                    raise SourceAnalysisError("证据偏移越界", code="INVALID_EVIDENCE")
-                quote = chunk_text[local_start:local_end]
                 supplied = str(evidence.get("quote") or "")
+                valid_range = (
+                    local_start >= 0
+                    and local_end > local_start
+                    and local_end <= len(chunk_text)
+                )
+                quote = chunk_text[local_start:local_end] if valid_range else ""
+                if not supplied:
+                    raise SourceAnalysisError("证据摘录不能为空", code="INVALID_EVIDENCE")
                 if supplied != quote:
-                    raise SourceAnalysisError("证据摘录与偏移不一致", code="INVALID_EVIDENCE")
+                    matches: list[int] = []
+                    cursor = chunk_text.find(supplied)
+                    while cursor >= 0:
+                        matches.append(cursor)
+                        cursor = chunk_text.find(supplied, cursor + 1)
+                    if not matches:
+                        raise SourceAnalysisError(
+                            "证据摘录与偏移不一致", code="INVALID_EVIDENCE"
+                        )
+                    preferred = max(0, local_start)
+                    local_start = min(matches, key=lambda position: abs(position - preferred))
+                    local_end = local_start + len(supplied)
+                    quote = supplied
                 absolute_start = chunk.start + local_start
                 absolute_end = chunk.start + local_end
                 evidence_refs.append(
@@ -722,6 +777,26 @@ class SourceAnalysisService:
             findings=findings,
         )
 
+    @staticmethod
+    def _validate_generated_report_quality(report: SourceChunkReportV2) -> None:
+        if len(report.findings) < 3:
+            return
+        primary_spans = [
+            (finding.evidence[0].start, finding.evidence[0].end)
+            for finding in report.findings
+        ]
+        distinct_spans = set(primary_spans)
+        if len(distinct_spans) < 3:
+            raise SourceAnalysisError(
+                "生成报告的证据过度重复，至少需要三处不同引文",
+                code="INVALID_EVIDENCE",
+            )
+        if any(primary_spans.count(span) > 2 for span in distinct_spans):
+            raise SourceAnalysisError(
+                "同一引文不能支持两条以上结论",
+                code="INVALID_EVIDENCE",
+            )
+
     def _validate_evidence(
         self,
         report: SourceChunkReportV2,
@@ -746,6 +821,7 @@ class SourceAnalysisService:
     def _build_source_report(self, manifest: SourceManifestV2) -> SourceReportV2:
         findings: list[SourceFindingV2] = []
         summaries: list[str] = []
+        models: list[str] = []
         failed: list[str] = []
         bound: list[str] = []
         source_text = self._read_snapshot(manifest)
@@ -761,6 +837,8 @@ class SourceAnalysisService:
                 failed.append(chunk.chunk_id)
                 continue
             summaries.append(chunk_report.summary)
+            if chunk_report.model:
+                models.append(chunk_report.model)
             findings.extend(chunk_report.findings)
             bound.extend(
                 item.claim for item in chunk_report.findings if item.source_bound
@@ -774,6 +852,7 @@ class SourceAnalysisService:
             relative_name=manifest.relative_name,
             source_sha256=manifest.source_sha256,
             prompt_version=manifest.prompt_version,
+            models=list(dict.fromkeys(models)),
             status=status,
             summary="\n".join(summaries),
             findings=findings,
@@ -840,10 +919,13 @@ class SourceAnalysisService:
         path = (self.source_root(manifest.source_id) / manifest.source_snapshot_ref).resolve()
         if self.source_root(manifest.source_id).resolve() not in path.parents or not path.is_file():
             raise SourceAnalysisError("来源快照不存在或越界", code="NOT_FOUND")
-        text = path.read_text(encoding="utf-8")
-        if self._sha256(text) != manifest.source_sha256:
+        raw_content = path.read_bytes()
+        if hashlib.sha256(raw_content).hexdigest() != manifest.source_sha256:
             raise SourceAnalysisError("来源快照哈希不一致", code="SOURCE_CHANGED")
-        return text
+        try:
+            return raw_content.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise SourceAnalysisError("来源快照不是有效 UTF-8", code="SOURCE_CHANGED") from exc
 
     @staticmethod
     def _refresh_manifest_status(manifest: SourceManifestV2) -> None:
@@ -994,14 +1076,13 @@ class SourceAnalysisService:
     def _atomic_write_text(path: Path, content: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
+            mode="wb",
             dir=path.parent,
             prefix=f".{path.name}.",
             suffix=".tmp",
             delete=False,
         ) as handle:
-            handle.write(content)
+            handle.write(content.encode("utf-8"))
             handle.flush()
             os.fsync(handle.fileno())
             temporary = Path(handle.name)

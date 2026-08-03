@@ -43,8 +43,8 @@ def test_studio_assets_load_shared_core_as_an_es_module():
     tasks = (assets / "js" / "tasks.js").read_text(encoding="utf-8")
     structured_assets = (assets / "js" / "assets.js").read_text(encoding="utf-8")
 
-    assert '<script type="module" src="/app.js"></script>' in html
-    assert 'import "/js/application.js"' in app
+    assert '<script type="module" src="/app.js?v=outline-6"></script>' in html
+    assert 'import "/js/application.js?v=outline-6"' in app
     assert 'from "/js/core.js"' in application
     assert "export const state" in core
     assert "export async function api" in core
@@ -274,14 +274,30 @@ def test_relationship_topology_includes_search_and_context_controls():
 
 def test_outline_tree_ui_supports_direct_text_editing():
     assets = Path(__file__).parent.parent / "tools" / "studio_assets"
+    html = (assets / "index.html").read_text(encoding="utf-8")
     javascript = _studio_javascript(assets)
     styles = (assets / "styles.css").read_text(encoding="utf-8")
 
+    assert 'id="outline-search" type="search"' in html
+    assert 'id="outline-expand-all"' in html
+    assert 'id="outline-collapse-all"' in html
+    assert 'data-outline-status="planned"' in html
+    assert 'data-outline-status="drafted"' in html
+    assert 'data-outline-pane="tree"' in html
+    assert 'data-outline-pane="detail"' in html
     assert "startOutlineInlineRename" in javascript
     assert 'operation: "update_summary"' in javascript
+    assert "function renderOutlineTree()" in javascript
+    assert "function outlineNodeVisible(node)" in javascript
+    assert "function setAllOutlineExpanded(expanded)" in javascript
+    assert "function renderOutlineBreadcrumb(node)" in javascript
+    assert "function setOutlineMobilePane(pane)" in javascript
     assert "outline-summary-editor" in javascript
     assert ".outline-tree-title-input" in styles
     assert ".outline-summary-editor" in styles
+    assert ".outline-summary-editor.markdown-editor-host .vditor-ir .vditor-reset" in styles
+    assert "padding: 14px 4px 24px !important" in styles
+    assert '.outline-workspace[data-mobile-pane="tree"] .outline-detail' in styles
 
 
 def test_outline_tree_prioritizes_progressive_disclosure_and_title_width():
@@ -290,7 +306,7 @@ def test_outline_tree_prioritizes_progressive_disclosure_and_title_width():
     javascript = _studio_javascript(assets)
     styles = (assets / "styles.css").read_text(encoding="utf-8")
 
-    assert '<h1 id="outline-title">大纲结构</h1>' in html
+    assert '<h1 id="outline-title">大纲</h1>' in html
     assert "outlineExpandedIds: new Set()" in javascript
     assert "initializeOutlineExpansion" in javascript
     assert "revealOutlineNode" in javascript
@@ -298,7 +314,7 @@ def test_outline_tree_prioritizes_progressive_disclosure_and_title_width():
     assert 'outlineIcon("icon-chevron-right")' in javascript
     assert "outlineInspectorAutoCollapsed" in javascript
     assert 'toggleInspectorCollapsed(true, { persist: false })' in javascript
-    assert "grid-template-columns: minmax(380px, .95fr)" in styles
+    assert "grid-template-columns: minmax(300px, 350px)" in styles
     assert "@media (max-width: 1080px)" in styles
     assert "position: absolute" in styles
 
@@ -347,7 +363,7 @@ def test_agent_chat_ui_supports_sessions_and_collapsible_inspector():
     assert '"/api/agent/session"' in javascript
     assert '"/api/agent/session/delete"' in javascript
     assert "deleteAgentSession" in javascript
-    assert "默认会话不能删除" in javascript
+    assert "清空初始会话记录" in javascript
     assert "session_id" in javascript
     assert "startAgentActivity" in javascript
     assert "pollAgentActivity" in javascript
@@ -458,8 +474,43 @@ def test_studio_agent_sessions_can_be_created_selected_and_listed(tmp_path: Path
     assert not goethe_store.path.exists()
     assert not goethe_store.transcript_path.exists()
     assert not any(session["id"] == goethe_session_id for session in deleted["sessions"])
-    with pytest.raises(StudioError, match="默认会话不能删除"):
-        app.delete_agent_session({"agent": "goethe", "session_id": "default"})
+
+
+@pytest.mark.parametrize("agent_name", ["goethe", "dante"])
+def test_studio_default_agent_session_can_be_cleared(
+    tmp_path: Path,
+    agent_name: str,
+):
+    from tools.agent.goethe_session_state import GoetheSessionStateStore
+    from tools.agent.session_state import SessionStateStore
+
+    init_project(tmp_path, "demo")
+    app = StudioApplication(tmp_path)
+    store = (
+        GoetheSessionStateStore(tmp_path, "demo")
+        if agent_name == "goethe"
+        else SessionStateStore(tmp_path, "demo")
+    )
+    state = store.load_or_create()
+    state.conversation_summary = "不应在清空后继续进入上下文。"
+    state.working_memory = {"old_context": "应被清除"}
+    store.save(state)
+    store.append_turn("user", "这是一条旧问题")
+    store.append_turn("assistant", "这是一条旧回答")
+
+    cleared = app.delete_agent_session(
+        {"agent": agent_name, "session_id": "default"}
+    )
+
+    assert cleared["cleared"] is True
+    assert cleared["deleted"] is False
+    assert cleared["deleted_session_id"] == "default"
+    assert cleared["active_session_id"] == "default"
+    assert cleared["history"]["messages"] == []
+    assert cleared["sessions"][0]["id"] == "default"
+    assert cleared["sessions"][0]["exists"] is False
+    assert not store.path.exists()
+    assert not store.transcript_path.exists()
 
 
 def _read_json(url: str) -> dict:
@@ -522,7 +573,7 @@ def test_studio_opens_external_project_and_lists_recent_projects(tmp_path: Path)
     project = tmp_path / "private_novel"
     project.mkdir()
     init_project(project, "demo", "私密作品")
-    registry = ProjectRegistry(tmp_path / "recent.yaml")
+    registry = ProjectRegistry(tmp_path / "recent.yaml", allow_ephemeral=True)
     app = StudioApplication(launcher, project_registry=registry)
 
     workspace = app.open_project({"project_path": str(project)})
@@ -531,6 +582,21 @@ def test_studio_opens_external_project_and_lists_recent_projects(tmp_path: Path)
     assert workspace["snapshot"]["title"] == "私密作品"
     assert workspace["project"]["root"] == str(project.resolve())
     assert workspace["project"]["recent"][0]["path"] == str(project.resolve())
+
+
+def test_studio_never_treats_framework_root_as_a_novel_project(tmp_path: Path):
+    framework = tmp_path / "framework"
+    (framework / "tools").mkdir(parents=True)
+    (framework / "tools" / "studio.py").write_text("", encoding="utf-8")
+    (framework / "pyproject.toml").write_text(
+        '[project]\nname = "openwrite"\n', encoding="utf-8"
+    )
+    init_project(framework, "stale_demo", "旧测试小说")
+
+    workspace = StudioApplication(framework).workspace()
+
+    assert workspace["initialized"] is False
+    assert workspace["project"]["framework_root"] is True
 
 
 def test_studio_searches_project_assets(tmp_path: Path):
@@ -1117,14 +1183,29 @@ def test_studio_sync_create_import_and_context_preview(tmp_path: Path):
     assert synced["after"]["needs_sync"] is False
     assert synced["after"]["cards"] == 1
 
+    import_payload = {
+        "filename": "旧稿.txt",
+        "content": "第一章 雨夜\n门外有人。\n\n第二章 回声\n门后没有人。",
+        "arc_id": "arc_001",
+    }
+    import_preview = app.preview_import(import_payload)
+    assert import_preview["chapter_count"] == 2
+    assert import_preview["can_import"] is True
+    assert [item["chapter_id"] for item in import_preview["chapters"]] == [
+        "ch_001",
+        "ch_002",
+    ]
+    manuscript = tmp_path / "data" / "novels" / "demo" / "data" / "manuscript"
+    assert not list(manuscript.rglob("*.md"))
+
     imported = app.import_text(
-        {
-            "filename": "旧稿.txt",
-            "content": "第一章 雨夜\n门外有人。\n\n第二章 回声\n门后没有人。",
-            "arc_id": "arc_001",
-        }
+        import_payload
     )
     assert [item["chapter_id"] for item in imported["imported"]] == ["ch_001", "ch_002"]
+
+    conflict_preview = app.preview_import({**import_payload, "start_number": 1})
+    assert conflict_preview["can_import"] is False
+    assert conflict_preview["conflicts"] == ["ch_001", "ch_002"]
 
     preview = app.context_preview("ch_001")
     assert preview["chapter_id"] == "ch_001"
@@ -1261,6 +1342,8 @@ def test_studio_source_analysis_v2_exposes_evidence_profile_and_confirmed_promot
         packs = status["workspace"]["operations"]["source_packs"]
         assert packs[0]["analysis_v2"]["status"] == "completed"
         assert packs[0]["analysis_v2"]["source_sha256"]
+        assert packs[0]["analysis_v2"]["relative_name"] == "reference_a.txt"
+        assert packs[0]["analysis_v2"]["total_chars"] > 0
 
         profile = app.source_action(
             {
@@ -1295,6 +1378,40 @@ def test_studio_source_analysis_v2_exposes_evidence_profile_and_confirmed_promot
     finally:
         if app._task_runner is not None:
             app._task_runner.shutdown(wait=True)
+
+
+def test_studio_source_task_fails_when_chunk_analysis_fails(tmp_path: Path, monkeypatch):
+    init_project(tmp_path, "demo")
+    app = StudioApplication(tmp_path)
+    monkeypatch.setattr(
+        app,
+        "source_action",
+        lambda payload: {
+            "result": {
+                "analysis": {
+                    "ok": False,
+                    "failures": [
+                        {
+                            "chunk_id": "chk_0000_test",
+                            "code": "MODEL_REASONING_ONLY",
+                            "message": "模型只返回了推理内容，没有最终答案",
+                        }
+                    ],
+                }
+            }
+        },
+    )
+    context = SimpleNamespace(phase=lambda *args: None, checkpoint=lambda: None)
+
+    with pytest.raises(StudioError) as raised:
+        app._task_source_operation(
+            {"action": "analyze_v2", "source_id": "reference_failed"},
+            context,
+        )
+
+    assert raised.value.code == "MODEL_REASONING_ONLY"
+    assert raised.value.recoverable is True
+    assert raised.value.details["source_id"] == "reference_failed"
 
 
 def test_studio_http_exposes_context_and_import_routes(tmp_path: Path):
