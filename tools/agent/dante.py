@@ -148,6 +148,7 @@ class DanteChatAgent:
         llm_client_factory: Callable[[], LLMClient] | None = None,
         tool_executors: dict[str, Callable[[dict[str, Any]], Any]] | None = None,
         action_executors: dict[str, Callable[[dict[str, Any]], Any]] | None = None,
+        tool_layer_factory: Callable[[Path], dict[str, object]] | None = None,
         activity_callback: Callable[[dict[str, Any]], None] | None = None,
         prompt_text: str = "\n🕯️ Dante> ",
     ):
@@ -162,6 +163,9 @@ class DanteChatAgent:
             or (lambda: build_prompt_session(prompt_style={"prompt": "#ansibrightblue bold"}))
         )
         self.llm_client_factory = llm_client_factory or self._build_default_llm_client
+        self.tool_layer_factory = tool_layer_factory or build_dante_tool_layers
+        self._use_default_tool_layers = tool_executors is None and action_executors is None
+        self._tool_layers: dict[str, object] | None = None
         self.tool_executors = tool_executors or {}
         self.action_executors = action_executors or {}
         self.activity_callback = activity_callback
@@ -478,12 +482,25 @@ class DanteChatAgent:
 
     def _combined_tool_executors(self) -> dict[str, Callable[[dict[str, Any]], Any]]:
         combined: dict[str, Callable[[dict[str, Any]], Any]] = {}
+        if self._use_default_tool_layers:
+            layers = self._load_tool_layers()
+            direct = layers.get("direct_tool_executors", {})
+            actions = layers.get("action_tool_executors", {})
+            if isinstance(direct, dict):
+                combined.update(direct)
+            if isinstance(actions, dict):
+                combined.update(actions)
         combined.update(self.tool_executors)
         combined.update(self.action_executors)
         return guard_confirmable_executors(
             combined,
             instruction=lambda: self._active_user_instruction,
         )
+
+    def _load_tool_layers(self) -> dict[str, object]:
+        if self._tool_layers is None:
+            self._tool_layers = dict(self.tool_layer_factory(self.project_root))
+        return self._tool_layers
 
     def _append_user_turn(self, content: str) -> None:
         state = self._require_session_state()

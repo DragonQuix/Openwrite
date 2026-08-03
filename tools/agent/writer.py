@@ -41,6 +41,7 @@ class WritingResult:
     word_count: int
     observations: str = ""
     state_updates: dict = field(default_factory=dict)
+    state_delta: dict = field(default_factory=dict)
     chapter_summary: str = ""
     validation_issues: list = field(default_factory=list)
     token_usage: dict = field(default_factory=dict)
@@ -130,6 +131,7 @@ class WriterAgent(BaseAgent):
             word_count=creative_result["word_count"],
             observations=settlement_result["observations"],
             state_updates=settlement_result["state_updates"],
+            state_delta=settlement_result.get("state_delta", {}),
             chapter_summary=settlement_result["chapter_summary"],
             validation_issues=all_issues,
             token_usage=self._merge_usage(
@@ -159,7 +161,7 @@ class WriterAgent(BaseAgent):
                 Message("user", user_prompt),
             ],
             temperature=temperature,
-            max_tokens=max(8192, target_words * 2),
+            max_tokens=max(16384, target_words * 2),
         )
 
         return self._parse_creative_output(
@@ -276,6 +278,9 @@ class WriterAgent(BaseAgent):
 
     def _parse_creative_output(self, content: str, chapter_number: int, usage: dict) -> dict:
         """解析创意写作输出"""
+        if not str(content or "").strip():
+            raise RuntimeError("empty model reply")
+
         # 尝试提取标题
         title_match = re.search(
             r"^#{1,6}\s*第\s*[0-9零〇一二三四五六七八九十百千两]+\s*章"
@@ -330,6 +335,7 @@ class WriterAgent(BaseAgent):
         return {
             "observations": observations,
             "state_updates": settlement.get("state_updates", {}),
+            "state_delta": settlement.get("state_delta", {}),
             "chapter_summary": settlement.get("chapter_summary", ""),
             "usage": self._merge_usage(
                 observation_result.get("usage", {}),
@@ -407,15 +413,25 @@ class WriterAgent(BaseAgent):
 - 使用 Markdown 格式输出
 - 只输出确有变化的字段
 
-输出格式：
+输出格式（优先使用结构化增量；旧 state_updates 仅用于兼容）：
 ```yaml
+state_delta:
+  chapter_id: ch_[章节编号]
+  operations:
+    - op: append
+      collection: current_state
+      value: "只写本章新增的客观事实"
+    # 可用 collection：current_state / ledger / relationships / characters /
+    # resources / relationship_states / open_threads / foreshadowing_refs /
+    # timeline / proposed_entities
+    # set/append/remove/resolve/propose 必须符合对应字段结构。
 state_updates:
   current_state: |
-    [更新的世界状态]
+    [旧客户端兼容字段：只写本章新增事实，不要重写整份文件]
   ledger: |
-    [更新的资源账本]
+    [本章新增账本事实]
   relationships: |
-    [更新的角色关系]
+    [本章新增关系事实]
 chapter_summary: |
   [用80-150字概括本章发生的关键事件、选择、关系变化和未决悬念]
 
@@ -450,7 +466,7 @@ chapter_summary: |
 
         return self._parse_settlement(
             response.content,
-            context,
+            {**context, "chapter_number": chapter_number},
             usage=response.usage or {},
             observations=observations,
         )
@@ -508,36 +524,57 @@ chapter_summary: |
         """解析结算输出"""
         result = {
             "state_updates": {},
+            "state_delta": {},
             "chapter_summary": "",
             "usage": dict(usage or {}),
         }
 
-        yaml_match = re.search(r"```yaml\s*\n(.*?)\n```", content, re.DOTALL)
-        if yaml_match:
-            yaml_content = yaml_match.group(1)
-            try:
-                import yaml
+        payload = self._load_settlement_payload(content)
+        if payload:
+            raw_delta = payload.get("state_delta")
+            if isinstance(raw_delta, dict):
+                try:
+                    from ..runtime_state import RuntimeStateDelta
 
-                payload = yaml.safe_load(yaml_content) or {}
-            except Exception:
-                payload = {}
-            if isinstance(payload, dict):
-                updates = payload.get("state_updates", {})
-                if isinstance(updates, dict):
-                    aliases = {
-                        "particle_ledger": "ledger",
-                        "character_matrix": "relationships",
-                    }
-                    for field, value in updates.items():
-                        canonical = aliases.get(str(field), str(field))
-                        if canonical not in {"current_state", "ledger", "relationships"}:
-                            continue
-                        text = str(value or "").strip()
-                        if text:
-                            result["state_updates"][canonical] = text
-                result["chapter_summary"] = str(
-                    payload.get("chapter_summary") or ""
-                ).strip()
+                    parsed_delta = RuntimeStateDelta.model_validate(
+                        {
+                            **raw_delta,
+                            "chapter_id": raw_delta.get("chapter_id")
+                            or f"ch_{int(context.get('chapter_number') or 0):03d}",
+                        }
+                    )
+                    result["state_delta"] = parsed_delta.model_dump(mode="json")
+                except (ImportError, ValueError) as exc:
+                    from ..llm.response import ProviderResponseError
+
+                    raise ProviderResponseError(
+                        "MALFORMED_STRUCTURED_OUTPUT",
+                        "模型返回的状态增量不符合 runtime-delta-v1",
+                    ) from exc
+            updates = payload.get("state_updates", {})
+            if isinstance(updates, dict):
+                aliases = {
+                    "particle_ledger": "ledger",
+                    "character_matrix": "relationships",
+                }
+                for field, value in updates.items():
+                    canonical = aliases.get(str(field), str(field))
+                    if canonical not in {"current_state", "ledger", "relationships"}:
+                        continue
+                    text = str(value or "").strip()
+                    if text:
+                        result["state_updates"][canonical] = text
+            result["chapter_summary"] = str(
+                payload.get("chapter_summary") or ""
+            ).strip()
+
+            if not result["state_delta"] and result["state_updates"]:
+                from ..runtime_state import legacy_updates_to_delta
+
+                result["state_delta"] = legacy_updates_to_delta(
+                    result["state_updates"],
+                    chapter_id=f"ch_{int(context.get('chapter_number') or 0):03d}",
+                ).model_dump(mode="json")
 
         if not result["chapter_summary"] and observations:
             compact = " ".join(
@@ -548,6 +585,16 @@ chapter_summary: |
             result["chapter_summary"] = compact[:500]
 
         return result
+
+    @staticmethod
+    def _load_settlement_payload(content: str) -> dict:
+        """Parse common structured-output variants without executing model content."""
+        from ..llm.response import load_structured_mapping
+
+        return load_structured_mapping(
+            content,
+            required_keys=("state_delta", "state_updates", "chapter_summary"),
+        )
 
     @staticmethod
     def _merge_usage(*usages: dict) -> dict:

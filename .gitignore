@@ -53,6 +53,7 @@ coverage.xml
 # Environments
 .env
 .venv
+.openwrite-runtime/
 env/
 venv/
 ENV/
@@ -90,6 +91,8 @@ data/novels/*/data/test_outputs/
 
 # Local worktrees
 .worktrees/
+/reference/
+/live_test_artifacts/
 
 # Personal conversation history and private novel settings
 *.私人设定.md

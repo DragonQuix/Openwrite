@@ -374,14 +374,25 @@ class NovelApplicationService:
             self._record_write_lifecycle(chapter_id, result)
         return result
 
-    def review_chapter(self, chapter_id: str) -> dict[str, Any]:
+    def review_chapter(
+        self,
+        chapter_id: str,
+        *,
+        task_phase: Callable[[str, str], None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> dict[str, Any]:
         target = self.resolve_chapter_id(chapter_id, latest=True)
         executor = self._review_executor or self._default_review_executor
         if not self._task_lock.acquire(blocking=False):
             raise NovelServiceError("已有写作或审稿任务正在运行", code="PROJECT_BUSY")
         try:
             if self._review_executor is None:
-                result = executor(self.project_root, {"chapter_id": target})
+                args: dict[str, Any] = {"chapter_id": target}
+                if task_phase is not None:
+                    args["_task_phase"] = task_phase
+                if cancel_requested is not None:
+                    args["_cancel_requested"] = cancel_requested
+                result = executor(self.project_root, args)
             else:
                 from tools.project_lock import ProjectBusyError, ProjectWriteLock
 

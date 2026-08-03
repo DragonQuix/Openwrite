@@ -10,6 +10,7 @@ dependencies = [
     "anthropic>=0.18",
     "markdown-it-py>=3.0",
     "prompt_toolkit>=3.0",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [tool.setuptools.packages.find]
@@ -17,7 +18,7 @@ include = ["tools*", "models*", "craft*"]
 exclude = ["tests*", "data*", "skills*", "config*", "docs*"]
 
 [tool.setuptools.package-data]
-tools = ["studio_assets/*"]
+tools = ["studio_assets/*", "studio_assets/js/*"]
 craft = ["*.md", "*.yaml", "*.yml"]
 
 [project.optional-dependencies]

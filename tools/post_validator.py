@@ -158,15 +158,16 @@ class PostWriteValidator:
 
         # 转折词密度检查
         transition_count = sum(content.count(w) for w in self.TRANSITION_WORDS)
-        transition_density = transition_count / (content_len / 1000)
-        if transition_density > self.transition_density_threshold * 1000:
-            violations.append(
-                ValidationViolation(
-                    severity="warning",
-                    rule="transition_density",
-                    description=f"转折词密度 {transition_density:.2f}次/千字（阈值 {self.transition_density_threshold * 1000:.2f}）",
+        if content_len:
+            transition_density = transition_count / (content_len / 1000)
+            if transition_density > self.transition_density_threshold * 1000:
+                violations.append(
+                    ValidationViolation(
+                        severity="warning",
+                        rule="transition_density",
+                        description=f"转折词密度 {transition_density:.2f}次/千字（阈值 {self.transition_density_threshold * 1000:.2f}）",
+                    )
                 )
-            )
 
         # 连续"了"字检查
         consecutive_le_count = 0

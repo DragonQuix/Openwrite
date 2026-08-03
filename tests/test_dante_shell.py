@@ -636,6 +636,25 @@ def test_dante_default_react_agent_has_direct_and_action_tool_surface(
     assert hasattr(react_agent, "_tool_summarize_ideation")
 
 
+def test_dante_default_constructor_registers_project_tool_executors(tmp_path: Path):
+    from tools.agent.dante import DanteChatAgent
+    from tools.init_project import init_project
+
+    init_project(tmp_path, "demo")
+    agent = DanteChatAgent(
+        project_root=tmp_path,
+        novel_id="demo",
+        llm_client_factory=lambda: SimpleNamespace(
+            config=SimpleNamespace(model="fake-model")
+        ),
+    )
+
+    react_agent = agent._get_react_agent()
+
+    assert hasattr(react_agent, "_tool_get_context")
+    assert hasattr(react_agent, "_tool_get_truth_files")
+
+
 def test_dante_persists_user_turn_when_react_raises(tmp_path: Path):
     from tools.agent.dante import DanteChatAgent
 

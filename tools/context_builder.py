@@ -84,9 +84,18 @@ class ContextBuilder:
         # running.  Read it per builder instance so the next request observes
         # the new budget without restarting Python.
         try:
+            from .model_profiles import active_model_profile
+
+            active_profile = active_model_profile() or {}
             self.MAX_TOKENS = max(
                 12000,
-                min(512000, int(os.getenv("OPENWRITE_CONTEXT_TOKENS", "64000"))),
+                min(
+                    512000,
+                    int(
+                        active_profile.get("context_tokens")
+                        or os.getenv("OPENWRITE_CONTEXT_TOKENS", "64000")
+                    ),
+                ),
             )
         except ValueError:
             self.MAX_TOKENS = 64000

@@ -92,6 +92,23 @@ OpenWrite 推荐你把它当成一个长期协作的主 agent，而不是一组�
 
 ## 快速开始
 
+### 0. 双击启动（推荐）
+
+下载或克隆完整仓库后，可以直接双击仓库根目录中的启动文件：
+
+- macOS：`启动 OpenWrite.command`
+- Windows：`启动 OpenWrite.bat`
+
+启动器会检查 Python 3.10+，在 `.openwrite-runtime/` 创建与系统隔离的运行环境，
+根据 `pyproject.toml` 和 `requirements.txt` 检查依赖是否需要更新，并自动下载、安装和运行
+`pip check`。依赖没有变化且环境健康时会直接启动，不会每次重复下载。
+
+如果默认端口已经运行 OpenWrite，启动器会直接打开现有 Studio；如果端口被其他程序占用，
+会自动寻找后续可用端口。`.openwrite-runtime/` 只存在于本机并已被 Git 忽略，不会进入作品或代码提交。
+
+启动器不会静默安装 Python 本身。如果电脑没有 Python 3.10 或更高版本，会显示对应系统的安装地址；
+安装完成后再次双击即可。首次安装依赖需要联网，后续通常可直接离线启动。
+
 ### 1. 安装
 
 ```bash

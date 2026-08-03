@@ -15,6 +15,7 @@ from .errors import (
     RateLimitError,
     InvalidRequestError,
     NetworkError,
+    LLMTimeoutError,
 )
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "RateLimitError",
     "InvalidRequestError",
     "NetworkError",
+    "LLMTimeoutError",
 ]

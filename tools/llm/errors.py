@@ -9,6 +9,8 @@ from __future__ import annotations
 class LLMWrappedError(Exception):
     """包装后的 LLM 错误基类"""
 
+    code = "LLM_ERROR"
+
     def __init__(self, message: str, original_error: str = ""):
         self.message = message
         self.original_error = original_error
@@ -23,40 +25,46 @@ class LLMWrappedError(Exception):
 class APIError(LLMWrappedError):
     """通用 API 错误"""
 
-    pass
+    code = "PROVIDER_ERROR"
 
 
 class AuthenticationError(LLMWrappedError):
     """认证错误 (401/403)"""
 
-    pass
+    code = "PROVIDER_AUTH_ERROR"
 
 
 class RateLimitError(LLMWrappedError):
     """限流错误 (429)"""
 
-    pass
+    code = "PROVIDER_RATE_LIMIT"
 
 
 class InvalidRequestError(LLMWrappedError):
     """无效请求错误 (400)"""
 
-    pass
+    code = "PROVIDER_INVALID_REQUEST"
 
 
 class NetworkError(LLMWrappedError):
     """网络连接错误"""
 
-    pass
+    code = "PROVIDER_NETWORK_ERROR"
+
+
+class LLMTimeoutError(LLMWrappedError):
+    """Provider request timed out."""
+
+    code = "PROVIDER_TIMEOUT"
 
 
 class StreamError(LLMWrappedError):
     """流式输出错误"""
 
-    pass
+    code = "PROVIDER_STREAM_ERROR"
 
 
 class ContextLengthError(LLMWrappedError):
     """上下文长度超限"""
 
-    pass
+    code = "PROVIDER_CONTEXT_LENGTH"

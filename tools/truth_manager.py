@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 from pathlib import Path
@@ -190,6 +191,50 @@ class TruthFilesManager:
                     temporary[attr_name] = Path(handle.name)
             for attr_name in ["current_state", "ledger", "relationships"]:
                 temporary[attr_name].replace(self._get_file_path(attr_name))
+            # Keep a manually edited legacy document visible to the canonical state
+            # on projects that have already migrated. Structured projections remain
+            # additive and are never silently discarded here.
+            state_path = self.world_dir / "runtime_state.json"
+            if state_path.is_file():
+                try:
+                    from .runtime_state import RuntimeStateManager
+
+                    manager = RuntimeStateManager(self.project_root, self.novel_id)
+                    state = manager.load()
+                    projection = manager.render(state)
+                    changed = False
+                    for attr_name in ("current_state", "ledger", "relationships"):
+                        content = getattr(truth, attr_name, "")
+                        if content == projection[attr_name]:
+                            continue
+                        changed = True
+                        state.legacy_documents[attr_name] = content
+                        if attr_name == "current_state":
+                            state.current_state_notes = []
+                            state.characters = {}
+                            state.open_threads = {}
+                        elif attr_name == "ledger":
+                            state.ledger_notes = []
+                            state.resources = {}
+                        else:
+                            state.relationship_notes = []
+                            state.relationships = {}
+                            state.proposed_entities = {}
+                    if changed:
+                        state.revision += 1
+                        state.source_chapter = "manual"
+                        manager._atomic_replace_many(  # noqa: SLF001
+                            {
+                                state_path: json.dumps(
+                                    state.model_dump(mode="json"),
+                                    ensure_ascii=False,
+                                    indent=2,
+                                )
+                                + "\n"
+                            }
+                        )
+                except Exception as exc:
+                    logger.warning("Failed to sync runtime state legacy documents: %s", exc)
         except Exception:
             for path in temporary.values():
                 path.unlink(missing_ok=True)
@@ -205,6 +250,47 @@ class TruthFilesManager:
                 setattr(truth, key, value)
 
         self.save_truth_files(truth)
+
+    def load_runtime_state(self) -> Any:
+        """Load or migrate the canonical state without changing the Markdown API."""
+        from .runtime_state import RuntimeStateManager
+
+        truth = self.load_truth_files()
+        manager = RuntimeStateManager(self.project_root, self.novel_id)
+        state = manager.load(
+            {
+                "current_state": truth.current_state,
+                "ledger": truth.ledger,
+                "relationships": truth.relationships,
+            }
+        )
+        if not manager.state_path.is_file():
+            manager.save_with_projections(state)
+        return state
+
+    def apply_runtime_delta(
+        self,
+        delta: Any,
+        *,
+        known_entities: List[str] | None = None,
+    ) -> Any:
+        """Apply and persist a validated chapter delta atomically with projections."""
+        from .runtime_state import RuntimeStateManager
+
+        truth = self.load_truth_files()
+        manager = RuntimeStateManager(self.project_root, self.novel_id)
+        state = manager.load(
+            {
+                "current_state": truth.current_state,
+                "ledger": truth.ledger,
+                "relationships": truth.relationships,
+            }
+        )
+        updated = manager.apply(
+            state, delta, known_entities=known_entities or []
+        )
+        manager.save_with_projections(updated)
+        return updated
 
     def create_snapshot(self, chapter_number: int) -> str:
         """创建状态快照
@@ -230,6 +316,9 @@ class TruthFilesManager:
                 "relationships": truth.relationships,
             },
         }
+        runtime_state_path = self.world_dir / "runtime_state.json"
+        if runtime_state_path.is_file():
+            snapshot["runtime_state"] = runtime_state_path.read_text(encoding="utf-8")
 
         # 快照故意落成 JSON，避免再引入一套 front matter/Markdown 解析成本。
         snapshot_path = self.snapshots_dir / f"{snapshot_id}.json"
@@ -262,7 +351,18 @@ class TruthFilesManager:
                 ),
             )
 
-            self.save_truth_files(truth)
+            runtime_state = snapshot.get("runtime_state")
+            runtime_state_path = self.world_dir / "runtime_state.json"
+            if isinstance(runtime_state, str):
+                from .runtime_state import RuntimeState, RuntimeStateManager
+
+                state = RuntimeState.model_validate_json(runtime_state)
+                RuntimeStateManager(
+                    self.project_root, self.novel_id
+                ).save_with_projections(state)
+            else:
+                self.save_truth_files(truth)
+                runtime_state_path.unlink(missing_ok=True)
             logger.info(f"Restored snapshot: {snapshot_id}")
             return True
         except Exception as e:

@@ -18,12 +18,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import tomllib
 import yaml
 
 from .frontmatter import render_toml_front_matter
-from .llm.client import LLMClient, LLMConfig, LLMResponse, Message
+from .llm.client import LLMClient, LLMConfig, Message
 from .shared_documents import render_indexed_document
+from .toml_compat import tomllib
 
 
 def build_style_manifest(project_root: Path, novel_id: str, style_id: str) -> dict[str, Any]:
@@ -183,7 +183,8 @@ def _build_optional_llm_client() -> LLMClient | None:
 def _synthesize_with_llm(client: Any, manifest: dict[str, Any]) -> str:
     prompt = (
         "你是一位小说风格总编。请基于给定 manifest 生成一份作品级风格文档。"
-        "只保留可复用信号，绝对不要把 source_bound_signals 里的专有名词、组织名、桥段名写进最终文档。"
+        "只保留可复用信号，绝对不要把 source_bound_signals "
+        "里的专有名词、组织名、桥段名写进最终文档。"
         "输出 Markdown，至少包含这些二级标题："
         "合成摘要、优先风格信号、叙述声音、对话规则、节奏规则、作品约束、通用技法、禁止。"
     )
@@ -317,7 +318,9 @@ def _collect_consistency_forbidden(project_root: Path, novel_id: str, style_id: 
     return _extract_markdown_list(_read_text(path), "禁止直接搬运")
 
 
-def _collect_consistency_source_bound(project_root: Path, novel_id: str, style_id: str) -> list[str]:
+def _collect_consistency_source_bound(
+    project_root: Path, novel_id: str, style_id: str
+) -> list[str]:
     path = _source_style_root(project_root, novel_id, style_id) / "consistency.md"
     return _extract_markdown_list(_read_text(path), "来源绑定内容")
 
@@ -383,11 +386,19 @@ def _collect_work_constraints(project_root: Path, novel_id: str) -> list[str]:
     for path, meta in (
         (
             base / "story" / "foundation.md",
-            {"name": "基础设定", "summary": "作品基础设定", "detail_refs": ["核心前提", "限制", "禁忌"]},
+            {
+                "name": "基础设定",
+                "summary": "作品基础设定",
+                "detail_refs": ["核心前提", "限制", "禁忌"],
+            },
         ),
         (
             base / "world" / "rules.md",
-            {"name": "世界规则", "summary": "作品世界规则", "detail_refs": ["power_rules", "social_rules", "limits"]},
+            {
+                "name": "世界规则",
+                "summary": "作品世界规则",
+                "detail_refs": ["power_rules", "social_rules", "limits"],
+            },
         ),
     ):
         if path.exists():
@@ -402,7 +413,16 @@ def _collect_work_constraints(project_root: Path, novel_id: str) -> list[str]:
 
 
 def _source_style_root(project_root: Path, novel_id: str, style_id: str) -> Path:
-    return Path(project_root) / "data" / "novels" / novel_id / "data" / "sources" / style_id / "style"
+    return (
+        Path(project_root)
+        / "data"
+        / "novels"
+        / novel_id
+        / "data"
+        / "sources"
+        / style_id
+        / "style"
+    )
 
 
 def _read_text(path: Path) -> str:

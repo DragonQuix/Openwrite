@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-import tomllib
 from typing import Any
+
+from .toml_compat import tomllib
 
 
 def has_toml_front_matter(text: str) -> bool:
@@ -12,7 +13,7 @@ def has_toml_front_matter(text: str) -> bool:
     return text.startswith("+++\n") or text.startswith("+++\r\n")
 
 
-def parse_toml_front_matter(text: str) -> tuple[dict, str]:
+def parse_toml_front_matter(text: str) -> tuple[dict[str, Any], str]:
     """Parse TOML front matter and return ``(metadata, body)``.
 
     Invalid or missing front matter is treated as plain body text.

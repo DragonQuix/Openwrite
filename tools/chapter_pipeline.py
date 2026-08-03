@@ -382,9 +382,26 @@ def _sync_book_state(
     store.save(state)
 
 
+class _TaskCancellationRequested(RuntimeError):
+    pass
+
+
+def _task_phase(args: dict[str, Any], phase: str, note: str = "") -> None:
+    callback = args.get("_task_phase")
+    if callable(callback):
+        callback(phase, note)
+
+
+def _raise_if_task_cancelled(args: dict[str, Any]) -> None:
+    callback = args.get("_cancel_requested")
+    if callable(callback) and callback():
+        raise _TaskCancellationRequested("任务已取消，模型结果未提交")
+
+
 def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str, Any]:
     from tools.agent import AgentContext, WriterAgent
     from tools.chapter_memory import ChapterMemoryStore
+    from tools.chapter_run_store import ChapterRunStore
     from tools.context_builder import ContextBuilder
     from tools.llm import LLMClient, LLMConfig
     from tools.project_lock import ProjectBusyError, ProjectWriteLock
@@ -403,8 +420,12 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
     scheduler = WorkflowScheduler(project_root, novel_id)
     workflow = scheduler.load_or_create(chapter_id)
     active_stage = ""
+    run_store = ChapterRunStore(project_root, novel_id)
+    run_manifest = None
     try:
         with ProjectWriteLock(project_root, novel_id, operation=f"write:{chapter_id}"):
+            _task_phase(args, "reading", "读取章节上下文")
+            _raise_if_task_cancelled(args)
             active_stage = "context_assembly"
             scheduler.start_stage(workflow, active_stage)
             context = ContextBuilder(project_root, novel_id).build_generation_context(
@@ -412,15 +433,20 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
             )
             truth_manager = TruthFilesManager(project_root, novel_id)
             truth = truth_manager.load_truth_files()
+            baseline_state = truth_manager.load_runtime_state()
             scheduler.complete_stage(
                 workflow,
                 active_stage,
                 message="canonical context assembled",
                 data={"chapter_id": chapter_id},
             )
+            _task_phase(args, "preparing", "准备写作请求")
+            _raise_if_task_cancelled(args)
             active_stage = "writing"
             scheduler.start_stage(workflow, active_stage)
             llm_config = LLMConfig.from_env()
+            outline_target_words = int(getattr(context, "target_words", 0) or 0)
+            effective_target_words = target_words or outline_target_words or 6000
             writer = WriterAgent(
                 AgentContext(LLMClient(llm_config), llm_config.model, str(project_root))
             )
@@ -429,8 +455,19 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
                 truth=truth,
                 packet=packet,
                 guidance=str(args.get("guidance") or "").strip(),
-                target_words=target_words,
+                target_words=effective_target_words,
             )
+            run_manifest = run_store.create(
+                chapter_id,
+                requested_target_words=target_words,
+                outline_target_words=outline_target_words,
+                effective_target_words=effective_target_words,
+                provider=str(getattr(llm_config, "provider", "")),
+                model=str(getattr(llm_config, "model", "")),
+                context_payload={**writer_payload, "context_packet": packet},
+                baseline_state_revision=int(getattr(baseline_state, "revision", 0) or 0),
+            )
+            _task_phase(args, "model", "生成章节草稿")
             result = asyncio.run(
                 writer.write_chapter(
                     context=writer_payload,
@@ -439,6 +476,8 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
                     target_words=writer_payload.get("target_words") or None,
                 )
             )
+            _task_phase(args, "validating", "校验模型结果")
+            _raise_if_task_cancelled(args)
             snapshot = truth_manager.create_snapshot(max(_chapter_number(chapter_id) - 1, 0))
             memory = ChapterMemoryStore(project_root, novel_id)
             draft_path = _chapter_path(project_root, novel_id, chapter_id)
@@ -446,13 +485,26 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
             previous_draft = draft_path.read_bytes() if draft_path.is_file() else None
             previous_memory = memory_path.read_bytes() if memory_path.is_file() else None
             try:
+                _task_phase(args, "committing", "原子提交章节与运行态")
                 _save_chapter(
                     project_root, novel_id, chapter_id, result.title, result.content
                 )
                 updates = _collect_truth_updates(getattr(result, "state_updates", {}))
-                if updates:
-                    truth_manager.update_truth_files(
-                        truth_manager.load_truth_files(), updates
+                state_delta = getattr(result, "state_delta", {})
+                if not state_delta and updates:
+                    from tools.runtime_state import legacy_updates_to_delta
+
+                    state_delta = legacy_updates_to_delta(
+                        updates, chapter_id=chapter_id
+                    ).model_dump(mode="json")
+                if state_delta:
+                    known_entities = [
+                        str(item.get("name") or "").strip()
+                        for item in writer_payload.get("active_characters", [])
+                        if isinstance(item, dict) and str(item.get("name") or "").strip()
+                    ]
+                    truth_manager.apply_runtime_delta(
+                        state_delta, known_entities=known_entities
                     )
                 memory.save(
                     chapter_id=chapter_id,
@@ -469,6 +521,11 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
                     data={"draft_path": str(draft_path)},
                 )
                 _sync_book_state(project_root, novel_id, chapter_id, None)
+                run_store.complete_write(
+                    run_manifest,
+                    draft_content=result.content,
+                    usage=dict(getattr(result, "token_usage", {}) or {}),
+                )
                 active_stage = ""
             except Exception:
                 truth_manager.restore_snapshot(snapshot)
@@ -483,6 +540,15 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
                 "draft_path": str(draft_path),
                 "truth_updates": updates,
             }
+    except _TaskCancellationRequested as exc:
+        if active_stage:
+            scheduler.fail_stage(workflow, active_stage, str(exc))
+        return {
+            "ok": False,
+            "chapter_id": chapter_id,
+            "error": str(exc),
+            "code": "TASK_CANCELLED",
+        }
     except ProjectBusyError as exc:
         return {
             "ok": False,
@@ -491,6 +557,11 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
             "code": "PROJECT_BUSY",
         }
     except Exception as exc:
+        if run_manifest is not None:
+            try:
+                run_store.fail(run_manifest, stage=active_stage or "write")
+            except Exception:
+                pass
         if active_stage:
             scheduler.fail_stage(workflow, active_stage, str(exc))
         return {"ok": False, "chapter_id": chapter_id, "error": str(exc)}
@@ -499,6 +570,7 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
 def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str, Any]:
     from tools.agent import AgentContext, ReviewerAgent
     from tools.chapter_assembler import ChapterAssemblerV2
+    from tools.chapter_run_store import ChapterRunStore
     from tools.llm import LLMClient, LLMConfig
     from tools.project_lock import ProjectBusyError, ProjectWriteLock
     from tools.review_store import ReviewStore
@@ -513,8 +585,33 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
     chapter_id = str(args.get("chapter_id") or "ch_001")
     scheduler = WorkflowScheduler(project_root, novel_id)
     workflow = scheduler.load_or_create(chapter_id)
+    run_store = ChapterRunStore(project_root, novel_id)
+    requested_run_id = str(args.get("run_id") or "").strip()
+    run_manifest = (
+        run_store.load(requested_run_id)
+        if requested_run_id
+        else run_store.latest_for_chapter(
+            chapter_id, statuses={"written", "reviewed"}
+        )
+    )
+    if requested_run_id and run_manifest is None:
+        return {
+            "ok": False,
+            "chapter_id": chapter_id,
+            "error": "未找到指定的章节运行记录",
+            "code": "INVALID_CHAPTER_RUN",
+        }
+    if run_manifest is not None and run_manifest.chapter_id != chapter_id:
+        return {
+            "ok": False,
+            "chapter_id": chapter_id,
+            "error": "章节运行记录与待审章节不匹配",
+            "code": "INVALID_CHAPTER_RUN",
+        }
     try:
         with ProjectWriteLock(project_root, novel_id, operation=f"review:{chapter_id}"):
+            _task_phase(args, "reading", "读取章节正文")
+            _raise_if_task_cancelled(args)
             content = _load_chapter(project_root, novel_id, chapter_id)
             if not content:
                 return {
@@ -523,6 +620,7 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
                     "code": "NOT_FOUND",
                 }
             scheduler.start_stage(workflow, "review")
+            _task_phase(args, "preparing", "组装审稿上下文")
             llm_config = LLMConfig.from_env()
             reviewer = ReviewerAgent(
                 AgentContext(LLMClient(llm_config), llm_config.model, str(project_root))
@@ -533,12 +631,15 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
                 style_id=str(config.get("style_id") or novel_id),
             ).assemble(chapter_id)
             review_context = build_review_payload(_packet_payload(packet))
+            if run_manifest is not None and run_manifest.effective_target_words > 0:
+                review_context["target_words"] = run_manifest.effective_target_words
             prewrite = TruthFilesManager(project_root, novel_id).load_snapshot_before(
                 _chapter_number(chapter_id)
             )
             if prewrite is not None:
                 review_context["current_state"] = prewrite.current_state
                 review_context["relationships"] = prewrite.relationships
+            _task_phase(args, "model", "执行章节审稿")
             result = asyncio.run(reviewer.review(content=content, context=review_context))
             issues: list[dict[str, Any]] = [
                 {
@@ -558,7 +659,12 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
                 "issues": len(issues),
                 "summary": str(getattr(result, "summary", "") or ""),
                 "issue_details": issues,
+                "run_id": run_manifest.run_id if run_manifest else "",
+                "effective_target_words": int(review_context.get("target_words") or 0),
             }
+            _task_phase(args, "validating", "整理审稿问题")
+            _raise_if_task_cancelled(args)
+            _task_phase(args, "committing", "保存审稿结果")
             ReviewStore(project_root, novel_id).save(chapter_id, payload)
             scheduler.complete_stage(
                 workflow,
@@ -579,7 +685,17 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
                 },
             )
             _sync_book_state(project_root, novel_id, chapter_id, bool(result.passed))
+            if run_manifest is not None:
+                run_store.complete_review(run_manifest, review_payload=payload)
             return payload
+    except _TaskCancellationRequested as exc:
+        scheduler.fail_stage(workflow, "review", str(exc))
+        return {
+            "ok": False,
+            "chapter_id": chapter_id,
+            "error": str(exc),
+            "code": "TASK_CANCELLED",
+        }
     except ProjectBusyError as exc:
         return {
             "ok": False,

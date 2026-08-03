@@ -101,6 +101,13 @@ class BaseAgent(ABC):
                 stream=False,
                 on_progress=self.ctx.on_progress,
             )
+            from ..llm.response import classify_response
+
+            classify_response(
+                response.content,
+                finish_reason=getattr(response, "finish_reason", ""),
+                reasoning=getattr(response, "reasoning", ""),
+            )
             self.log.debug(
                 f"[{self.name}] Response: {len(response.content)} chars, "
                 f"tokens={response.total_tokens}"

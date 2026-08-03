@@ -21,6 +21,8 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
+import yaml
+
 from tools.context_schema import normalize_truth_file_key
 from tools.source_sync import (
     collect_sync_status as _shared_collect_sync_status,
@@ -71,6 +73,7 @@ def main():
     _add_focus_command(subparsers)
     _add_import_command(subparsers)
     _add_export_command(subparsers)
+    _add_asset_command(subparsers)
     _add_desk_command(subparsers)
     _add_studio_command(subparsers)
     _add_doctor_command(subparsers)
@@ -155,6 +158,8 @@ def _dispatch_in_project(args) -> int:
         return _cmd_import(args)
     elif args.command == "export":
         return _cmd_export(args)
+    elif args.command == "asset":
+        return _cmd_asset(args)
     elif args.command == "desk":
         return _cmd_desk(args)
     elif args.command == "studio":
@@ -368,6 +373,35 @@ def _add_export_command(subparsers):
     p.add_argument("--format", choices=["md", "txt"], default="md", help="导出格式")
     p.add_argument("--output", "-o", help="输出路径")
     p.add_argument("--title", help="覆盖导出书名")
+
+
+def _add_asset_command(subparsers):
+    """asset 命令 - 结构化资产与 OpenWrite Asset Package。"""
+    parser = subparsers.add_parser("asset", help="管理结构化资产与跨项目资产包")
+    commands = parser.add_subparsers(dest="asset_action")
+    list_cmd = commands.add_parser("list", help="列出可导出的资产")
+    list_cmd.add_argument("--kind", choices=["character", "world", "progression"])
+    list_cmd.add_argument("--json", action="store_true")
+    export_cmd = commands.add_parser("export", help="导出 .owasset.zip")
+    export_cmd.add_argument("output")
+    export_cmd.add_argument(
+        "--select",
+        action="append",
+        default=[],
+        metavar="KIND:ID",
+        help="选择资产，可重复；省略时导出全部",
+    )
+    preview_cmd = commands.add_parser("preview", help="校验并预览资产包")
+    preview_cmd.add_argument("package")
+    preview_cmd.add_argument("--json", action="store_true")
+    import_cmd = commands.add_parser("import", help="预览或明确应用资产包")
+    import_cmd.add_argument("package")
+    import_cmd.add_argument("--apply", action="store_true", help="确认执行导入")
+    import_cmd.add_argument("--replace", action="append", default=[], metavar="ID")
+    import_cmd.add_argument("--rename", action="append", default=[], metavar="OLD:NEW")
+    import_cmd.add_argument("--skip", action="append", default=[], metavar="ID")
+    import_cmd.add_argument("--allow-missing-dependencies", action="store_true")
+    import_cmd.add_argument("--json", action="store_true")
 
 
 def _add_desk_command(subparsers):
@@ -970,6 +1004,85 @@ def _cmd_export(args) -> int:
         return 1
     logger.info(f"整书已导出: {path}")
     return 0
+
+
+def _cmd_asset(args) -> int:
+    """Manage structured assets and portable packages."""
+    from tools.asset_package import AssetPackageError, AssetPackageService
+    from tools.novel_service import NovelApplicationService, NovelServiceError
+    from tools.structured_assets import StructuredAssetError, StructuredAssetService
+
+    try:
+        novel_id = NovelApplicationService(Path.cwd()).novel_id
+        assets = StructuredAssetService(Path.cwd(), novel_id)
+        packages = AssetPackageService(Path.cwd(), novel_id)
+    except NovelServiceError as exc:
+        logger.error(str(exc))
+        return 1
+    action = str(getattr(args, "asset_action", "") or "list")
+    try:
+        if action == "list":
+            result = assets.list(str(getattr(args, "kind", "") or ""))
+        elif action == "export":
+            selections = [
+                _parse_asset_selection(value)
+                for value in getattr(args, "select", [])
+            ]
+            result = packages.export(
+                Path(args.output),
+                selections=selections or None,
+            )
+        elif action == "preview":
+            result = packages.preview_import(Path(args.package))
+        elif action == "import":
+            preview = packages.preview_import(Path(args.package))
+            if not bool(args.apply):
+                result = preview
+            else:
+                resolutions: dict[str, dict[str, str]] = {
+                    str(asset_id): {"action": "replace"}
+                    for asset_id in args.replace
+                }
+                resolutions.update(
+                    {
+                        str(asset_id): {"action": "skip"}
+                        for asset_id in args.skip
+                    }
+                )
+                for value in args.rename:
+                    old_id, new_id = _parse_asset_rename(value)
+                    resolutions[old_id] = {"action": "rename", "new_id": new_id}
+                result = packages.import_package(
+                    Path(args.package),
+                    expected_sha256=preview["package_sha256"],
+                    resolutions=resolutions,
+                    allow_missing_dependencies=bool(args.allow_missing_dependencies),
+                )
+        else:
+            logger.error("请指定 asset list/export/preview/import")
+            return 1
+    except (AssetPackageError, StructuredAssetError, OSError, ValueError) as exc:
+        logger.error(str(exc))
+        return 1
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(yaml.safe_dump(result, allow_unicode=True, sort_keys=False).rstrip())
+    return 0
+
+
+def _parse_asset_selection(value: str) -> dict[str, str]:
+    kind, separator, asset_id = str(value or "").partition(":")
+    if not separator or kind not in {"character", "world", "progression"} or not asset_id:
+        raise ValueError("资产选择必须形如 character:char_id")
+    return {"kind": kind, "id": asset_id}
+
+
+def _parse_asset_rename(value: str) -> tuple[str, str]:
+    old_id, separator, new_id = str(value or "").partition(":")
+    if not separator or not old_id or not new_id:
+        raise ValueError("重命名必须形如 old_id:new_id")
+    return old_id, new_id
 
 
 def _cmd_desk(args) -> int:

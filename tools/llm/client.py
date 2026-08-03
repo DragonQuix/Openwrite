@@ -68,6 +68,8 @@ class LLMResponse:
     usage: dict = field(default_factory=dict)
     model: str = ""
     provider: str = "openai"
+    finish_reason: str = ""
+    reasoning: str = ""
 
     @property
     def prompt_tokens(self) -> int:
@@ -91,6 +93,7 @@ class ToolCallResponse:
     usage: dict = field(default_factory=dict)
     model: str = ""
     provider: str = "openai"
+    finish_reason: str = ""
 
     @property
     def has_tool_calls(self) -> bool:
@@ -128,6 +131,24 @@ class LLMConfig:
     @classmethod
     def from_env(cls) -> "LLMConfig":
         """从环境变量创建配置"""
+        from tools.model_profiles import active_model_profile
+
+        profile = active_model_profile()
+        if profile:
+            return cls(
+                provider=profile["provider"],
+                api_key=profile["api_key"],
+                base_url=profile["base_url"],
+                model=profile["model"],
+                temperature=float(
+                    0.7 if profile.get("temperature") in {None, ""} else profile["temperature"]
+                ),
+                max_tokens=int(profile.get("max_output_tokens") or 24000),
+                stream=os.getenv("LLM_STREAM", "true").lower() == "true",
+                api_format=profile.get("api_format") or "chat",
+                timeout_seconds=float(profile.get("timeout_seconds") or 120),
+                max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
+            )
         return cls(
             provider=os.getenv("LLM_PROVIDER", "openai"),
             api_key=os.getenv("LLM_API_KEY", ""),
@@ -377,12 +398,22 @@ class LLMClient:
                         }
                     )
 
+            from .response import classify_response, validate_tool_arguments
+
+            validate_tool_arguments(tool_calls)
+            classify_response(
+                message.content or "",
+                finish_reason=str(getattr(response.choices[0], "finish_reason", "") or ""),
+                require_content=not tool_calls,
+            )
+
             return ToolCallResponse(
                 content=message.content or "",
                 tool_calls=tool_calls,
                 usage=_plain_usage(getattr(response, "usage", None)),
                 model=response.model,
                 provider="openai",
+                finish_reason=str(getattr(response.choices[0], "finish_reason", "") or ""),
             )
         except openai.APIError as e:
             raise self._wrap_error(e)
@@ -452,6 +483,15 @@ class LLMClient:
                         }
                     )
 
+            from .response import classify_response, validate_tool_arguments
+
+            validate_tool_arguments(tool_calls)
+            classify_response(
+                content,
+                finish_reason=str(getattr(response, "stop_reason", "") or ""),
+                require_content=not tool_calls,
+            )
+
             return ToolCallResponse(
                 content=content,
                 tool_calls=tool_calls,
@@ -462,6 +502,7 @@ class LLMClient:
                 },
                 model=response.model,
                 provider="anthropic",
+                finish_reason=str(getattr(response, "stop_reason", "") or ""),
             )
         except anthropic.APIError as e:
             raise self._wrap_error(e)
@@ -501,6 +542,10 @@ class LLMClient:
                 usage=_plain_usage(response.usage),
                 model=response.model,
                 provider="openai",
+                finish_reason=str(getattr(response.choices[0], "finish_reason", "") or ""),
+                reasoning=str(
+                    getattr(response.choices[0].message, "reasoning_content", "") or ""
+                ),
             )
         except openai.APIError as e:
             raise self._wrap_error(e)
@@ -541,6 +586,7 @@ class LLMClient:
                 usage=_plain_usage(getattr(response, "usage", None)),
                 model=response.model,
                 provider="openai",
+                finish_reason=str(getattr(response, "status", "") or ""),
             )
         except openai.APIError as e:
             raise self._wrap_error(e)
@@ -595,6 +641,7 @@ class LLMClient:
                 },
                 model=response.model,
                 provider="anthropic",
+                finish_reason=str(getattr(response, "stop_reason", "") or ""),
             )
         except anthropic.APIError as e:
             raise self._wrap_error(e)
@@ -627,7 +674,9 @@ class LLMClient:
             partial = "".join(chunks)
             if len(partial) > 100:  # 有意义的内容
                 logger.warning(f"Stream interrupted: {e}, returning partial ({len(partial)} chars)")
-                return LLMResponse(content=partial, provider="openai")
+                return LLMResponse(
+                    content=partial, provider="openai", finish_reason="incomplete"
+                )
             raise
 
         return LLMResponse(
@@ -667,7 +716,9 @@ class LLMClient:
             partial = "".join(chunks)
             if len(partial) > 100:
                 logger.warning(f"Anthropic stream interrupted: {e}")
-                return LLMResponse(content=partial, provider="anthropic")
+                return LLMResponse(
+                    content=partial, provider="anthropic", finish_reason="incomplete"
+                )
             raise
 
         return LLMResponse(
@@ -681,12 +732,18 @@ class LLMClient:
         from .errors import (
             APIError,
             AuthenticationError,
+            LLMTimeoutError,
             RateLimitError,
             InvalidRequestError,
             NetworkError,
         )
 
-        error_msg = str(error)
+        from .response import redact_sensitive_text
+
+        error_msg = redact_sensitive_text(error)
+
+        if any(token in error_msg.lower() for token in ("timeout", "timed out")):
+            return LLMTimeoutError("模型服务请求超时，请稍后重试")
 
         if "400" in error_msg:
             return InvalidRequestError(

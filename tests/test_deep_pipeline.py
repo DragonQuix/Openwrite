@@ -117,6 +117,72 @@ chapter_summary: |
     ) == {"prompt_tokens": 30, "total_tokens": 40, "completion_tokens": 5}
 
 
+def test_writer_settlement_accepts_unfenced_yaml():
+    writer = WriterAgent.__new__(WriterAgent)
+
+    parsed = writer._parse_settlement(
+        """state_updates:
+  current_state: |
+    沈烬已提交回响实习申请。
+  relationships: |
+    沈烬 -> 刑无咎：确认对方隐瞒旧案。
+chapter_summary: |
+  沈烬听完死亡退出的真实代价后仍提交申请，并得知有人收购万戏社残页。
+""",
+        {},
+    )
+
+    assert parsed["state_updates"]["current_state"].startswith("沈烬已提交")
+    assert "隐瞒旧案" in parsed["state_updates"]["relationships"]
+    assert "万戏社残页" in parsed["chapter_summary"]
+
+
+def test_writer_settlement_accepts_prefaced_yaml_block():
+    writer = WriterAgent.__new__(WriterAgent)
+
+    parsed = writer._parse_settlement(
+        """以下是结算结果：
+
+state_updates:
+  ledger: |
+    回响残页：持有，风险上升。
+chapter_summary: 沈烬确认残页正在被追查。
+""",
+        {},
+    )
+
+    assert parsed["state_updates"]["ledger"].startswith("回响残页")
+    assert parsed["chapter_summary"] == "沈烬确认残页正在被追查。"
+
+
+def test_writer_settlement_rejects_malformed_structured_output():
+    from tools.llm.response import ProviderResponseError
+
+    writer = WriterAgent.__new__(WriterAgent)
+    with pytest.raises(ProviderResponseError) as raised:
+        writer._parse_settlement("state_updates: [broken", {})
+    assert raised.value.code == "MALFORMED_STRUCTURED_OUTPUT"
+
+
+def test_writer_settlement_rejects_invalid_runtime_delta_schema():
+    from tools.llm.response import ProviderResponseError
+
+    writer = WriterAgent.__new__(WriterAgent)
+    with pytest.raises(ProviderResponseError) as raised:
+        writer._parse_settlement(
+            """state_delta:
+  chapter_id: ch_001
+  operations:
+    - op: append
+      collection: unsupported_collection
+      value: fact
+chapter_summary: summary
+""",
+            {},
+        )
+    assert raised.value.code == "MALFORMED_STRUCTURED_OUTPUT"
+
+
 def test_writer_parses_chinese_numeral_chapter_heading():
     writer = WriterAgent.__new__(WriterAgent)
 
@@ -128,6 +194,19 @@ def test_writer_parses_chinese_numeral_chapter_heading():
 
     assert parsed["title"] == "第十三秒"
     assert parsed["content"] == "雨落在旧磁带上。"
+
+
+def test_writer_rejects_empty_creative_reply():
+    writer = WriterAgent.__new__(WriterAgent)
+
+    with pytest.raises(RuntimeError, match="empty model reply"):
+        writer._parse_creative_output("\n\n", chapter_number=7, usage={})
+
+
+def test_post_write_validator_accepts_empty_content():
+    from tools.post_validator import PostWriteValidator
+
+    assert PostWriteValidator().validate("") == []
 
 
 def test_writer_settlement_prompt_keeps_canonical_character_relationships():

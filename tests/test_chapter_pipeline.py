@@ -1,12 +1,15 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import tools.agent as agent_module
 import tools.llm as llm_module
 from tools.agent.book_state import BookStage, BookStateStore
 from tools.chapter_memory import ChapterMemoryStore
+from tools.chapter_run_store import ChapterRunStore
 from tools.init_project import init_project
-from tools.novel_service import NovelApplicationService
+from tools.novel_service import NovelApplicationService, NovelServiceError
 from tools.review_store import ReviewStore
 from tools.truth_manager import TruthFilesManager
 from tools.workflow_scheduler import WorkflowScheduler
@@ -89,6 +92,7 @@ def test_default_pipeline_commits_write_and_review_lifecycle(
     assert writer_calls[0]["context"]["target_words"] == 800
     assert "以钟声结束" in writer_calls[0]["context"]["external_context"]
     assert "雨落在钟楼上" in reviewer_calls[0]["content"]
+    assert reviewer_calls[0]["context"]["target_words"] == 800
     novel_root = tmp_path / "data" / "novels" / "demo"
     assert (novel_root / "data" / "manuscript" / "arc_001" / "ch_001.md").exists()
     memory = ChapterMemoryStore(tmp_path, "demo").load("ch_001")
@@ -96,7 +100,63 @@ def test_default_pipeline_commits_write_and_review_lifecycle(
     truth = TruthFilesManager(tmp_path, "demo").load_truth_files()
     assert "林岑已经进入钟楼" in truth.current_state
     assert ReviewStore(tmp_path, "demo").load("ch_001")["score"] == 96
+    run = ChapterRunStore(tmp_path, "demo").latest_for_chapter("ch_001")
+    assert run is not None and run.status == "reviewed"
+    assert run.effective_target_words == 800
     workflow = WorkflowScheduler(tmp_path, "demo").load_workflow("ch_001")
     assert workflow is not None and workflow.current_stage == "user_confirm"
     state = BookStateStore(tmp_path, "demo").load_or_create()
     assert state.stage == BookStage.CHAPTER_PREFLIGHT
+
+
+def test_default_write_pipeline_discards_model_result_when_task_is_cancelled(
+    tmp_path: Path, monkeypatch
+):
+    init_project(tmp_path, "demo", "取消写作")
+    _fake_llm(monkeypatch)
+    cancellation = {"requested": False}
+    phases: list[str] = []
+
+    class FakeWriter:
+        def __init__(self, agent_ctx):
+            self.agent_ctx = agent_ctx
+
+        async def write_chapter(self, **kwargs):
+            del kwargs
+            cancellation["requested"] = True
+            return SimpleNamespace(
+                title="不应落盘",
+                content="这段模型结果必须被丢弃。",
+                word_count=12,
+                state_updates={},
+                chapter_summary="",
+                observations="",
+                token_usage={},
+            )
+
+    monkeypatch.setattr(agent_module, "WriterAgent", FakeWriter)
+    service = NovelApplicationService(tmp_path)
+
+    with pytest.raises(NovelServiceError) as cancelled:
+        service.write_chapter(
+            {
+                "chapter_id": "ch_001",
+                "target_words": 800,
+                "_task_phase": lambda phase, note: phases.append(phase),
+                "_cancel_requested": lambda: cancellation["requested"],
+            }
+        )
+
+    assert cancelled.value.code == "TASK_CANCELLED"
+    assert "model" in phases and "validating" in phases
+    chapter = (
+        tmp_path
+        / "data"
+        / "novels"
+        / "demo"
+        / "data"
+        / "manuscript"
+        / "arc_001"
+        / "ch_001.md"
+    )
+    assert not chapter.exists()

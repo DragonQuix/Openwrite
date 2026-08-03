@@ -21,18 +21,102 @@ from tools.studio import (
     create_server,
     render_chat_markdown,
 )
+from tools.studio_contracts import StudioError as ContractStudioError
+from tools.studio_contracts import studio_error_payload
+from tools.studio_http import POST_ROUTE_PATTERNS, POST_ROUTES, resolve_post_route
 from tools.studio_preferences import StudioModelSettingsStore
 from tools.workflow_scheduler import WorkflowScheduler
+
+
+def _studio_javascript(assets: Path) -> str:
+    modules = sorted((assets / "js").glob("*.js"))
+    return "\n".join(path.read_text(encoding="utf-8") for path in [assets / "app.js", *modules])
+
+
+def test_studio_assets_load_shared_core_as_an_es_module():
+    assets = Path(__file__).parent.parent / "tools" / "studio_assets"
+    html = (assets / "index.html").read_text(encoding="utf-8")
+    app = (assets / "app.js").read_text(encoding="utf-8")
+    core = (assets / "js" / "core.js").read_text(encoding="utf-8")
+    application = (assets / "js" / "application.js").read_text(encoding="utf-8")
+    revisions = (assets / "js" / "revisions.js").read_text(encoding="utf-8")
+    tasks = (assets / "js" / "tasks.js").read_text(encoding="utf-8")
+    structured_assets = (assets / "js" / "assets.js").read_text(encoding="utf-8")
+
+    assert '<script type="module" src="/app.js"></script>' in html
+    assert 'import "/js/application.js"' in app
+    assert 'from "/js/core.js"' in application
+    assert "export const state" in core
+    assert "export async function api" in core
+    assert "error.requestId" in core
+    assert 'from "/js/revisions.js"' in application
+    assert "showRevisionPreview" in revisions
+    assert "DOCUMENT_CONFLICT" in revisions
+    assert 'from "/js/tasks.js"' in application
+    assert "enqueueTask" in tasks
+    assert "/api/tasks" in tasks
+    assert 'from "/js/assets.js"' in application
+    assert "refreshAssets" in structured_assets
+    assert "/api/assets/package/preview" in structured_assets
+    assert "data-package-action" in structured_assets
+
+
+def test_studio_structured_asset_ui_keeps_raw_mode_and_explicit_import_decisions():
+    assets = Path(__file__).parent.parent / "tools" / "studio_assets"
+    html = (assets / "index.html").read_text(encoding="utf-8")
+    javascript = _studio_javascript(assets)
+    styles = (assets / "styles.css").read_text(encoding="utf-8")
+
+    assert 'data-view="assets"' in html
+    assert 'data-asset-kind="character"' in html
+    assert 'data-asset-kind="world"' in html
+    assert 'data-asset-kind="progression"' in html
+    assert 'data-asset-mode="raw"' in html
+    assert 'id="asset-package-dialog"' in html
+    assert "ASSET_CONFLICT" in javascript
+    assert "replace" in javascript and "rename" in javascript and "skip" in javascript
+    assert ".asset-workspace" in styles
+    assert ".asset-stage-row" in styles
+    assert ".asset-field {\n  display: grid;\n  align-self: start;" in styles
+
+
+def test_studio_post_route_registry_matches_application_surface():
+    assert POST_ROUTES
+    for route, contract in POST_ROUTES.items():
+        assert route.startswith("/api/")
+        assert hasattr(StudioApplication, contract.method_name)
+    assert POST_ROUTE_PATTERNS
+    contract, parameters = resolve_post_route(
+        "/api/revisions/rev_20260802120000_abcdef1234/apply"
+    )
+    assert contract is not None and contract.method_name == "apply_revision"
+    assert parameters["proposal_id"].startswith("rev_")
+
+
+def test_studio_error_contract_preserves_legacy_error_string():
+    error = ContractStudioError(
+        "原文已变化",
+        HTTPStatus.CONFLICT,
+        code="DOCUMENT_CONFLICT",
+        recoverable=True,
+        details={"chapter_id": "ch_001"},
+    )
+    payload = studio_error_payload(error, "req_test")
+
+    assert payload["error"] == "原文已变化"
+    assert payload["code"] == "DOCUMENT_CONFLICT"
+    assert payload["recoverable"] is True
+    assert payload["details"] == {"chapter_id": "ch_001"}
+    assert payload["request_id"] == "req_test"
 
 
 def test_studio_model_form_uses_valid_output_step_and_interface_presets():
     assets = Path(__file__).parent.parent / "tools" / "studio_assets"
     html = (assets / "index.html").read_text(encoding="utf-8")
-    javascript = (assets / "app.js").read_text(encoding="utf-8")
+    javascript = _studio_javascript(assets)
 
     assert (
-        'id="model-max-tokens" type="number" min="256" max="131072" '
-        'step="1" value="24000"'
+        'id="model-max-tokens" type="number" min="256" max="131072" step="1" value="24000"'
     ) in html
     assert 'value="deepseek-pro">DeepSeek · V4 Pro<' in html
     assert 'value="deepseek-flash">DeepSeek · V4 Flash<' in html
@@ -42,16 +126,13 @@ def test_studio_model_form_uses_valid_output_step_and_interface_presets():
     assert 'model: "deepseek-v4-pro"' in javascript
     assert 'model: "deepseek-v4-flash"' in javascript
     assert "remember_api_key" in javascript
-    assert (
-        'return name === "deepseek-v4-flash" ? "deepseek-flash" : "deepseek-pro";'
-        in javascript
-    )
+    assert 'return name === "deepseek-v4-flash" ? "deepseek-flash" : "deepseek-pro";' in javascript
 
 
 def test_studio_onboarding_ui_guides_new_projects_and_next_actions():
     assets = Path(__file__).parent.parent / "tools" / "studio_assets"
     html = (assets / "index.html").read_text(encoding="utf-8")
-    javascript = (assets / "app.js").read_text(encoding="utf-8")
+    javascript = _studio_javascript(assets)
     styles = (assets / "styles.css").read_text(encoding="utf-8")
 
     assert "runNextAction" in javascript
@@ -126,16 +207,14 @@ def test_studio_delete_project_removes_directory(tmp_path: Path, monkeypatch: py
     with pytest.raises(StudioError, match="确认"):
         app.delete_project({"project_path": str(tmp_path / "doomed_novel"), "confirm": "wrong"})
 
-    app.delete_project(
-        {"project_path": str(tmp_path / "doomed_novel"), "confirm": "doomed"}
-    )
+    app.delete_project({"project_path": str(tmp_path / "doomed_novel"), "confirm": "doomed"})
     assert not (tmp_path / "doomed_novel").exists()
 
 
 def test_relationship_topology_includes_search_and_context_controls():
     assets = Path(__file__).parent.parent / "tools" / "studio_assets"
     html = (assets / "index.html").read_text(encoding="utf-8")
-    javascript = (assets / "app.js").read_text(encoding="utf-8")
+    javascript = _studio_javascript(assets)
     styles = (assets / "styles.css").read_text(encoding="utf-8")
 
     assert 'id="relationship-search" type="search"' in html
@@ -148,7 +227,7 @@ def test_relationship_topology_includes_search_and_context_controls():
 
 def test_outline_tree_ui_supports_direct_text_editing():
     assets = Path(__file__).parent.parent / "tools" / "studio_assets"
-    javascript = (assets / "app.js").read_text(encoding="utf-8")
+    javascript = _studio_javascript(assets)
     styles = (assets / "styles.css").read_text(encoding="utf-8")
 
     assert "startOutlineInlineRename" in javascript
@@ -161,7 +240,7 @@ def test_outline_tree_ui_supports_direct_text_editing():
 def test_agent_chat_ui_supports_sessions_and_collapsible_inspector():
     assets = Path(__file__).parent.parent / "tools" / "studio_assets"
     html = (assets / "index.html").read_text(encoding="utf-8")
-    javascript = (assets / "app.js").read_text(encoding="utf-8")
+    javascript = _studio_javascript(assets)
     styles = (assets / "styles.css").read_text(encoding="utf-8")
 
     assert 'id="agent-session-new"' in html
@@ -208,15 +287,7 @@ def test_studio_debug_mode_writes_sanitized_backend_log(tmp_path: Path):
     for handler in logging.getLogger("tools.studio").handlers:
         handler.flush()
 
-    log_path = (
-        tmp_path
-        / "data"
-        / "novels"
-        / "demo"
-        / "data"
-        / "logs"
-        / "studio-debug.log"
-    )
+    log_path = tmp_path / "data" / "novels" / "demo" / "data" / "logs" / "studio-debug.log"
     assert app.debug_log_path == log_path
     text = log_path.read_text(encoding="utf-8")
 
@@ -253,9 +324,7 @@ def test_studio_agent_sessions_can_be_created_selected_and_listed(tmp_path: Path
     goethe_session_id = goethe_created["active_session_id"]
     assert goethe_session_id.startswith("goethe-")
     assert goethe_created["history"]["session_id"] == goethe_session_id
-    assert goethe_created["history"]["path"].startswith(
-        "data/workflows/sessions/goethe/"
-    )
+    assert goethe_created["history"]["path"].startswith("data/workflows/sessions/goethe/")
 
     goethe_store = GoetheSessionStateStore(
         tmp_path,
@@ -287,13 +356,9 @@ def test_studio_agent_sessions_can_be_created_selected_and_listed(tmp_path: Path
     dante_store.append_turn("user", "根据大纲推进第一章")
     dante_surface = app.agent_surface("dante", limit=10, session_id=dante_session_id)
     assert dante_surface["history"]["messages"][0]["content"] == "根据大纲推进第一章"
-    assert dante_surface["history"]["path"].startswith(
-        "data/workflows/sessions/dante/"
-    )
+    assert dante_surface["history"]["path"].startswith("data/workflows/sessions/dante/")
 
-    deleted = app.delete_agent_session(
-        {"agent": "goethe", "session_id": goethe_session_id}
-    )
+    deleted = app.delete_agent_session({"agent": "goethe", "session_id": goethe_session_id})
     assert deleted["deleted"] is True
     assert deleted["deleted_session_id"] == goethe_session_id
     assert deleted["active_session_id"] == "default"
@@ -661,9 +726,7 @@ def test_studio_model_connection_errors_never_echo_provider_key_fragments(tmp_pa
     init_project(tmp_path, "demo")
 
     def fail_with_provider_body(settings):
-        raise RuntimeError(
-            "401 authentication failed; Your api key: ****-7f70 is invalid"
-        )
+        raise RuntimeError("401 authentication failed; Your api key: ****-7f70 is invalid")
 
     app = StudioApplication(tmp_path, model_test_executor=fail_with_provider_body)
     with pytest.raises(StudioError) as captured:
@@ -712,9 +775,7 @@ def test_studio_default_model_connection_test_allows_reasoning_budget(
 
 
 def test_studio_empty_model_connection_reply_gets_actionable_error():
-    message = StudioApplication._safe_model_connection_error(
-        RuntimeError("empty model reply")
-    )
+    message = StudioApplication._safe_model_connection_error(RuntimeError("empty model reply"))
 
     assert message == "连接测试失败：模型返回空内容，请调大最大输出后重试。"
 
@@ -844,9 +905,12 @@ def test_studio_http_serves_ui_api_and_blocks_unsigned_writes(tmp_path: Path):
             assert 'id="inspector-collapse"' in html
             assert "default-src 'self'" in response.headers["Content-Security-Policy"]
 
-        agent_surface = _read_json(
-            f"{base}/api/agents?agent=goethe&session_id=default&limit=5"
-        )
+        with opener.open(f"{base}/js/core.js") as response:
+            core_module = response.read().decode("utf-8")
+            assert "javascript" in response.headers["Content-Type"]
+            assert "export async function api" in core_module
+
+        agent_surface = _read_json(f"{base}/api/agents?agent=goethe&session_id=default&limit=5")
         assert agent_surface["active_session_id"] == "default"
         assert agent_surface["sessions"][0]["id"] == "default"
 
@@ -861,8 +925,7 @@ def test_studio_http_serves_ui_api_and_blocks_unsigned_writes(tmp_path: Path):
         assert new_session["created"] is True
         assert new_session["active_session_id"].startswith("goethe-")
         assert any(
-            session["id"] == new_session["active_session_id"]
-            for session in new_session["sessions"]
+            session["id"] == new_session["active_session_id"] for session in new_session["sessions"]
         )
         delete_session_request = Request(
             f"{base}/api/agent/session/delete",
@@ -893,6 +956,11 @@ def test_studio_http_serves_ui_api_and_blocks_unsigned_writes(tmp_path: Path):
         with pytest.raises(HTTPError) as denied:
             opener.open(request)
         assert denied.value.code == HTTPStatus.FORBIDDEN
+        denied_payload = json.loads(denied.value.read())
+        assert denied_payload["error"] == "缺少 Studio 写入凭证"
+        assert denied_payload["code"] == "WRITE_CREDENTIAL_REQUIRED"
+        assert denied_payload["request_id"].startswith("req_")
+        assert denied.value.headers["X-Request-ID"] == denied_payload["request_id"]
 
         outline = _read_json(f"{base}/api/outline")
         outline_edit = Request(
@@ -912,9 +980,7 @@ def test_studio_http_serves_ui_api_and_blocks_unsigned_writes(tmp_path: Path):
             edited_outline = json.loads(response.read())
         assert edited_outline["outline"]["roots"][0]["title"] == "第一卷：网页增量编辑"
 
-        document = _read_json(
-            f"{base}/api/document?path=src%2Fstory%2Fbackground.md"
-        )
+        document = _read_json(f"{base}/api/document?path=src%2Fstory%2Fbackground.md")
         assert isinstance(document["version"], str)
         save_request = Request(
             f"{base}/api/document",
@@ -1104,9 +1170,7 @@ def test_studio_http_exposes_real_agent_activity(tmp_path: Path):
     thread.start()
     base = f"http://127.0.0.1:{server.server_port}"
     try:
-        activity = _read_json(
-            f"{base}/api/agent/activity?run_id=run-http-activity-01"
-        )
+        activity = _read_json(f"{base}/api/agent/activity?run_id=run-http-activity-01")
         assert activity["status"] == "running"
         assert activity["phase"] == "tool_running"
         assert activity["step_index"] == 2
@@ -1137,6 +1201,129 @@ def test_studio_http_can_initialize_an_empty_workspace(tmp_path: Path):
             payload = json.loads(response.read())
         assert payload["initialized"] is True
         assert payload["snapshot"]["title"] == "前端新书"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_studio_revision_api_uses_envelope_and_dynamic_apply_route(tmp_path: Path):
+    init_project(tmp_path, "demo")
+    chapter = _save_chapter(
+        tmp_path,
+        "demo",
+        "ch_001",
+        "第一章",
+        "林舟推开门。门外没有人。",
+    )
+
+    def revise(root: Path, payload: dict) -> dict:
+        assert root == tmp_path
+        assert payload["selection"] == "门外没有人"
+        return {
+            "replacement_text": "门外看起来没有人",
+            "rationale": "保留观察的不确定性。",
+            "risk_flags": [],
+        }
+
+    server = create_server(tmp_path, port=0, revision_executor=revise)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    opener = build_opener(ProxyHandler({}))
+    content = chapter.read_text(encoding="utf-8")
+    selected = "门外没有人"
+    start = content.index(selected)
+
+    def post(path: str, payload: dict) -> tuple[dict, str]:
+        request = Request(
+            f"{base}{path}",
+            method="POST",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-OpenWrite-Studio": "1"},
+        )
+        with opener.open(request) as response:
+            return json.loads(response.read()), response.headers["X-Request-ID"]
+
+    try:
+        created, request_id = post(
+            "/api/revisions/selection",
+            {
+                "chapter_id": "ch_001",
+                "start": start,
+                "end": start + len(selected),
+                "original_text": selected,
+                "action": "rewrite",
+            },
+        )
+        assert created["ok"] is True
+        assert created["error"] is None
+        assert created["request_id"] == request_id
+        proposal_id = created["data"]["proposal_id"]
+
+        listed = _read_json(f"{base}/api/revisions?chapter=ch_001")
+        assert listed["data"]["proposals"][0]["proposal_id"] == proposal_id
+
+        applied, apply_request_id = post(f"/api/revisions/{proposal_id}/apply", {})
+        assert applied["request_id"] == apply_request_id
+        assert applied["data"]["proposal"]["status"] == "applied"
+        assert "门外看起来没有人" in chapter.read_text(encoding="utf-8")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_studio_revision_api_returns_document_conflict_details(tmp_path: Path):
+    init_project(tmp_path, "demo")
+    chapter = _save_chapter(tmp_path, "demo", "ch_001", "第一章", "门外没有人。")
+    server = create_server(
+        tmp_path,
+        port=0,
+        revision_executor=lambda root, payload: "门外似乎没有人",
+    )
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    opener = build_opener(ProxyHandler({}))
+    content = chapter.read_text(encoding="utf-8")
+    selected = "门外没有人"
+    start = content.index(selected)
+
+    def request(path: str, payload: dict) -> dict:
+        return json.loads(
+            opener.open(
+                Request(
+                    f"{base}{path}",
+                    method="POST",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-OpenWrite-Studio": "1",
+                    },
+                )
+            ).read()
+        )
+
+    try:
+        created = request(
+            "/api/revisions/selection",
+            {
+                "chapter_id": "ch_001",
+                "start": start,
+                "end": start + len(selected),
+                "original_text": selected,
+            },
+        )
+        proposal_id = created["data"]["proposal_id"]
+        chapter.write_text(content + "\n新增一段。", encoding="utf-8")
+        with pytest.raises(HTTPError) as response:
+            request(f"/api/revisions/{proposal_id}/apply", {})
+        payload = json.loads(response.value.read())
+        assert response.value.code == HTTPStatus.CONFLICT
+        assert payload["code"] == "DOCUMENT_CONFLICT"
+        assert payload["recoverable"] is True
+        assert payload["details"]["proposal_id"] == proposal_id
     finally:
         server.shutdown()
         server.server_close()
