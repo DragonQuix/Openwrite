@@ -21,6 +21,99 @@ async function loadWorkspace() {
   if (state.workspace.initialized) refreshTasks();
 }
 
+async function loadResearch() {
+  try {
+    const payload = await api("/api/research");
+    state.research.status = payload.data;
+    renderResearch();
+  } catch (error) {
+    $("#research-runtime-status").textContent = error.message;
+  }
+}
+
+function renderResearch() {
+  const surface = state.research.status || {};
+  const status = $("#research-runtime-status");
+  if (surface.available) {
+    status.textContent = `运行环境已就绪 · ${surface.reports?.length || 0} 份报告`;
+    status.classList.add("ready");
+  } else {
+    status.textContent = surface.setup_hint || "运行环境未就绪，请先安装 integrations/deepresearch 的依赖";
+    status.classList.remove("ready");
+  }
+  const reports = surface.reports || [];
+  $("#research-report-count").textContent = String(reports.length);
+  const root = $("#research-report-list");
+  root.replaceChildren();
+  if (!reports.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "完成一次研究后，报告会出现在这里。";
+    root.append(empty);
+    return;
+  }
+  reports.forEach((report) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `research-report-item${state.research.selectedReportId === report.id ? " active" : ""}`;
+    const title = document.createElement("strong");
+    title.textContent = report.title;
+    const meta = document.createElement("span");
+    meta.textContent = `${report.status} · ${report.created_at || "时间未知"}`;
+    button.append(title, meta);
+    button.addEventListener("click", () => openResearchReport(report.id));
+    root.append(button);
+  });
+}
+
+async function openResearchReport(reportId) {
+  try {
+    const payload = await api(`/api/research/reports/${encodeURIComponent(reportId)}`);
+    const report = payload.data;
+    state.research.selectedReportId = reportId;
+    $("#research-report-panel").hidden = false;
+    $("#research-report-title").textContent = report.metadata?.title || reportId;
+    $("#research-report-meta").textContent = `${report.metadata?.status || ""} · ${report.metadata?.episode_id || ""}`;
+    $("#research-report-content").textContent = report.content || "";
+    renderResearch();
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function submitResearch(event) {
+  event.preventDefault();
+  const button = $("#research-submit");
+  const formStatus = $("#research-form-status");
+  button.disabled = true;
+  formStatus.textContent = "正在加入后台任务…";
+  try {
+    await enqueueTask(
+      "research",
+      {
+        prompt: $("#research-prompt").value.trim(),
+        llm: $("#research-llm").value,
+        search: $("#research-search").value,
+        quality: $("#research-quality").value,
+        cycles: Number($("#research-cycles").value || 2),
+        language: "zh-CN",
+      },
+      {
+        label: "研究任务已加入队列",
+        onComplete: async (task) => {
+          await loadResearch();
+          if (task.result?.report_id) await openResearchReport(task.result.report_id);
+        },
+      },
+    );
+    formStatus.textContent = "任务已加入队列，可在任务中心查看进度。";
+  } catch (error) {
+    formStatus.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function suggestProjectPath() {
   const project = state.workspace?.project || {};
   const input = $("#project-path");
@@ -243,22 +336,42 @@ function renderDocumentList(group) {
   });
 }
 
+function navSection(view) {
+  if (["story", "characters", "world", "assets"].includes(view)) return "library";
+  if (view === "agents") return "agents";
+  return view;
+}
+
+function syncNavigationState(view = state.view) {
+  const section = navSection(view);
+  $$(".nav-item").forEach((item) => {
+    const itemSection = item.dataset.navSection || item.dataset.view || "";
+    item.classList.toggle("active", itemSection === section);
+  });
+  $$('[data-library-view]').forEach((button) => {
+    const active = button.dataset.libraryView === view;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  const tabs = $("#library-tabs");
+  if (tabs) tabs.hidden = !["story", "characters", "world"].includes(view);
+}
+
 function setView(view, pushHistory = true) {
   state.view = view;
-  $$(".nav-item").forEach((item) => {
-    const agentMatches = item.dataset.agentTarget
-      ? item.dataset.agentTarget === state.agent
-      : true;
-    item.classList.toggle("active", item.dataset.view === view && agentMatches);
-  });
+  syncNavigationState(view);
+  const toolsNav = $(".nav-tools");
+  if (toolsNav && ["continuity", "research", "search", "tools"].includes(view)) toolsNav.open = true;
   const dashboard = view === "dashboard";
   const outlineView = view === "outline";
   const reviewView = view === "review";
+  const researchView = view === "research";
   const documentView = ["chapters", "story", "characters", "world"].includes(view);
   $("#dashboard-view").hidden = !dashboard;
   $("#editor-view").hidden = !documentView;
   $("#outline-view").hidden = !outlineView;
   $("#review-workspace-view").hidden = !reviewView;
+  $("#research-view").hidden = !researchView;
   $("#search-view").hidden = view !== "search";
   $("#agents-view").hidden = view !== "agents";
   $("#continuity-view").hidden = view !== "continuity";
@@ -272,6 +385,7 @@ function setView(view, pushHistory = true) {
   if (outlineView) loadOutline();
   if (view === "agents") loadAgentSurface(state.agent);
   if (view === "continuity") loadContinuity();
+  if (researchView) loadResearch();
   if (view === "assets") refreshAssets().catch((error) => showToast(error.message, true));
   if (reviewView) renderReviewWorkspace();
   updateRoutedModelIndicator();
@@ -288,17 +402,20 @@ function setView(view, pushHistory = true) {
 
 async function openDocument(path, pushHistory) {
   if (state.dirty && !window.confirm("当前文档尚未保存，仍要离开吗？")) return;
+  clearTimeout(state.autoSaveTimer);
+  state.autoSaveTimer = null;
   try {
     const doc = await api(`/api/document?path=${encodeURIComponent(path)}`);
     state.document = doc;
     state.dirty = false;
     const group = documentGroup(path);
     state.view = group;
-    $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.view === group));
+    syncNavigationState(group);
     $("#dashboard-view").hidden = true;
     $("#editor-view").hidden = false;
     $("#outline-view").hidden = true;
     $("#review-workspace-view").hidden = true;
+    $("#research-view").hidden = true;
     $("#search-view").hidden = true;
     $("#agents-view").hidden = true;
     $("#continuity-view").hidden = true;
@@ -316,7 +433,9 @@ async function openDocument(path, pushHistory) {
     syncRevisionControls();
     $("#outline-tree-back").hidden = group !== "outline";
     updateEditorCount();
+    await loadEditorTarget(path);
     setSaveState("已保存", false);
+    $("#editor-autosave-state").textContent = "自动保存已开启";
     renderDocumentList(group);
     if (pushHistory) {
       const debugQuery = productTourDebugMode() ? "?debug=onboarding" : "";
@@ -835,32 +954,286 @@ function documentGroup(path) {
 function updateEditorCount() {
   const count = countWritingUnits($("#document-editor").value);
   $("#editor-word-count").textContent = `${formatNumber(count)} 字`;
+  const target = Number(state.editorTargetWords || 0);
+  const targetLabel = $("#editor-target-count");
+  const progress = $("#editor-chapter-progress");
+  const isChapter = documentGroup(state.document?.path || "") === "chapters";
+  targetLabel.hidden = !isChapter || !target;
+  progress.hidden = !isChapter || !target;
+  if (isChapter && target) {
+    const percent = Math.min(999, Math.round((count / target) * 100));
+    targetLabel.textContent = `目标 ${formatNumber(target)}`;
+    progress.textContent = `${formatNumber(count)} / ${formatNumber(target)} 字 · ${percent}%`;
+  }
+  if (state.document) state.document.content = $("#document-editor").value;
+  renderInspectorContext();
 }
 
-async function saveDocument() {
+async function loadEditorTarget(path) {
+  state.editorTargetWords = 0;
+  updateEditorCount();
+  if (documentGroup(path) !== "chapters") return;
+  const chapterId = path.split("/").pop()?.replace(/\.md$/i, "") || "";
+  if (!chapterId) return;
+  try {
+    const outline = await api(`/api/outline?chapter=${encodeURIComponent(chapterId)}`);
+    if (state.document?.path !== path) return;
+    state.editorTargetWords = Number(outline.recommendation?.target_words || 0);
+    updateEditorCount();
+  } catch (error) {
+    if (state.document?.path === path) {
+      $("#editor-chapter-progress").hidden = true;
+    }
+  }
+}
+
+function scheduleAutoSave() {
+  clearTimeout(state.autoSaveTimer);
+  $("#editor-autosave-state").textContent = "等待自动保存";
+  state.autoSaveTimer = setTimeout(() => {
+    state.autoSaveTimer = null;
+    saveDocument({ silent: true });
+  }, 1400);
+}
+
+async function saveDocument(options = {}) {
+  const silent = Boolean(options.silent);
   if (!state.document || !state.dirty || state.saving) return;
+  clearTimeout(state.autoSaveTimer);
+  state.autoSaveTimer = null;
   state.saving = true;
+  const contentAtStart = $("#document-editor").value;
   setSaveState("保存中", true);
+  $("#editor-autosave-state").textContent = "正在保存";
   try {
     const saved = await api("/api/document", {
       method: "PUT",
       body: JSON.stringify({
         path: state.document.path,
-        content: $("#document-editor").value,
+        content: contentAtStart,
         version: state.document.version,
       }),
     });
     state.document = saved;
-    state.dirty = false;
-    setSaveState("已保存", false);
-    showToast("文档已保存");
+    const changedDuringSave = $("#document-editor").value !== contentAtStart;
+    state.dirty = changedDuringSave;
+    if (changedDuringSave) {
+      state.document.content = $("#document-editor").value;
+      setSaveState("还有新内容", true);
+      $("#editor-autosave-state").textContent = "新内容等待自动保存";
+      scheduleAutoSave();
+    } else {
+      setSaveState("已保存", false);
+      $("#editor-autosave-state").textContent = silent ? "已自动保存" : "已保存";
+    }
+    if (!silent) showToast("文档已保存");
     await loadWorkspace();
   } catch (error) {
-    setSaveState("保存失败", true);
-    showToast(error.message, true);
+    const conflict = error.status === 409;
+    setSaveState(conflict ? "版本冲突" : "保存失败", true);
+    $("#editor-autosave-state").textContent = conflict ? "版本冲突，请重新载入" : "自动保存失败";
+    if (!silent || conflict) showToast(error.message, true);
   } finally {
     state.saving = false;
     $("#save-document").disabled = !state.dirty;
+  }
+}
+
+function markEditorDirty() {
+  state.dirty = true;
+  setSaveState("未保存", true);
+  updateEditorCount();
+  syncRevisionControls();
+  scheduleAutoSave();
+}
+
+function toggleEditorFind(open = $("#editor-find-panel").hidden) {
+  const panel = $("#editor-find-panel");
+  panel.hidden = !open;
+  if (open) {
+    $("#editor-find-query").focus();
+    $("#editor-find-query").select();
+  } else {
+    $("#editor-find-status").textContent = "输入文字开始查找";
+    $("#document-editor").focus();
+  }
+}
+
+function findNextEditorMatch() {
+  const editor = $("#document-editor");
+  const query = $("#editor-find-query").value;
+  const status = $("#editor-find-status");
+  if (!query) {
+    status.textContent = "输入文字开始查找";
+    return false;
+  }
+  let index = editor.value.indexOf(query, editor.selectionEnd);
+  let wrapped = false;
+  if (index < 0) {
+    index = editor.value.indexOf(query);
+    wrapped = index >= 0;
+  }
+  if (index < 0) {
+    status.textContent = "没有匹配内容";
+    return false;
+  }
+  editor.focus();
+  editor.setSelectionRange(index, index + query.length);
+  const count = editor.value.split(query).length - 1;
+  const current = editor.value.slice(0, index).split(query).length;
+  status.textContent = `${current} / ${count}${wrapped ? " · 已回到开头" : ""}`;
+  return true;
+}
+
+function replaceEditorMatch() {
+  const editor = $("#document-editor");
+  const query = $("#editor-find-query").value;
+  if (!query) return;
+  const selected = editor.value.slice(editor.selectionStart, editor.selectionEnd);
+  if (selected !== query && !findNextEditorMatch()) return;
+  const start = editor.selectionStart;
+  const replacement = $("#editor-replace-value").value;
+  editor.setRangeText(replacement, start, editor.selectionEnd, "end");
+  markEditorDirty();
+  $("#editor-find-status").textContent = "已替换当前匹配";
+  findNextEditorMatch();
+}
+
+function replaceAllEditorMatches() {
+  const editor = $("#document-editor");
+  const query = $("#editor-find-query").value;
+  if (!query) return;
+  const count = editor.value.split(query).length - 1;
+  if (!count) {
+    $("#editor-find-status").textContent = "没有匹配内容";
+    return;
+  }
+  editor.value = editor.value.split(query).join($("#editor-replace-value").value);
+  markEditorDirty();
+  $("#editor-find-status").textContent = `已替换 ${count} 处`;
+}
+
+function toggleEditorReadingMode() {
+  state.editorReadingMode = !state.editorReadingMode;
+  $("#editor-view").classList.toggle("reading-width", state.editorReadingMode);
+  $("#editor-reading-toggle").setAttribute("aria-pressed", String(state.editorReadingMode));
+}
+
+function toggleEditorFocusMode(force) {
+  state.editorFocusMode = typeof force === "boolean" ? force : !state.editorFocusMode;
+  $("#app").classList.toggle("editor-focus", state.editorFocusMode);
+  $("#editor-focus-toggle").setAttribute("aria-pressed", String(state.editorFocusMode));
+  if (state.editorFocusMode) toggleInspector(false);
+  $("#document-editor").focus();
+}
+
+const safeChatTags = new Set([
+  "a", "blockquote", "br", "code", "em", "h1", "h2", "h3", "h4", "hr",
+  "li", "ol", "p", "pre", "strong", "ul",
+]);
+
+function appendSafeChatMarkup(root, renderedHtml, fallbackText) {
+  if (!renderedHtml) {
+    root.textContent = fallbackText;
+    return;
+  }
+  const parsed = new DOMParser().parseFromString(renderedHtml, "text/html");
+  const appendNode = (source, target) => {
+    if (source.nodeType === 3) {
+      target.append(document.createTextNode(source.textContent || ""));
+      return;
+    }
+    if (source.nodeType !== 1) return;
+    const tag = source.tagName.toLowerCase();
+    let destination = safeChatTags.has(tag)
+      ? document.createElement(tag)
+      : document.createDocumentFragment();
+    if (tag === "a") {
+      const href = source.getAttribute("href") || "";
+      try {
+        const url = new URL(href, location.href);
+        if (!["http:", "https:"].includes(url.protocol)) {
+          destination = document.createElement("span");
+        } else {
+          destination.href = url.href;
+          destination.target = "_blank";
+          destination.rel = "noopener noreferrer";
+        }
+      } catch (error) {
+        destination = document.createElement("span");
+      }
+    }
+    source.childNodes.forEach((child) => appendNode(child, destination));
+    target.append(destination);
+  };
+  parsed.body.childNodes.forEach((child) => appendNode(child, root));
+  if (!root.hasChildNodes()) root.textContent = fallbackText;
+}
+
+function appendInspectorAssistantMessage(author, content, renderedHtml = "", error = false) {
+  const item = document.createElement("article");
+  if (error) item.classList.add("error");
+  const name = document.createElement("strong");
+  name.textContent = author;
+  const body = document.createElement(renderedHtml ? "div" : "p");
+  if (renderedHtml) {
+    body.className = "chat-markdown";
+    appendSafeChatMarkup(body, renderedHtml, content);
+  } else {
+    body.textContent = content;
+  }
+  item.append(name, body);
+  $("#inspector-assistant-log").append(item);
+  item.scrollIntoView({ block: "end", behavior: "smooth" });
+}
+
+function buildInspectorAssistantMessage(prompt) {
+  const editor = $("#document-editor");
+  const selection = editor.value.slice(editor.selectionStart, editor.selectionEnd).trim().slice(0, 5000);
+  const cursor = editor.selectionEnd;
+  const excerpt = editor.value.slice(Math.max(0, cursor - 1800), cursor + 1800).trim();
+  const context = [
+    `当前文档：${state.document?.title || "未命名"}`,
+    selection ? `当前选区：\n${selection}` : `光标附近文本：\n${excerpt || "（空）"}`,
+  ].join("\n\n");
+  return `${prompt}\n\n【Studio 当前上下文】\n${context}\n\n请只提供分析或建议；如需改写，先给出可审阅提案，不要直接写入正典文件。`;
+}
+
+async function submitInspectorAssistant(event) {
+  event?.preventDefault();
+  if (state.assistantSubmitting) return;
+  const input = $("#inspector-assistant-input");
+  const prompt = input.value.trim();
+  if (!prompt) return;
+  state.assistantSubmitting = true;
+  state.agent = "dante";
+  syncNavigationState(state.view);
+  appendInspectorAssistantMessage("你", prompt);
+  input.value = "";
+  $("#inspector-assistant-submit").disabled = true;
+  $("#inspector-assistant-status").textContent = "Dante 正在读取当前写作上下文…";
+  toggleInspector(true);
+  const sessionId = activeAgentSessionId("dante");
+  const message = buildInspectorAssistantMessage(prompt);
+  const runId = startAgentActivity("dante", prompt);
+  try {
+    const payload = await api("/api/chat", {
+      method: "POST",
+      body: JSON.stringify({ agent: "dante", session_id: sessionId, run_id: runId, message }),
+    });
+    state.agentSessionId.dante = payload.session_id || sessionId;
+    appendInspectorAssistantMessage("Dante", payload.content || "本轮已完成。", payload.content_html || "");
+    state.workspace = payload.workspace;
+    renderWorkspace();
+    finishAgentActivity("complete");
+  } catch (error) {
+    appendInspectorAssistantMessage("系统", error.message, "", true);
+    finishAgentActivity("error", error.message);
+  } finally {
+    state.assistantSubmitting = false;
+    $("#inspector-assistant-submit").disabled = false;
+    $("#inspector-assistant-status").textContent = "";
+    input.focus();
   }
 }
 
@@ -1331,12 +1704,14 @@ async function searchProject(event) {
   const query = $("#search-query").value.trim();
   const scope = $("#search-scope").value;
   if (!query) return;
-  $("#search-status").textContent = "正在更新本地索引并搜索…";
+  $("#search-status").textContent = "正在更新 LightRAG 索引并搜索…";
   const root = $("#search-results");
   root.replaceChildren();
   try {
     const payload = await api(`/api/search?q=${encodeURIComponent(query)}&scope=${encodeURIComponent(scope)}`);
-    $("#search-status").textContent = `已索引 ${payload.indexed} 份文档，找到 ${payload.results.length} 条结果`;
+    const engine = payload.engine === "lightrag" ? "LightRAG" : "精确文本降级";
+    const warning = payload.warning ? ` · ${payload.warning}` : "";
+    $("#search-status").textContent = `${engine} 已索引 ${payload.indexed} 份文档，找到 ${payload.results.length} 条结果${warning}`;
     payload.results.forEach((result) => {
       const button = document.createElement("button");
       button.type = "button";
@@ -1361,6 +1736,7 @@ async function searchProject(event) {
 function renderOperations() {
   const operations = state.workspace?.operations || {};
   const diagnostics = operations.diagnostics || [];
+  const runtimeFindings = operations.runtime_diagnostics?.findings || [];
   const diagnosticRoot = $("#diagnostic-list");
   diagnosticRoot.replaceChildren();
   diagnostics.forEach((item) => {
@@ -1373,17 +1749,242 @@ function renderOperations() {
     row.append(name, detail);
     diagnosticRoot.append(row);
   });
+  runtimeFindings.forEach((finding) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `operation-row diagnostic-${finding.severity}`;
+    const name = document.createElement("strong");
+    name.textContent = finding.summary;
+    const detail = document.createElement("span");
+    detail.textContent = finding.explanation;
+    row.append(name, detail);
+    diagnosticRoot.append(row);
+  });
   const sync = operations.sync || {};
   $("#sync-status").textContent = sync.needs_sync
     ? `待同步：大纲 ${sync.outline_pending ? "有变更" : "已同步"}，角色卡 ${sync.cards || 0}/${sync.profiles || 0}`
     : "src 与 data 已同步";
   renderSourcePacks(operations.source_packs || []);
+  renderRuntimeSkillStatus(operations);
+  renderChapterRuns(operations.chapter_runs_v2 || {});
+  renderRollingPlans(operations.rolling_plans || {});
+}
+
+let rollingPlanItems = [];
+let selectedRollingPlan = null;
+
+function renderRollingPlans(payload) {
+  rollingPlanItems = payload.candidates || [];
+  const select = $("#rolling-plan-select");
+  const previous = selectedRollingPlan?.candidate_id || select.value;
+  select.replaceChildren();
+  rollingPlanItems.forEach((candidate) => {
+    const option = document.createElement("option");
+    option.value = candidate.candidate_id;
+    option.textContent = `${candidate.current_arc} · ${candidate.state} · ${candidate.next_window.length} 章`;
+    select.append(option);
+  });
+  selectedRollingPlan = rollingPlanItems.find((item) => item.candidate_id === previous) || rollingPlanItems[0] || null;
+  if (selectedRollingPlan) select.value = selectedRollingPlan.candidate_id;
+  $("#rolling-plan-count").textContent = String(rollingPlanItems.length);
+  renderSelectedRollingPlan();
+}
+
+function renderSelectedRollingPlan() {
+  $("#rolling-plan-report").textContent = selectedRollingPlan?.goethe_brief || "生成候选后可交给 Goethe 形成待确认大纲草案";
+  $("#rolling-plan-goethe").disabled = !selectedRollingPlan;
+}
+
+async function createRollingPlan() {
+  try {
+    const candidate = await api("/api/rolling-plans", {method: "POST", body: JSON.stringify({action: "create", window_size: Number($("#rolling-plan-window").value || 5)})});
+    selectedRollingPlan = candidate;
+    rollingPlanItems.unshift(candidate);
+    renderRollingPlans({candidates: rollingPlanItems});
+    $("#rolling-plan-status").textContent = "候选已生成，canonical 大纲未修改";
+  } catch (error) { $("#rolling-plan-status").textContent = error.message; }
+}
+
+function sendRollingPlanToGoethe() {
+  if (!selectedRollingPlan) return;
+  chooseAgent("goethe");
+  setView("agents");
+  $("#chat-input").value = `请根据滚动规划候选 ${selectedRollingPlan.candidate_id} 形成完整 Markdown 大纲提案。先调用 manage_rolling_plan get 读取候选，完成后调用 manage_rolling_plan stage 暂存提案，不要直接确认覆盖大纲。`;
+  $("#chat-input").focus();
+}
+
+let selectedChapterRun = null;
+let chapterRunItems = [];
+
+function renderChapterRuns(payload) {
+  const runs = payload.runs || [];
+  chapterRunItems = runs;
+  const select = $("#chapter-run-select");
+  const previous = selectedChapterRun?.run_id || select.value;
+  select.replaceChildren();
+  runs.forEach((run) => {
+    const option = document.createElement("option");
+    option.value = run.run_id;
+    option.textContent = `${run.chapter_id} · ${run.status} · ${run.next_stage || "完成"}`;
+    select.append(option);
+  });
+  $("#chapter-run-count").textContent = String(runs.length);
+  selectedChapterRun = runs.find((run) => run.run_id === previous) || runs[0] || null;
+  if (selectedChapterRun) select.value = selectedChapterRun.run_id;
+  renderSelectedChapterRun();
+}
+
+function renderSelectedChapterRun() {
+  const run = selectedChapterRun;
+  const report = $("#chapter-run-report");
+  const interventionSelect = $("#chapter-intervention-select");
+  interventionSelect.replaceChildren();
+  if (!run) {
+    report.textContent = "写作或审稿后可在这里查看八阶段状态";
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "暂无干预";
+    interventionSelect.append(option);
+    return;
+  }
+  const stages = Object.entries(run.stages || {}).map(([name, stage]) => {
+    const detail = stage.error_code ? ` · ${stage.error_code}` : "";
+    return `${name.padEnd(12)} ${stage.status}${detail}`;
+  });
+  report.textContent = `${run.chapter_id} · ${run.status}\n下一阶段: ${run.next_stage || "已完成"}\n\n${stages.join("\n")}`;
+  (run.interventions || []).forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.intervention_id;
+    option.textContent = `${item.state} · ${item.request.slice(0, 36)}`;
+    interventionSelect.append(option);
+  });
+  if (!(run.interventions || []).length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "暂无干预";
+    interventionSelect.append(option);
+  }
+}
+
+async function refreshChapterRuns() {
+  try {
+    const payload = await api("/api/chapter-runs-v2", {method: "POST", body: JSON.stringify({action: "list", limit: 10})});
+    renderChapterRuns(payload);
+    $("#chapter-run-status").textContent = "运行状态已刷新";
+  } catch (error) { $("#chapter-run-status").textContent = error.message; }
+}
+
+async function recordChapterIntervention(event) {
+  event.preventDefault();
+  if (!selectedChapterRun) return;
+  const request = $("#chapter-intervention-request").value.trim();
+  if (!request) return;
+  try {
+    const payload = await api("/api/chapter-runs-v2", {method: "POST", body: JSON.stringify({
+      action: "record_intervention", run_id: selectedChapterRun.run_id,
+      revision: selectedChapterRun.revision, request,
+      scope: $("#chapter-intervention-scope").value,
+      risk: $("#chapter-run-risk").value,
+      rewrite_required: $("#chapter-intervention-rewrite").checked,
+    })});
+    selectedChapterRun = payload.run;
+    $("#chapter-intervention-request").value = "";
+    renderSelectedChapterRun();
+    $("#chapter-run-status").textContent = "干预已记录，尚未应用";
+  } catch (error) { $("#chapter-run-status").textContent = error.message; }
+}
+
+async function advanceChapterIntervention() {
+  if (!selectedChapterRun) return;
+  const interventionId = $("#chapter-intervention-select").value;
+  if (!interventionId) return;
+  const stateName = $("#chapter-intervention-state").value;
+  const proposal = $("#chapter-intervention-proposal").value.trim();
+  try {
+    const payload = await api("/api/chapter-runs-v2", {method: "POST", body: JSON.stringify({
+      action: "update_intervention", run_id: selectedChapterRun.run_id,
+      revision: selectedChapterRun.revision, intervention_id: interventionId,
+      state: stateName, proposal, confirm: ["confirmed", "applied"].includes(stateName),
+    })});
+    selectedChapterRun = payload.run;
+    renderSelectedChapterRun();
+    $("#chapter-run-status").textContent = `干预已推进到 ${payload.intervention.state}`;
+  } catch (error) { $("#chapter-run-status").textContent = error.message; }
+}
+
+function renderRuntimeSkillStatus(operations) {
+  const runtime = operations.runtime_skills || {};
+  const ruleStatus = operations.runtime_rules || {};
+  const skills = runtime.skills || [];
+  const active = ruleStatus.active === false ? "未启用" : (ruleStatus.revision ? `已启用 · ${ruleStatus.revision}` : "未启用");
+  $("#runtime-skill-status").textContent = `可用 Skill ${skills.length} · 规则 ${active}`;
+  if (!state.runtimeSkill.resolution) {
+    $("#runtime-skill-report").textContent = skills.map((skill) => `${skill.id}@${skill.version} · ${skill.layer}`).join("\n") || "没有可用 Skill";
+  }
+}
+
+async function resolveRuntimeSkills() {
+  $("#runtime-skill-status").textContent = "正在解析 Runtime Skill…";
+  try {
+    const payload = await api("/api/runtime-skills", {method: "POST", body: JSON.stringify({action: "resolve", agent: $("#runtime-skill-agent").value})});
+    state.runtimeSkill.resolution = payload;
+    $("#runtime-skill-report").textContent = JSON.stringify(payload, null, 2);
+    $("#runtime-skill-status").textContent = `解析完成 · ${payload.resolution_id}`;
+  } catch (error) { $("#runtime-skill-status").textContent = error.message; }
+}
+
+async function diagnoseRuntimeSkills() {
+  $("#runtime-skill-status").textContent = "正在检查 Runtime Skill…";
+  try {
+    const payload = await api("/api/runtime-skills", {method: "POST", body: JSON.stringify({action: "diagnose"})});
+    $("#runtime-skill-report").textContent = JSON.stringify(payload, null, 2);
+    $("#runtime-skill-status").textContent = payload.diagnostics?.length ? "发现需要处理的诊断" : "Skill 检查通过";
+  } catch (error) { $("#runtime-skill-status").textContent = error.message; }
+}
+
+async function previewRuntimeRules() {
+  $("#runtime-skill-status").textContent = "正在生成规则预览…";
+  try {
+    const payload = await api("/api/rules", {method: "POST", body: JSON.stringify({action: "preview"})});
+    state.runtimeSkill.rulePreview = payload;
+    $("#runtime-rules-apply").disabled = false;
+    $("#runtime-skill-report").textContent = payload.unified_diff || "规则没有变化";
+    $("#runtime-skill-status").textContent = `规则预览已生成 · ${payload.preview_id}`;
+  } catch (error) { $("#runtime-skill-status").textContent = error.message; }
+}
+
+async function applyRuntimeRules() {
+  const preview = state.runtimeSkill.rulePreview;
+  if (!preview) return;
+  $("#runtime-rules-apply").disabled = true;
+  try {
+    const payload = await api("/api/rules", {method: "POST", body: JSON.stringify({action: "apply", preview_id: preview.preview_id, confirm: true})});
+    state.runtimeSkill.rulePreview = null;
+    $("#runtime-skill-report").textContent = `已启用规则 revision: ${payload.revision}`;
+    $("#runtime-skill-status").textContent = "规则已确认应用";
+    await loadWorkspace();
+  } catch (error) { $("#runtime-rules-apply").disabled = false; $("#runtime-skill-status").textContent = error.message; }
 }
 
 function renderSourcePacks(packs) {
   const root = $("#source-list");
   root.replaceChildren();
   $("#source-count").textContent = String(packs.length);
+  const currentSources = new Map(packs.map((pack) => [pack.source_id, pack]));
+  Array.from(state.sourceAnalysis.selectedSourceIds).forEach((sourceId) => {
+    if (!currentSources.has(sourceId)) state.sourceAnalysis.selectedSourceIds.delete(sourceId);
+  });
+  if (state.sourceAnalysis.profile) {
+    const stale = state.sourceAnalysis.profile.source_ids.some((sourceId) => {
+      const current = currentSources.get(sourceId)?.analysis_v2;
+      return current?.status !== "completed"
+        || current?.source_sha256 !== state.sourceAnalysis.profile.source_revisions[sourceId];
+    });
+    if (stale) {
+      state.sourceAnalysis.profile = null;
+      state.sourceAnalysis.promotionPreview = null;
+    }
+  }
   if (!packs.length) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
@@ -1395,15 +1996,34 @@ function renderSourcePacks(packs) {
     const row = document.createElement("article");
     row.className = "source-row";
     const copy = document.createElement("div");
+    copy.className = "source-row-select";
+    const selection = document.createElement("input");
+    selection.type = "checkbox";
+    selection.setAttribute("aria-label", `选择来源 ${pack.source_id}`);
+    selection.checked = state.sourceAnalysis.selectedSourceIds.has(pack.source_id);
+    selection.disabled = pack.analysis_v2?.status !== "completed";
+    selection.addEventListener("change", () => {
+      if (selection.checked) state.sourceAnalysis.selectedSourceIds.add(pack.source_id);
+      else state.sourceAnalysis.selectedSourceIds.delete(pack.source_id);
+      syncSourceAnalysisControls();
+    });
+    const sourceCopy = document.createElement("div");
     const title = document.createElement("strong");
     title.textContent = pack.source_id;
     const meta = document.createElement("span");
-    meta.textContent = [pack.style_ready ? "风格" : "", pack.setting_ready ? "设定" : ""]
-      .filter(Boolean).join(" + ") || "提取中";
-    copy.append(title, meta);
+    const analysis = pack.analysis_v2 || {};
+    meta.textContent = analysis.status
+      ? `${analysis.status} · ${analysis.completed_chunks || 0}/${analysis.total_chunks || 0} 块${analysis.failed_chunks ? ` · ${analysis.failed_chunks} 失败` : ""}`
+      : [pack.style_ready ? "V1 风格" : "", pack.setting_ready ? "V1 设定" : ""]
+        .filter(Boolean).join(" + ") || "待分析";
+    sourceCopy.append(title, meta);
+    copy.append(selection, sourceCopy);
     const actions = document.createElement("div");
     actions.className = "row-actions";
-    [["审阅", "review"], ["全部晋升", "promote"], ["合成风格", "synthesize"]].forEach(([label, action]) => {
+    const actionSpecs = analysis.status
+      ? [["查看证据", "status_v2"]]
+      : [["V1 审阅", "review"]];
+    actionSpecs.forEach(([label, action]) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "text-button";
@@ -1413,6 +2033,55 @@ function renderSourcePacks(packs) {
     });
     row.append(copy, actions);
     root.append(row);
+  });
+  syncSourceAnalysisControls();
+}
+
+function syncSourceAnalysisControls() {
+  $("#source-synthesize").disabled = state.sourceAnalysis.selectedSourceIds.size < 1;
+  $("#source-promotion-preview").disabled = !state.sourceAnalysis.profile;
+  $("#source-promotion-apply").disabled = !state.sourceAnalysis.promotionPreview;
+}
+
+function sourceFocusValues(mode) {
+  if (mode === "narrative") return ["structure", "hook", "pacing", "voice", "reader_drive", "method"];
+  if (mode === "setting") return ["promise", "character", "conflict", "risk", "method"];
+  return ["promise", "structure", "character", "conflict", "hook", "pacing", "voice", "reader_drive", "method", "risk"];
+}
+
+function renderSourceAnalysis(result) {
+  const report = result?.report || result?.analysis?.report || null;
+  const manifest = result?.manifest || result?.analysis?.manifest || null;
+  const root = $("#source-report-actions");
+  root.replaceChildren();
+  if (!report) {
+    $("#source-report").textContent = JSON.stringify(result || {}, null, 2);
+    return;
+  }
+  const lines = [
+    `状态：${report.status}`,
+    `来源：${report.source_id}`,
+    `摘要：${report.summary || "（无）"}`,
+    "",
+    "证据化结论：",
+  ];
+  (report.findings || []).forEach((finding) => {
+    lines.push(`- [${finding.category}] ${finding.claim}`);
+    (finding.evidence || []).forEach((evidence) => {
+      lines.push(`  L${evidence.line_start}-${evidence.line_end} · ${evidence.quote}`);
+    });
+  });
+  if (report.failed_chunks?.length) {
+    lines.push("", `失败分块：${report.failed_chunks.join(", ")}`);
+  }
+  $("#source-report").textContent = lines.join("\n");
+  (manifest?.chunks || []).filter((chunk) => chunk.status === "failed").forEach((chunk) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet-button";
+    button.textContent = `重试 ${chunk.index + 1}`;
+    button.addEventListener("click", () => retrySourceChunk(manifest.source_id, chunk.chunk_id));
+    root.append(button);
   });
 }
 
@@ -1567,7 +2236,7 @@ function appendChatMessage(role, author, content, renderedHtml = "") {
   const body = document.createElement(renderedHtml ? "div" : "p");
   if (renderedHtml) {
     body.className = "chat-markdown";
-    body.innerHTML = renderedHtml;
+    appendSafeChatMarkup(body, renderedHtml, content);
   } else {
     body.textContent = content;
   }
@@ -1707,9 +2376,7 @@ function formatDuration(seconds) {
 function chooseAgent(agent) {
   state.agent = agent;
   $$('[data-agent]').forEach((button) => button.classList.toggle("active", button.dataset.agent === agent));
-  $$('.nav-item[data-agent-target]').forEach((button) => {
-    button.classList.toggle("active", state.view === "agents" && button.dataset.agentTarget === agent);
-  });
+  syncNavigationState(state.view);
   $("#chat-submit").textContent = `发送给 ${agent === "goethe" ? "Goethe" : "Dante"}`;
   $("#chat-input").placeholder = agent === "goethe"
     ? "例如：我想写一本……先帮我收敛题材、冲突和主角。"
@@ -2459,20 +3126,28 @@ async function extractSource(event) {
   const file = $("#source-file").files[0];
   const text = file ? await file.text() : $("#source-content").value;
   $("#source-extract").disabled = true;
-  $("#source-status").textContent = "正在分块、提取并合并来源信号…";
+  $("#source-status").textContent = "正在创建证据分块…";
   try {
     await enqueueTask(
       "source_operation",
-      { action: "extract", source_id: $("#source-id").value.trim(), focus: $("#source-focus").value, content: text },
       {
-        label: "来源提取任务已加入队列",
+        action: "analyze_v2",
+        source_id: $("#source-id").value.trim(),
+        relative_name: file?.name || "pasted-source.txt",
+        focus: sourceFocusValues($("#source-focus").value),
+        input_budget_tokens: Number($("#source-input-budget").value || 12000),
+        content: text,
+      },
+      {
+        label: "参考分析任务已加入队列",
         onComplete: async () => {
           await loadWorkspace();
-          $("#source-status").textContent = "来源包提取完成，可以审阅或晋升";
+          await runSourceAction("status_v2", $("#source-id").value.trim());
+          $("#source-status").textContent = "参考分析已完成";
         },
       },
     );
-    $("#source-status").textContent = "来源提取正在后台执行";
+    $("#source-status").textContent = "参考分析正在后台执行";
   } catch (error) {
     $("#source-status").textContent = error.message;
     showToast(error.message, true);
@@ -2484,32 +3159,109 @@ async function extractSource(event) {
 async function runSourceAction(action, sourceId) {
   $("#source-status").textContent = "正在执行来源操作…";
   try {
-    if (action === "synthesize") {
-      await enqueueTask(
-        "source_operation",
-        { action, source_id: sourceId, target: "all" },
-        {
-          label: "风格合成任务已加入队列",
-          onComplete: async () => {
-            await loadWorkspace();
-            $("#source-status").textContent = "合成风格已刷新";
-          },
-        },
-      );
-      $("#source-status").textContent = "风格合成正在后台执行";
-      return;
-    }
     const payload = await api("/api/source", {
       method: "POST",
       body: JSON.stringify({ action, source_id: sourceId, target: "all" }),
     });
     state.workspace = payload.workspace;
     renderWorkspace();
-    if (action === "review") $("#source-report").textContent = payload.result.review_report || "无报告";
-    $("#source-status").textContent = action === "promote" ? "已晋升到当前作品" : action === "synthesize" ? "合成风格已刷新" : "来源报告已生成";
+    if (action === "review") {
+      $("#source-report").textContent = payload.result.review_report || "无报告";
+    } else if (action === "status_v2") {
+      renderSourceAnalysis(payload.result);
+    }
+    $("#source-status").textContent = "来源报告已加载";
   } catch (error) {
     $("#source-status").textContent = error.message;
     showToast(error.message, true);
+  }
+}
+
+async function retrySourceChunk(sourceId, chunkId) {
+  $("#source-status").textContent = "正在重试失败分块…";
+  try {
+    await enqueueTask(
+      "source_operation",
+      { action: "retry_v2", source_id: sourceId, chunk_id: chunkId },
+      {
+        label: "分块重试已加入队列",
+        onComplete: async () => {
+          await loadWorkspace();
+          await runSourceAction("status_v2", sourceId);
+        },
+      },
+    );
+  } catch (error) {
+    $("#source-status").textContent = error.message;
+    showToast(error.message, true);
+  }
+}
+
+async function synthesizeSelectedSources() {
+  const sourceIds = Array.from(state.sourceAnalysis.selectedSourceIds);
+  if (!sourceIds.length) return;
+  $("#source-status").textContent = "正在综合所选来源…";
+  try {
+    const payload = await api("/api/source", {
+      method: "POST",
+      body: JSON.stringify({ action: "synthesize_v2", source_ids: sourceIds }),
+    });
+    state.sourceAnalysis.profile = payload.result;
+    state.sourceAnalysis.promotionPreview = null;
+    $("#source-report-actions").replaceChildren();
+    $("#source-report").textContent = JSON.stringify(payload.result, null, 2);
+    $("#source-status").textContent = "多来源画像已生成";
+    syncSourceAnalysisControls();
+  } catch (error) {
+    $("#source-status").textContent = error.message;
+    showToast(error.message, true);
+  }
+}
+
+async function previewSourcePromotion() {
+  const profile = state.sourceAnalysis.profile;
+  if (!profile) return;
+  try {
+    const payload = await api("/api/source", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "promotion_preview_v2",
+        profile_id: profile.profile_id,
+        target: $("#source-promotion-target").value,
+      }),
+    });
+    state.sourceAnalysis.promotionPreview = payload.result;
+    $("#source-report-actions").replaceChildren();
+    $("#source-report").textContent = payload.result.unified_diff || "目标内容无变化";
+    $("#source-status").textContent = "晋升 diff 已生成";
+    syncSourceAnalysisControls();
+  } catch (error) {
+    $("#source-status").textContent = error.message;
+    showToast(error.message, true);
+  }
+}
+
+async function applySourcePromotion() {
+  const preview = state.sourceAnalysis.promotionPreview;
+  if (!preview) return;
+  $("#source-promotion-apply").disabled = true;
+  try {
+    const payload = await api("/api/source", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "promote_v2",
+        preview_id: preview.preview_id,
+        confirm: true,
+      }),
+    });
+    state.sourceAnalysis.promotionPreview = null;
+    $("#source-report").textContent = `已应用到 ${payload.result.target_ref}`;
+    $("#source-status").textContent = "晋升候选已确认应用";
+    syncSourceAnalysisControls();
+  } catch (error) {
+    $("#source-status").textContent = error.message;
+    showToast(error.message, true);
+    syncSourceAnalysisControls();
   }
 }
 
@@ -2765,6 +3517,11 @@ async function openStudioTaskResult(task) {
     if (match) await openDocument(match.path, true);
     return;
   }
+  if (task.type === "research" && task.result?.report_id) {
+    setView("research");
+    await openResearchReport(task.result.report_id);
+    return;
+  }
   await loadWorkspace();
   showToast(task.result?.stop_reason || "任务结果已载入");
 }
@@ -2855,10 +3612,21 @@ function renderInspectorContext() {
   });
 }
 
-function toggleInspector(open) {
+function toggleInspector(open, restoreFocus = true) {
   const inspector = $("#inspector");
+  const overlay = window.matchMedia("(max-width: 900px)").matches;
+  const wasOpen = inspector.classList.contains("open");
+  if (open && window.matchMedia("(max-width: 700px)").matches) {
+    toggleMobileNavigation(false, false);
+  }
   inspector.classList.toggle("open", open);
   $("#inspector-toggle").setAttribute("aria-expanded", String(open));
+  $("#inspector-backdrop").hidden = !(open && overlay);
+  if (open && overlay) {
+    requestAnimationFrame(() => $("#inspector-close").focus());
+  } else if (wasOpen && restoreFocus && inspector.contains(document.activeElement)) {
+    $("#inspector-toggle").focus();
+  }
 }
 
 function toggleInspectorCollapsed(collapsed) {
@@ -2875,11 +3643,19 @@ function applyTheme(theme) {
   localStorage.setItem("openwrite-theme", theme);
 }
 
-function toggleMobileNavigation(open) {
+function toggleMobileNavigation(open, restoreFocus = true) {
   const active = Boolean(open && window.matchMedia("(max-width: 700px)").matches);
+  const sidebar = $("#studio-sidebar");
+  const wasOpen = $("#app").classList.contains("mobile-nav-open");
+  if (active) toggleInspector(false, false);
   $("#app").classList.toggle("mobile-nav-open", active);
   $("#mobile-nav-toggle").setAttribute("aria-expanded", String(active));
   $("#mobile-nav-backdrop").hidden = !active;
+  if (active) {
+    requestAnimationFrame(() => sidebar.querySelector(".nav-item")?.focus());
+  } else if (wasOpen && restoreFocus && sidebar.contains(document.activeElement)) {
+    $("#mobile-nav-toggle").focus();
+  }
 }
 
 function bindEvents() {
@@ -2902,15 +3678,35 @@ function bindEvents() {
   $$('[data-switch-view]').forEach((button) => {
     button.addEventListener("click", () => setView(button.dataset.switchView));
   });
+  $$('[data-library-view]').forEach((button) => {
+    button.addEventListener("click", () => setView(button.dataset.libraryView));
+  });
   $("#document-editor").addEventListener("input", () => {
-    state.dirty = true;
-    setSaveState("未保存", true);
-    updateEditorCount();
-    syncRevisionControls();
+    markEditorDirty();
   });
   $("#document-editor").addEventListener("select", syncRevisionControls);
   $("#document-editor").addEventListener("keyup", syncRevisionControls);
-  $("#save-document").addEventListener("click", saveDocument);
+  $("#save-document").addEventListener("click", () => saveDocument());
+  $("#editor-find-toggle").addEventListener("click", () => toggleEditorFind());
+  $("#editor-find-close").addEventListener("click", () => toggleEditorFind(false));
+  $("#editor-find-panel").addEventListener("submit", (event) => {
+    event.preventDefault();
+    findNextEditorMatch();
+  });
+  $("#editor-find-next").addEventListener("click", findNextEditorMatch);
+  $("#editor-replace-one").addEventListener("click", replaceEditorMatch);
+  $("#editor-replace-all").addEventListener("click", replaceAllEditorMatches);
+  $("#editor-find-query").addEventListener("input", () => {
+    $("#editor-find-status").textContent = "按下回车查找下一处";
+  });
+  $("#editor-reading-toggle").addEventListener("click", toggleEditorReadingMode);
+  $("#editor-focus-toggle").addEventListener("click", () => toggleEditorFocusMode());
+  $("#editor-assistant-toggle").addEventListener("click", () => {
+    toggleInspectorCollapsed(false);
+    toggleInspector(true);
+    switchInspectorTab("assistant");
+    $("#inspector-assistant-input").focus();
+  });
   $("#review-document").addEventListener("click", runReview);
   $("#reload-document").addEventListener("click", () => {
     if (state.document) openDocument(state.document.path, false);
@@ -2959,6 +3755,8 @@ function bindEvents() {
     renderReviewWorkspaceIssues(chapter);
   });
   $("#review-fixable-filter").addEventListener("change", renderReviewWorkspace);
+  $("#research-form").addEventListener("submit", submitResearch);
+  $("#research-refresh").addEventListener("click", loadResearch);
   $("#sync-project").addEventListener("click", runSync);
   $("#context-form").addEventListener("submit", inspectContext);
   $("#import-form").addEventListener("submit", importText);
@@ -2982,12 +3780,33 @@ function bindEvents() {
   $("#relationship-graph").addEventListener("wheel", zoomRelationshipGraph, { passive: false });
   $("#foreshadow-form").addEventListener("submit", createForeshadowing);
   $("#source-form").addEventListener("submit", extractSource);
+  $("#source-synthesize").addEventListener("click", synthesizeSelectedSources);
+  $("#source-promotion-preview").addEventListener("click", previewSourcePromotion);
+  $("#source-promotion-apply").addEventListener("click", applySourcePromotion);
+  $("#runtime-skill-resolve").addEventListener("click", resolveRuntimeSkills);
+  $("#runtime-skill-diagnose").addEventListener("click", diagnoseRuntimeSkills);
+  $("#runtime-rules-preview").addEventListener("click", previewRuntimeRules);
+  $("#runtime-rules-apply").addEventListener("click", applyRuntimeRules);
+  $("#chapter-run-select").addEventListener("change", (event) => {
+    selectedChapterRun = chapterRunItems.find((run) => run.run_id === event.target.value) || null;
+    renderSelectedChapterRun();
+  });
+  $("#chapter-intervention-form").addEventListener("submit", recordChapterIntervention);
+  $("#chapter-intervention-advance").addEventListener("click", advanceChapterIntervention);
+  $("#chapter-run-refresh").addEventListener("click", refreshChapterRuns);
+  $("#rolling-plan-select").addEventListener("change", (event) => {
+    selectedRollingPlan = rollingPlanItems.find((item) => item.candidate_id === event.target.value) || null;
+    renderSelectedRollingPlan();
+  });
+  $("#rolling-plan-create").addEventListener("click", createRollingPlan);
+  $("#rolling-plan-goethe").addEventListener("click", sendRollingPlanToGoethe);
   $("#source-file").addEventListener("change", async (event) => {
     const file = event.target.files[0];
     if (file) $("#source-content").value = await file.text();
   });
   $("#inspector-toggle").addEventListener("click", () => toggleInspector(true));
   $("#inspector-close").addEventListener("click", () => toggleInspector(false));
+  $("#inspector-backdrop").addEventListener("click", () => toggleInspector(false));
   $("#inspector-collapse").addEventListener("click", () => toggleInspectorCollapsed(true));
   $("#inspector-restore").addEventListener("click", () => toggleInspectorCollapsed(false));
   $$('[data-inspector-tab]').forEach((button) => {
@@ -3003,6 +3822,13 @@ function bindEvents() {
       return;
     }
     $("#revision-history").click();
+  });
+  $("#inspector-assistant-form").addEventListener("submit", submitInspectorAssistant);
+  $$('[data-assistant-prompt]').forEach((button) => {
+    button.addEventListener("click", () => {
+      $("#inspector-assistant-input").value = button.dataset.assistantPrompt;
+      submitInspectorAssistant();
+    });
   });
   $("#mobile-nav-toggle").addEventListener("click", () => {
     toggleMobileNavigation(!$("#app").classList.contains("mobile-nav-open"));
@@ -3021,7 +3847,19 @@ function bindEvents() {
       setView("search");
       $("#search-query").focus();
     }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f" && state.document) {
+      event.preventDefault();
+      toggleEditorFind(true);
+    }
     if (event.key === "Escape") {
+      if (state.editorFocusMode) {
+        toggleEditorFocusMode(false);
+        return;
+      }
+      if (!$("#editor-find-panel").hidden) {
+        toggleEditorFind(false);
+        return;
+      }
       if (state.productTour.active) finishProductTour();
       toggleInspector(false);
       toggleMobileNavigation(false);
@@ -3048,7 +3886,7 @@ async function routeFromLocation() {
   const hash = decodeURIComponent(location.hash.slice(1));
   if (hash.startsWith("doc=")) {
     await openDocument(hash.slice(4), false);
-  } else if (["search", "outline", "chapters", "review", "story", "characters", "world", "assets", "agents", "continuity", "tools"].includes(hash)) {
+  } else if (["search", "outline", "chapters", "review", "story", "characters", "world", "assets", "agents", "continuity", "tools", "research"].includes(hash)) {
     setView(hash, false);
   } else {
     setView("dashboard", false);
@@ -3060,7 +3898,8 @@ async function start() {
   const systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   applyTheme(storedTheme || (systemDark ? "dark" : "light"));
   bindEvents();
-  toggleInspectorCollapsed(localStorage.getItem("openwrite-inspector-collapsed") === "1");
+  const inspectorPreference = localStorage.getItem("openwrite-inspector-collapsed");
+  toggleInspectorCollapsed(inspectorPreference === null || inspectorPreference === "1");
   try {
     await loadWorkspace();
     await routeFromLocation();

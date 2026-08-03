@@ -255,14 +255,29 @@ def export_manuscript(
     *,
     format_name: str = "md",
     title: str = "",
+    author: str = "",
+    language: str = "zh-CN",
+    cover: Path | None = None,
 ) -> Path:
     chapters = list_chapters(project_root, novel_id)
     if not chapters:
         raise ValueError("还没有可导出的章节")
 
     format_name = format_name.lower()
+    if format_name == "epub":
+        from tools.epub_export import export_epub
+
+        return export_epub(
+            project_root,
+            novel_id,
+            output,
+            title=title,
+            author=author,
+            language=language,
+            cover=cover,
+        )
     if format_name not in {"md", "txt"}:
-        raise ValueError("导出格式仅支持 md 或 txt")
+        raise ValueError("导出格式仅支持 md、txt 或 epub")
 
     book_title = title.strip() or novel_id
     parts: list[str] = [f"# {book_title}" if format_name == "md" else book_title]

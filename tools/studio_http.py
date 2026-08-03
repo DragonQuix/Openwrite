@@ -71,6 +71,12 @@ POST_ROUTES = {
     "/api/agent/session": StudioPostRoute("create_agent_session"),
     "/api/agent/session/delete": StudioPostRoute("delete_agent_session"),
     "/api/source": StudioPostRoute("source_action"),
+    "/api/runtime-skills": StudioPostRoute("runtime_skill_action"),
+    "/api/rules": StudioPostRoute("rule_action"),
+    "/api/chapter-runs-v2": StudioPostRoute("chapter_run_v2_action"),
+    "/api/diagnostics": StudioPostRoute("runtime_diagnostics"),
+    "/api/rolling-plans": StudioPostRoute("rolling_plan_action"),
+    "/api/manuscript-editing": StudioPostRoute("manuscript_editing_action"),
 }
 
 POST_ROUTE_PATTERNS = (
@@ -142,6 +148,19 @@ class StudioRequestHandler(SimpleHTTPRequestHandler):
             if parsed.path == "/api/continuity":
                 self.app.require_project()
                 self._json(self.app.continuity())
+                return
+            if parsed.path == "/api/research":
+                self.app.require_project()
+                self._json(studio_success_payload(self.app.research_surface(), self.request_id))
+                return
+            research_report_match = re.fullmatch(
+                r"/api/research/reports/(?P<report_id>[A-Za-z0-9][A-Za-z0-9_-]{0,100})",
+                parsed.path,
+            )
+            if research_report_match:
+                self.app.require_project()
+                result = self.app.research_report(research_report_match.group("report_id"))
+                self._json(studio_success_payload(result, self.request_id))
                 return
             if parsed.path == "/api/agents":
                 params = parse_qs(parsed.query)

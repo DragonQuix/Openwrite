@@ -8,12 +8,79 @@ import tempfile
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import yaml
 
 from tools.context_schema import normalize_context_payload
 from tools.style_synthesizer import render_style_manifest_summary
+
+
+def configure_writer_llm(config: Any) -> dict[str, Any]:
+    """Apply operation-specific provider options and return a safe request summary."""
+    provider = str(getattr(config, "provider", "") or "").lower()
+    base_url = str(getattr(config, "base_url", "") or "").lower()
+    model = str(getattr(config, "model", "") or "")
+    requested_mode = os.getenv("OPENWRITE_WRITER_THINKING", "auto").strip().lower()
+    if requested_mode not in {"auto", "enabled", "disabled"}:
+        requested_mode = "auto"
+
+    is_deepseek_chat = provider in {"openai", "custom"} and "api.deepseek.com" in base_url
+    is_flash = model.lower() == "deepseek-v4-flash"
+    extra = dict(getattr(config, "extra", {}) or {})
+    extra_body = dict(extra.get("extra_body") or {})
+    existing_thinking = extra_body.get("thinking")
+    effective_mode = "provider_default"
+
+    if isinstance(existing_thinking, dict) and existing_thinking.get("type"):
+        effective_mode = str(existing_thinking["type"])
+    elif is_deepseek_chat and (requested_mode != "auto" or is_flash):
+        effective_mode = "disabled" if requested_mode == "auto" else requested_mode
+        extra_body["thinking"] = {"type": effective_mode}
+        extra["extra_body"] = extra_body
+        config.extra = extra
+
+    return {
+        "provider": provider,
+        "model": model,
+        "max_output_tokens": int(getattr(config, "max_tokens", 0) or 0),
+        "thinking": effective_mode,
+    }
+
+
+def apply_runtime_delta_with_fallback(
+    truth_manager: Any,
+    state_delta: Any,
+    updates: dict[str, Any],
+    *,
+    chapter_id: str,
+    known_entities: list[str],
+) -> tuple[dict[str, Any], str]:
+    """Apply a model delta, falling back only to validated additive legacy updates."""
+    from tools.runtime_state import RuntimeStateError, legacy_updates_to_delta
+
+    effective_delta = state_delta
+    if not effective_delta and updates:
+        effective_delta = legacy_updates_to_delta(
+            updates, chapter_id=chapter_id
+        ).model_dump(mode="json")
+    if not effective_delta:
+        return {}, ""
+
+    try:
+        truth_manager.apply_runtime_delta(
+            effective_delta, known_entities=known_entities
+        )
+        return dict(effective_delta), ""
+    except (RuntimeStateError, ValueError) as exc:
+        fallback = legacy_updates_to_delta(updates, chapter_id=chapter_id)
+        if not fallback.operations:
+            raise
+        truth_manager.apply_runtime_delta(
+            fallback, known_entities=known_entities
+        )
+        return fallback.model_dump(mode="json"), str(exc)
 
 
 def _load_config(project_root: Path) -> dict[str, Any]:
@@ -312,11 +379,30 @@ def build_review_payload(packet: dict[str, Any]) -> dict[str, Any]:
         if isinstance(characters, dict)
         else ""
     )
+    outline = _render_outline(sections)
+    if not outline:
+        section_items = packet.get("current_arc_sections")
+        if isinstance(section_items, list):
+            outline_parts = []
+            for item in section_items:
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or item.get("section_id") or "").strip()
+                summary = str(item.get("summary") or "").strip()
+                if title or summary:
+                    outline_parts.append(f"## {title}\n{summary}".strip())
+            outline = "\n\n".join(outline_parts)
+    if not outline:
+        outline = str(packet.get("outline") or "").strip()
     payload: dict[str, Any] = {
         "target_words": int(packet.get("target_words") or 0),
         "character_profiles": character_text[:4000],
-        "current_state": str(concepts.get("current_state") or ""),
-        "relationships": str(concepts.get("relationships") or ""),
+        "current_state": str(
+            concepts.get("current_state") or packet.get("current_state") or ""
+        ),
+        "relationships": str(
+            concepts.get("relationships") or packet.get("relationships") or ""
+        ),
         "author_intent": str(
             packet.get("author_intent") or sections.get("作者意图") or ""
         ),
@@ -326,7 +412,6 @@ def build_review_payload(packet: dict[str, Any]) -> dict[str, Any]:
             or ""
         ),
     }
-    outline = _render_outline(sections)
     if outline:
         payload["outline"] = outline[:4000]
     style = _style_profile(packet.get("style_documents", {}), 2500)
@@ -398,10 +483,39 @@ def _raise_if_task_cancelled(args: dict[str, Any]) -> None:
         raise _TaskCancellationRequested("任务已取消，模型结果未提交")
 
 
+def _load_resumable_writer_result(store: Any, manifest: Any) -> SimpleNamespace:
+    draft_stage = manifest.stages["draft"]
+    fact_stage = manifest.stages["fact_extract"]
+    if draft_stage.status != "completed" or fact_stage.status != "completed":
+        from tools.chapter_run_v2 import ChapterRunV2Error
+
+        raise ChapterRunV2Error(
+            "仅能从已完成 draft 与 fact_extract 的运行恢复",
+            code="RUN_NOT_RESUMABLE",
+        )
+    draft = store.read_artifact(draft_stage.artifact)
+    facts = store.read_artifact(fact_stage.artifact)
+    if not isinstance(draft, dict) or not isinstance(facts, dict):
+        from tools.chapter_run_v2 import ChapterRunV2Error
+
+        raise ChapterRunV2Error("恢复 artifact 结构无效", code="INVALID_ARTIFACT")
+    return SimpleNamespace(
+        title=str(draft.get("title") or ""),
+        content=str(draft.get("content") or ""),
+        word_count=int(draft.get("word_count") or 0),
+        state_updates=dict(facts.get("legacy_updates") or {}),
+        state_delta=dict(facts.get("state_delta") or {}),
+        chapter_summary=str(draft.get("chapter_summary") or ""),
+        observations=str(draft.get("observations") or ""),
+        token_usage=dict(draft.get("token_usage") or {}),
+    )
+
+
 def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str, Any]:
     from tools.agent import AgentContext, WriterAgent
     from tools.chapter_memory import ChapterMemoryStore
     from tools.chapter_run_store import ChapterRunStore
+    from tools.chapter_run_v2 import ChapterRunV2Store
     from tools.context_builder import ContextBuilder
     from tools.llm import LLMClient, LLMConfig
     from tools.project_lock import ProjectBusyError, ProjectWriteLock
@@ -422,6 +536,35 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
     active_stage = ""
     run_store = ChapterRunStore(project_root, novel_id)
     run_manifest = None
+    run_v2_store = ChapterRunV2Store(project_root, novel_id)
+    requested_run_v2_id = str(args.get("run_id_v2") or "").strip()
+    run_v2_manifest = (
+        run_v2_store.load(requested_run_v2_id) if requested_run_v2_id else None
+    )
+    if requested_run_v2_id and run_v2_manifest is None:
+        return {
+            "ok": False,
+            "chapter_id": chapter_id,
+            "error": "未找到指定的 Chapter Run V2",
+            "code": "INVALID_CHAPTER_RUN",
+        }
+    if run_v2_manifest is not None and run_v2_manifest.chapter_id != chapter_id:
+        return {
+            "ok": False,
+            "chapter_id": chapter_id,
+            "error": "Chapter Run V2 与待写章节不匹配",
+            "code": "INVALID_CHAPTER_RUN",
+        }
+    if run_v2_manifest is not None and (
+        run_v2_manifest.cancel_requested or run_v2_manifest.status == "cancelled"
+    ):
+        return {
+            "ok": False,
+            "chapter_id": chapter_id,
+            "error": "已取消的 Chapter Run V2 不能恢复",
+            "code": "RUN_CANCELLED",
+        }
+    run_v2_active_stage = ""
     try:
         with ProjectWriteLock(project_root, novel_id, operation=f"write:{chapter_id}"):
             _task_phase(args, "reading", "读取章节上下文")
@@ -445,8 +588,13 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
             active_stage = "writing"
             scheduler.start_stage(workflow, active_stage)
             llm_config = LLMConfig.from_env()
+            request_config = configure_writer_llm(llm_config)
             outline_target_words = int(getattr(context, "target_words", 0) or 0)
-            effective_target_words = target_words or outline_target_words or 6000
+            effective_target_words = (
+                run_v2_manifest.effective_target_words
+                if run_v2_manifest is not None
+                else target_words or outline_target_words or 6000
+            )
             writer = WriterAgent(
                 AgentContext(LLMClient(llm_config), llm_config.model, str(project_root))
             )
@@ -464,20 +612,182 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
                 effective_target_words=effective_target_words,
                 provider=str(getattr(llm_config, "provider", "")),
                 model=str(getattr(llm_config, "model", "")),
-                context_payload={**writer_payload, "context_packet": packet},
+                context_payload={
+                    **writer_payload,
+                    "context_packet": packet,
+                    "request_config": request_config,
+                },
                 baseline_state_revision=int(getattr(baseline_state, "revision", 0) or 0),
             )
-            _task_phase(args, "model", "生成章节草稿")
-            result = asyncio.run(
-                writer.write_chapter(
-                    context=writer_payload,
-                    chapter_number=_chapter_number(chapter_id) or 1,
-                    temperature=float(args.get("temperature") or 0.7),
-                    target_words=writer_payload.get("target_words") or None,
+            current_revisions = {
+                "context": run_v2_store.content_revision(writer_payload),
+                "outline": run_v2_store.content_revision(
+                    writer_payload.get("chapter_goals", [])
+                ),
+                "runtime_state": str(
+                    getattr(baseline_state, "revision", 0) or 0
+                ),
+                "prompt": "writer-creative-v1",
+            }
+            if run_v2_manifest is None:
+                run_v2_manifest = run_v2_store.create(
+                    chapter_id,
+                    requested_target_words=target_words,
+                    effective_target_words=effective_target_words,
+                    provider=str(getattr(llm_config, "provider", "")),
+                    model=str(getattr(llm_config, "model", "")),
+                    model_profile=str(getattr(llm_config, "model", "")),
+                    input_revisions=current_revisions,
                 )
-            )
+            else:
+                stored_context = run_v2_store.read_artifact(
+                    run_v2_manifest.stages["context"].artifact
+                )
+                if not isinstance(stored_context, dict):
+                    raise ValueError("Chapter Run V2 context artifact 无效")
+                comparable_context = dict(writer_payload)
+                for key in ("target_words", "external_context"):
+                    if key in stored_context:
+                        comparable_context[key] = stored_context[key]
+                    else:
+                        comparable_context.pop(key, None)
+                current_revisions["context"] = run_v2_store.content_revision(
+                    comparable_context
+                )
+                stale = run_v2_store.mark_stale(
+                    run_v2_manifest,
+                    {
+                        **run_v2_manifest.input_revisions,
+                        **current_revisions,
+                    },
+                )
+                if any(
+                    stage in stale
+                    for stage in ("context", "plan", "draft", "fact_extract")
+                ):
+                    from tools.chapter_run_v2 import ChapterRunV2Error
+
+                    raise ChapterRunV2Error(
+                        "运行输入已变化，不能复用旧草稿",
+                        code="RESUME_INPUT_STALE",
+                    )
+                writer_payload = stored_context
+            run_v2_active_stage = "context"
+            if run_v2_manifest.stages["context"].status != "completed":
+                run_v2_store.start_stage(
+                    run_v2_manifest,
+                    "context",
+                    input_revisions={
+                        "context": run_v2_manifest.input_revisions["context"],
+                        "runtime_state": run_v2_manifest.input_revisions[
+                            "runtime_state"
+                        ],
+                    },
+                )
+                context_artifact = run_v2_store.write_artifact(
+                    run_v2_manifest, "context", writer_payload
+                )
+                run_v2_store.complete_stage(
+                    run_v2_manifest,
+                    "context",
+                    output=writer_payload,
+                    artifact=context_artifact,
+                )
+            run_v2_active_stage = "plan"
+            if run_v2_manifest.stages["plan"].status != "completed":
+                run_v2_store.start_stage(
+                    run_v2_manifest,
+                    "plan",
+                    input_revisions={
+                        "outline": run_v2_manifest.input_revisions["outline"]
+                    },
+                    prompt_version="writer-plan-v1",
+                )
+                run_v2_store.complete_stage(
+                    run_v2_manifest,
+                    "plan",
+                    output={
+                        "chapter_id": chapter_id,
+                        "goals": writer_payload.get("chapter_goals", []),
+                        "guidance": writer_payload.get("guidance", ""),
+                    },
+                )
+            run_v2_active_stage = "draft"
+            if run_v2_manifest.stages["draft"].status == "completed":
+                result = _load_resumable_writer_result(
+                    run_v2_store, run_v2_manifest
+                )
+            else:
+                run_v2_store.start_stage(
+                    run_v2_manifest,
+                    "draft",
+                    prompt_version="writer-creative-v1",
+                    model_profile=str(getattr(llm_config, "model", "")),
+                )
+                _task_phase(args, "model", "生成章节草稿")
+                result = asyncio.run(
+                    writer.write_chapter(
+                        context=writer_payload,
+                        chapter_number=_chapter_number(chapter_id) or 1,
+                        temperature=float(args.get("temperature") or 0.7),
+                        target_words=writer_payload.get("target_words") or None,
+                    )
+                )
+                _task_phase(args, "validating", "校验模型结果")
+                _raise_if_task_cancelled(args)
+                run_v2_store.assert_accepts_result(run_v2_manifest)
+                draft_artifact = run_v2_store.write_artifact(
+                    run_v2_manifest,
+                    "draft",
+                    {
+                        "title": result.title,
+                        "content": result.content,
+                        "word_count": result.word_count,
+                        "chapter_summary": str(
+                            getattr(result, "chapter_summary", "") or ""
+                        ),
+                        "observations": str(
+                            getattr(result, "observations", "") or ""
+                        ),
+                        "token_usage": dict(
+                            getattr(result, "token_usage", {}) or {}
+                        ),
+                    },
+                )
+                run_v2_store.complete_stage(
+                    run_v2_manifest,
+                    "draft",
+                    output={"title": result.title, "content": result.content},
+                    artifact=draft_artifact,
+                    usage=dict(getattr(result, "token_usage", {}) or {}),
+                )
             _task_phase(args, "validating", "校验模型结果")
             _raise_if_task_cancelled(args)
+            updates = _collect_truth_updates(getattr(result, "state_updates", {}))
+            state_delta = getattr(result, "state_delta", {})
+            known_entities = [
+                str(item.get("name") or "").strip()
+                for item in writer_payload.get("active_characters", [])
+                if isinstance(item, dict) and str(item.get("name") or "").strip()
+            ]
+            run_v2_active_stage = "fact_extract"
+            if run_v2_manifest.stages["fact_extract"].status != "completed":
+                run_v2_store.start_stage(
+                    run_v2_manifest,
+                    "fact_extract",
+                    prompt_version="runtime-delta-v1",
+                )
+                fact_artifact = run_v2_store.write_artifact(
+                    run_v2_manifest,
+                    "fact_extract",
+                    {"state_delta": state_delta, "legacy_updates": updates},
+                )
+                run_v2_store.complete_stage(
+                    run_v2_manifest,
+                    "fact_extract",
+                    output={"state_delta": state_delta, "legacy_updates": updates},
+                    artifact=fact_artifact,
+                )
             snapshot = truth_manager.create_snapshot(max(_chapter_number(chapter_id) - 1, 0))
             memory = ChapterMemoryStore(project_root, novel_id)
             draft_path = _chapter_path(project_root, novel_id, chapter_id)
@@ -489,23 +799,27 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
                 _save_chapter(
                     project_root, novel_id, chapter_id, result.title, result.content
                 )
-                updates = _collect_truth_updates(getattr(result, "state_updates", {}))
-                state_delta = getattr(result, "state_delta", {})
-                if not state_delta and updates:
-                    from tools.runtime_state import legacy_updates_to_delta
-
-                    state_delta = legacy_updates_to_delta(
-                        updates, chapter_id=chapter_id
-                    ).model_dump(mode="json")
-                if state_delta:
-                    known_entities = [
-                        str(item.get("name") or "").strip()
-                        for item in writer_payload.get("active_characters", [])
-                        if isinstance(item, dict) and str(item.get("name") or "").strip()
-                    ]
-                    truth_manager.apply_runtime_delta(
-                        state_delta, known_entities=known_entities
-                    )
+                run_v2_active_stage = "settle"
+                run_v2_store.start_stage(
+                    run_v2_manifest,
+                    "settle",
+                    prompt_version="runtime-delta-v1",
+                )
+                state_delta, state_delta_fallback = apply_runtime_delta_with_fallback(
+                    truth_manager,
+                    state_delta,
+                    updates,
+                    chapter_id=chapter_id,
+                    known_entities=known_entities,
+                )
+                run_v2_store.complete_stage(
+                    run_v2_manifest,
+                    "settle",
+                    output={
+                        "state_delta": state_delta,
+                        "fallback": state_delta_fallback,
+                    },
+                )
                 memory.save(
                     chapter_id=chapter_id,
                     title=result.title,
@@ -514,6 +828,26 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
                     observations=str(getattr(result, "observations", "") or ""),
                     token_usage=dict(getattr(result, "token_usage", {}) or {}),
                 )
+                run_v2_active_stage = "validate"
+                run_v2_store.start_stage(
+                    run_v2_manifest,
+                    "validate",
+                    prompt_version="post-write-v1",
+                )
+                run_v2_store.complete_stage(
+                    run_v2_manifest,
+                    "validate",
+                    output={
+                        "chapter_id": chapter_id,
+                        "word_count": int(getattr(result, "word_count", 0) or 0),
+                        "runtime_state": int(
+                            getattr(truth_manager.load_runtime_state(), "revision", 0)
+                            or 0
+                        ),
+                    },
+                )
+                run_v2_active_stage = "commit"
+                run_v2_store.start_stage(run_v2_manifest, "commit")
                 scheduler.complete_stage(
                     workflow,
                     active_stage,
@@ -526,23 +860,63 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
                     draft_content=result.content,
                     usage=dict(getattr(result, "token_usage", {}) or {}),
                 )
+                run_v2_store.complete_stage(
+                    run_v2_manifest,
+                    "commit",
+                    output={
+                        "draft_revision": run_store.text_revision(result.content),
+                        "runtime_state_revision": int(
+                            getattr(truth_manager.load_runtime_state(), "revision", 0)
+                            or 0
+                        ),
+                    },
+                    artifact=str(draft_path),
+                )
                 active_stage = ""
+                run_v2_active_stage = ""
             except Exception:
                 truth_manager.restore_snapshot(snapshot)
                 _restore(draft_path, previous_draft)
                 _restore(memory_path, previous_memory)
+                if run_v2_manifest is not None:
+                    run_v2_store.invalidate_from(
+                        run_v2_manifest,
+                        "settle",
+                        reason="transaction_rollback",
+                    )
                 raise
-            return {
+            response_payload = {
                 "ok": True,
                 "chapter_id": chapter_id,
                 "title": result.title,
                 "word_count": result.word_count,
                 "draft_path": str(draft_path),
                 "truth_updates": updates,
+                "run_id_v2": run_v2_manifest.run_id,
+                "usage": dict(getattr(result, "token_usage", {}) or {}),
             }
+            if state_delta_fallback:
+                response_payload["state_delta"] = state_delta
+                response_payload["state_delta_fallback"] = state_delta_fallback
+            return response_payload
     except _TaskCancellationRequested as exc:
         if active_stage:
             scheduler.fail_stage(workflow, active_stage, str(exc))
+        if run_v2_manifest is not None:
+            try:
+                run_v2_store.request_cancel(
+                    run_v2_manifest, reason="write_cancelled"
+                )
+                if run_v2_active_stage:
+                    run_v2_store.fail_stage(
+                        run_v2_manifest,
+                        run_v2_active_stage,
+                        code="TASK_CANCELLED",
+                        message=str(exc),
+                    )
+                run_v2_store.finalize_cancel(run_v2_manifest)
+            except Exception:
+                pass
         return {
             "ok": False,
             "chapter_id": chapter_id,
@@ -562,6 +936,16 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
                 run_store.fail(run_manifest, stage=active_stage or "write")
             except Exception:
                 pass
+        if run_v2_manifest is not None and run_v2_active_stage:
+            try:
+                run_v2_store.fail_stage(
+                    run_v2_manifest,
+                    run_v2_active_stage,
+                    code=str(getattr(exc, "code", "RUN_FAILED") or "RUN_FAILED"),
+                    message=str(exc),
+                )
+            except Exception:
+                pass
         if active_stage:
             scheduler.fail_stage(workflow, active_stage, str(exc))
         return {"ok": False, "chapter_id": chapter_id, "error": str(exc)}
@@ -571,6 +955,7 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
     from tools.agent import AgentContext, ReviewerAgent
     from tools.chapter_assembler import ChapterAssemblerV2
     from tools.chapter_run_store import ChapterRunStore
+    from tools.chapter_run_v2 import ChapterRunV2Store
     from tools.llm import LLMClient, LLMConfig
     from tools.project_lock import ProjectBusyError, ProjectWriteLock
     from tools.review_store import ReviewStore
@@ -586,6 +971,7 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
     scheduler = WorkflowScheduler(project_root, novel_id)
     workflow = scheduler.load_or_create(chapter_id)
     run_store = ChapterRunStore(project_root, novel_id)
+    run_v2_store = ChapterRunV2Store(project_root, novel_id)
     requested_run_id = str(args.get("run_id") or "").strip()
     run_manifest = (
         run_store.load(requested_run_id)
@@ -607,6 +993,35 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
             "chapter_id": chapter_id,
             "error": "章节运行记录与待审章节不匹配",
             "code": "INVALID_CHAPTER_RUN",
+        }
+    requested_run_v2_id = str(args.get("run_id_v2") or "").strip()
+    run_v2_manifest = (
+        run_v2_store.load(requested_run_v2_id)
+        if requested_run_v2_id
+        else run_v2_store.latest_reviewable_for_chapter(chapter_id)
+    )
+    if requested_run_v2_id and run_v2_manifest is None:
+        return {
+            "ok": False,
+            "chapter_id": chapter_id,
+            "error": "未找到指定的 Chapter Run V2 记录",
+            "code": "INVALID_CHAPTER_RUN",
+        }
+    if run_v2_manifest is not None and run_v2_manifest.chapter_id != chapter_id:
+        return {
+            "ok": False,
+            "chapter_id": chapter_id,
+            "error": "Chapter Run V2 与待审章节不匹配",
+            "code": "INVALID_CHAPTER_RUN",
+        }
+    if requested_run_v2_id and run_v2_manifest is not None and (
+        run_v2_manifest.status not in {"committed", "reviewed"}
+    ):
+        return {
+            "ok": False,
+            "chapter_id": chapter_id,
+            "error": "指定的 Chapter Run V2 尚未提交，不能用于审稿",
+            "code": "CHAPTER_RUN_NOT_REVIEWABLE",
         }
     try:
         with ProjectWriteLock(project_root, novel_id, operation=f"review:{chapter_id}"):
@@ -639,8 +1054,21 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
             if prewrite is not None:
                 review_context["current_state"] = prewrite.current_state
                 review_context["relationships"] = prewrite.relationships
+            if run_v2_manifest is not None:
+                run_v2_store.start_stage(
+                    run_v2_manifest,
+                    "review",
+                    input_revisions={
+                        "chapter": run_v2_store.content_revision(content),
+                        "review_context": run_v2_store.content_revision(review_context),
+                    },
+                    prompt_version="reviewer-v1",
+                    model_profile=str(getattr(llm_config, "model", "")),
+                )
             _task_phase(args, "model", "执行章节审稿")
             result = asyncio.run(reviewer.review(content=content, context=review_context))
+            if run_v2_manifest is not None:
+                run_v2_store.assert_accepts_result(run_v2_manifest)
             issues: list[dict[str, Any]] = [
                 {
                     "severity": str(getattr(issue, "severity", "warning")),
@@ -660,6 +1088,7 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
                 "summary": str(getattr(result, "summary", "") or ""),
                 "issue_details": issues,
                 "run_id": run_manifest.run_id if run_manifest else "",
+                "run_id_v2": run_v2_manifest.run_id if run_v2_manifest else "",
                 "effective_target_words": int(review_context.get("target_words") or 0),
             }
             _task_phase(args, "validating", "整理审稿问题")
@@ -687,9 +1116,28 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
             _sync_book_state(project_root, novel_id, chapter_id, bool(result.passed))
             if run_manifest is not None:
                 run_store.complete_review(run_manifest, review_payload=payload)
+            if run_v2_manifest is not None:
+                review_artifact = run_v2_store.write_artifact(
+                    run_v2_manifest, "review", payload
+                )
+                run_v2_store.complete_stage(
+                    run_v2_manifest,
+                    "review",
+                    output=payload,
+                    artifact=review_artifact,
+                )
             return payload
     except _TaskCancellationRequested as exc:
         scheduler.fail_stage(workflow, "review", str(exc))
+        if run_v2_manifest is not None:
+            run_v2_store.request_cancel(run_v2_manifest, reason="review_cancelled")
+            run_v2_store.fail_stage(
+                run_v2_manifest,
+                "review",
+                code="TASK_CANCELLED",
+                message=str(exc),
+            )
+            run_v2_store.finalize_cancel(run_v2_manifest)
         return {
             "ok": False,
             "chapter_id": chapter_id,
@@ -705,6 +1153,16 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
         }
     except Exception as exc:
         scheduler.fail_stage(workflow, "review", str(exc))
+        if run_v2_manifest is not None:
+            try:
+                run_v2_store.fail_stage(
+                    run_v2_manifest,
+                    "review",
+                    code=str(getattr(exc, "code", "REVIEW_FAILED") or "REVIEW_FAILED"),
+                    message=str(exc),
+                )
+            except Exception:
+                pass
         return {"ok": False, "chapter_id": chapter_id, "error": str(exc)}
 
 

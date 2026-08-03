@@ -37,6 +37,7 @@ OpenWrite 不覆盖短篇、翻译、剧本或互动游戏。它把产品能力�
 - **分层长会话**：Goethe / Dante 的滚动状态保存在 `data/workflows/*session.yaml`，完整对话追加保存在对应的 `*session.jsonl`；运行时只注入摘要与最近窗口，旧历史不会丢失。
 - **真实活动可视化**：Studio 的 `AI WORKING` 读取后端 ReAct 事件，显示模型思考、工具调用、结果校验与回复落盘阶段；长时提示会带上最后一个真实步骤。
 - **统一写入确认门**：Goethe / Dante 对大纲、人物、世界关系和其他正式资产的修改都先预览 diff；只有本轮用户明确确认后，`confirm=true` 才能真正落盘。
+- **LightRAG 项目搜索**：项目搜索使用 MIT 许可的 [HKUDS/LightRAG](https://github.com/HKUDS/LightRAG)，把真源、人物、世界设定和正文建立为知识图谱与向量索引，同时保留文件和行号定位。
 
 ### 一个小说内核，四个入口
 
@@ -147,6 +148,22 @@ API Key 默认只保存在当前 Studio 进程；若勾选“重启后自动恢�
 （macOS: `~/Library/Application Support/OpenWrite/`，其他: `~/.config/openwrite/`）的
 `0600` 凭据文件，不写入作品、Git 或浏览器存储。
 
+项目搜索还需要 embedding 模型。模型档案中的 `Embedding Base URL / 模型 / 维度 / API Key`
+默认沿用主模型连接；OpenAI 或同时提供聊天与 embedding 的兼容网关通常无需额外配置。
+DeepSeek、Anthropic 本身不提供 embedding，需要在同一档案中填写独立的 OpenAI 兼容
+embedding 端点和 Key。LightRAG 索引保存在作品私有目录的 `.openwrite/lightrag/`，不会进入 Git。
+首次搜索或文档发生变化时会增量提取实体与关系；后续未变化的文档不会重复入库。
+服务器或 CLI 也可以用环境变量配置 embedding：
+
+```bash
+export OPENWRITE_LIGHTRAG_EMBEDDING_BASE_URL=https://api.openai.com/v1
+export OPENWRITE_LIGHTRAG_EMBEDDING_API_KEY=your-embedding-key
+export OPENWRITE_LIGHTRAG_EMBEDDING_MODEL=text-embedding-3-small
+export OPENWRITE_LIGHTRAG_EMBEDDING_DIM=1536
+```
+
+LightRAG 的实体提取和查询使用 Chat Completions 兼容的模型端点；只提供 Responses 专用接口的网关不能作为搜索路由。
+
 CLI 或服务器部署仍可使用环境变量：
 
 ```bash
@@ -249,7 +266,7 @@ Studio 的主要前端工作区：
 | 大纲 / 故事 / 人物 / 世界 | 管理卷幕章节、故事资料、角色档案和世界规则；这些确认版资料会成为 AI 的创作依据 |
 | 正文 / 编辑器 | 打开、编辑和审阅已写章节，并提供版本冲突保护 |
 | AI 协作 | Goethe 规划会话、Dante 正文会话，复用持久化 session 与工具调用；后台实时显示模型、工具、校验和落盘阶段；AI 回复支持安全 CommonMark 渲染 |
-| 搜索 / 连续性 / 工具箱 | 跨文档查找、写前写后状态与关系/伏笔校验，以及同步、导入、导出和来源处理 |
+| 搜索 / 连续性 / 工具箱 | LightRAG 图谱/向量搜索、写前写后状态与关系/伏笔校验，以及同步、导入、导出和来源处理 |
 | 顶栏 | 切换作品、配置模型，以及在大纲准备好后启动“写下一章” |
 | 写作闭环 | 写下一章、章节记忆与 truth 结算、37 维审稿、Markdown/TXT 导出 |
 
@@ -312,7 +329,9 @@ $ openwrite dante
 | 强制写指定章节 | `openwrite write ch_006` | 直达写作 |
 | 用子流程写章 | `openwrite multi-write ch_006` | director/writer/reviewer 子流程 |
 | 单独审查已写章节 | `openwrite review ch_006` | 不进聊天 |
-| 查看组装上下文 | `openwrite context ch_006 --show` | 查 Dante 到底看了什么 |
+| 查看 canonical packet | `openwrite context ch_006 --show` | 查看章节上下文包 |
+| 查看 Writer 实际首轮输入 | `openwrite context ch_006 --agent writer --show` | 审阅 system/user 消息及缺失项 |
+| 查看 Reviewer 实际首轮输入 | `openwrite context ch_006 --agent reviewer --show` | 审阅正文、目标、正典与审稿 Prompt |
 | 导出 canonical packet | `openwrite assemble ch_006 --output-dir out` | 调试写作输入 |
 | 查看当前运行态 | `openwrite status` | 看进度和阶段 |
 
@@ -491,6 +510,55 @@ data/novels/{novel_id}/
 - `openwrite assemble ch_006 --output-dir out`
 - `openwrite sync --check`
 - `openwrite sync`
+
+`context --agent` 是只读检查，不调用模型，也不修改会话或小说文件。它输出该 Agent
+真正使用的首轮消息、字段完整性、来源文件 revision、截断提示、模型标识和检查结果哈希：
+
+```bash
+# Writer：检查创作阶段真正发送的 system/user 消息
+openwrite context ch_007 --agent writer --show
+
+# 带本次临时参数检查 Writer
+openwrite context ch_007 --agent writer --target-words 1200 \
+  --guidance "不要提前揭示旧案真相" --show
+
+# Reviewer：章节必须已经存在；会沿用最近成功 run 的 effective target
+openwrite context ch_006 --agent reviewer --show
+
+# Dante/Goethe：提供准备发送的用户指令，检查首轮 ReAct 消息与工具表
+openwrite context ch_007 --agent dante --instruction "检查下一章是否可写" --show
+openwrite context ch_007 --agent goethe --instruction "检查当前规划缺口" --show
+
+# JSON 适合 diff、Agent 调试或保存审计证据
+openwrite context ch_007 --agent writer --format json -o context-review.json
+```
+
+Dante 和 Goethe 的首轮消息只包含 system prompt、会话/书状态和用户指令，不会预先塞入整份
+章节 packet；它们通过 `get_context`、`get_outline_structure` 等工具按需读取。检查结果会明确提示
+这一点，避免把“工具可读取”误认为“模型首轮已经看到”。
+
+### Agent 运行时审计工具
+
+Dante 和 Goethe 还共享一组只读审计工具。它们适合在 Agent 会话中回答“这次到底看到了什么、之前实际跑了什么、现在落盘了什么”，不会修改小说、会话、任务或迁移旧数据：
+
+| 工具 | 能审阅什么 |
+|---|---|
+| `inspect_agent_context` | 指定章节和 Agent 的首轮消息、字段完整性、来源 revision、压缩报告和工具表；需要时可展开完整消息或 payload |
+| `list_chapter_runs` | 按章节/状态查看写作 run manifest，包括目标字数、模型、上下文/正文/审稿 revision、阶段、usage 和错误码 |
+| `get_runtime_state` | 查看当前结构化运行态及旧文档的字符数/hash 清单，不返回整份敏感旧文档 |
+| `get_chapter_review` | 查看最近审稿结果、问题明细、当前正文 revision，以及结果是否 stale |
+| `get_task_activity` | 查看任务摘要，或指定任务的快照和追加事件；凭据类字段会脱敏 |
+| `get_goethe_handoff` | 查看 Goethe 交给 Dante 的 YAML manifest、Markdown 摘要、路径和 revision |
+
+可以直接这样要求 Agent 做审计：
+
+```text
+请用 inspect_agent_context 检查 ch_007，列出首轮消息实际包含的来源和缺失项。
+再用 list_chapter_runs 查看这个章节最近一次运行的 effective target、模型和审稿 revision。
+如果审稿结果存在，用 get_chapter_review 告诉我它是否已经过期。
+```
+
+审计工具和 `openwrite context ...` 的区别是：`context` 检查器展示准备发送的首轮输入，不创建会话也不调用模型；审计工具可以在 Dante/Goethe 会话中继续检查运行后的 run、任务、审稿和 handoff。Agent 的 live self-inspection 默认排除已经持久化的当前用户轮次，避免审阅结果重复计算本轮指令。
 
 ### 风格与题材
 

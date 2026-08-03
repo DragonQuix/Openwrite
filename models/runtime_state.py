@@ -102,6 +102,15 @@ RuntimeCollection = Literal[
     "proposed_entities",
 ]
 
+OBJECT_VALUE_COLLECTIONS = {
+    "characters",
+    "resources",
+    "relationship_states",
+    "open_threads",
+    "foreshadowing_refs",
+    "proposed_entities",
+}
+
 
 class RuntimeDeltaOperation(StrictModel):
     op: Literal["set", "append", "remove", "resolve", "propose"]
@@ -117,6 +126,12 @@ class RuntimeDeltaOperation(StrictModel):
             raise ValueError(f"{self.op} operation requires value")
         if self.op == "propose" and self.collection != "proposed_entities":
             raise ValueError("propose operation must target proposed_entities")
+        if (
+            self.op in {"set", "append", "propose"}
+            and self.collection in OBJECT_VALUE_COLLECTIONS
+            and not isinstance(self.value, dict)
+        ):
+            raise ValueError(f"{self.collection} operation requires an object value")
         return self
 
 

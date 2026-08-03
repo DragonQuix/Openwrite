@@ -35,6 +35,48 @@ def test_ideation_summary_tracks_current_ideation_hash(tmp_path: Path):
     assert store.ideation_summary_is_current() is False
 
 
+def test_confirmed_ideation_summary_seeds_placeholder_foundation(tmp_path: Path):
+    store = StoryPlanningStore(tmp_path, "demo")
+    store.story_src_dir.mkdir(parents=True, exist_ok=True)
+    foundation_path = store.story_src_dir / "foundation.md"
+    foundation_path.write_text(
+        "# 基础设定\n\n## 核心机制\n\n（待填写）\n",
+        encoding="utf-8",
+    )
+    store.append_ideation("主角是被雪藏的穿越艺人")
+    store.save_ideation_summary(
+        "# 当前想法汇总\n\n## 核心方向\n\n- 娱乐圈成长爽文\n"
+    )
+
+    seeded = store.seed_placeholder_foundation_from_ideation_summary()
+
+    assert seeded is True
+    assert "娱乐圈成长爽文" in foundation_path.read_text(encoding="utf-8")
+    assert foundation_path.read_text(encoding="utf-8") == (
+        store.foundation_draft_path.read_text(encoding="utf-8")
+    )
+
+
+def test_confirmed_ideation_summary_does_not_replace_existing_foundation(
+    tmp_path: Path,
+):
+    store = StoryPlanningStore(tmp_path, "demo")
+    store.story_src_dir.mkdir(parents=True, exist_ok=True)
+    foundation_path = store.story_src_dir / "foundation.md"
+    foundation_path.write_text(
+        "# 基础设定\n\n## 核心机制\n\n歌曲会触发记忆共鸣。\n",
+        encoding="utf-8",
+    )
+    store.append_ideation("主角是被雪藏的穿越艺人")
+    store.save_ideation_summary("# 当前想法汇总\n\n- 娱乐圈成长爽文\n")
+
+    seeded = store.seed_placeholder_foundation_from_ideation_summary()
+
+    assert seeded is False
+    assert "歌曲会触发记忆共鸣" in foundation_path.read_text(encoding="utf-8")
+    assert not store.foundation_draft_path.exists()
+
+
 def test_promote_foundation_writes_src_story_files(tmp_path: Path):
     store = StoryPlanningStore(tmp_path, "demo")
 

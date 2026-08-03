@@ -79,6 +79,32 @@ def test_three_named_profiles_route_independently_and_keep_credentials_private(t
     assert "review-secret" not in surface_text
 
 
+def test_search_profile_keeps_embedding_credentials_private(tmp_path: Path):
+    store = ModelProfileStore(tmp_path)
+    search_profile = {
+        **profile("search", "graph-extractor"),
+        "embedding_base_url": "https://embeddings.example/v1",
+        "embedding_model": "text-embedding-3-large",
+        "embedding_dimension": 3072,
+        "embedding_max_tokens": 8192,
+    }
+    store.save_profile(
+        search_profile,
+        api_key="llm-secret",
+        embedding_api_key="embedding-secret",
+    )
+    store.save_routes({"search": "search"})
+
+    resolved = store.resolve("search")
+    surface_text = json.dumps(store.surface(), ensure_ascii=False)
+
+    assert resolved["embedding_api_key"] == "embedding-secret"
+    assert resolved["embedding_model"] == "text-embedding-3-large"
+    assert resolved["embedding_dimension"] == 3072
+    assert "llm-secret" not in surface_text
+    assert "embedding-secret" not in surface_text
+
+
 def test_session_only_credential_is_not_written_to_disk(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

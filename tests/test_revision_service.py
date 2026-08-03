@@ -86,6 +86,36 @@ def test_selection_revision_is_previewed_then_atomically_applied(tmp_path: Path)
     assert backup.read_text(encoding="utf-8") == original
 
 
+def test_revision_apply_accepts_reviewed_subset_and_records_hunks(tmp_path: Path):
+    root, chapter = _project(tmp_path)
+    original = chapter.read_text(encoding="utf-8")
+    selected = "林舟推开钟楼的门。\n\n门后没有人，只有一只停摆的钟。"
+    start = original.index(selected)
+    service = RevisionService(
+        root,
+        "demo",
+        generator=lambda payload: "林舟缓缓推开钟楼的门。\n\n门后仍然没有人，只有一只停摆的钟。",
+    )
+    proposal = service.create_selection(
+        chapter_id="ch_001",
+        start=start,
+        end=start + len(selected),
+        original_text=selected,
+    )
+
+    assert len(proposal["diff"]["hunks"]) == 2
+    accepted = "林舟缓缓推开钟楼的门。\n\n门后没有人，只有一只停摆的钟。"
+    applied = service.apply(
+        proposal["proposal_id"],
+        replacement_text=accepted,
+        selected_hunk_ids=["hunk_0"],
+    )
+
+    assert accepted in chapter.read_text(encoding="utf-8")
+    assert applied["accepted_replacement_text"] == accepted
+    assert applied["selected_hunk_ids"] == ["hunk_0"]
+
+
 def test_revision_apply_marks_proposal_stale_when_source_changed(tmp_path: Path):
     root, chapter = _project(tmp_path)
     original = chapter.read_text(encoding="utf-8")

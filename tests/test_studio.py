@@ -59,6 +59,50 @@ def test_studio_assets_load_shared_core_as_an_es_module():
     assert "refreshAssets" in structured_assets
     assert "/api/assets/package/preview" in structured_assets
     assert "data-package-action" in structured_assets
+    assert "\\`" not in application
+    assert "innerHTML" not in application
+    assert "appendSafeChatMarkup" in application
+
+
+def test_studio_writer_workspace_keeps_primary_navigation_and_contextual_tools():
+    assets = Path(__file__).parent.parent / "tools" / "studio_assets"
+    html = (assets / "index.html").read_text(encoding="utf-8")
+    application = (assets / "js" / "application.js").read_text(encoding="utf-8")
+    styles = (assets / "styles.css").read_text(encoding="utf-8")
+    primary_nav = html.split('<div class="nav-group nav-primary">', 1)[1].split("</div>", 1)[0]
+
+    assert primary_nav.count('class="nav-item') == 6
+    assert 'data-view="research"' in html
+    assert 'id="library-tabs"' in html
+    assert 'id="editor-find-panel"' in html
+    assert 'id="editor-reading-toggle"' in html
+    assert 'id="editor-focus-toggle"' in html
+    assert 'id="inspector-assistant-form"' in html
+    assert 'id="inspector-backdrop"' in html
+    assert 'class="mobile-compact-icon"' in html
+    assert 'id="revision-hunks-list"' in html
+    assert 'id="source-synthesize"' in html
+    assert 'id="source-promotion-preview"' in html
+    assert 'id="source-promotion-apply"' in html
+    assert "function scheduleAutoSave()" in application
+    assert "toggleMobileNavigation(false, false)" in application
+    assert "toggleInspector(false, false)" in application
+    assert 'action: "analyze_v2"' in application
+    assert "renderSourceAnalysis" in application
+    assert "retrySourceChunk" in application
+    assert "synthesizeSelectedSources" in application
+    assert "previewSourcePromotion" in application
+    assert "applySourcePromotion" in application
+    assert "inspector.contains(document.activeElement)" in application
+    assert "sidebar.contains(document.activeElement)" in application
+    assert "saveDocument({ silent: true })" in application
+    assert "function findNextEditorMatch()" in application
+    assert 'api("/api/chat"' in application
+    assert ".app.editor-focus .workspace-shell" in styles
+    assert ".editor-view.reading-width .document-editor" in styles
+    assert ".inspector-backdrop:not([hidden])" in styles
+    assert "@media (max-width: 360px)" in styles
+    assert ".source-analysis-toolbar" in styles
 
 
 def test_studio_structured_asset_ui_keeps_raw_mode_and_explicit_import_decisions():
@@ -1120,6 +1164,88 @@ def test_studio_chat_and_source_extraction_use_injected_real_surfaces(
     assert source_calls[0]["focus"] == "style"
     packs = extracted["workspace"]["operations"]["source_packs"]
     assert packs[0]["source_id"] == "reference_01"
+
+
+def test_studio_source_analysis_v2_exposes_evidence_profile_and_confirmed_promotion(
+    tmp_path: Path,
+):
+    from tools.source_analysis import SourceAnalysisService
+
+    init_project(tmp_path, "demo")
+    analysis = SourceAnalysisService(tmp_path, "demo")
+
+    def analyzer(text: str, context: dict) -> dict:
+        quote = text[:4]
+        return {
+            "summary": "钟声作为递进信号。",
+            "findings": [
+                {
+                    "category": "method",
+                    "claim": "用重复物象建立递进节奏",
+                    "confidence": 0.9,
+                    "reusable": True,
+                    "source_bound": False,
+                    "evidence": [
+                        {"start": 0, "end": len(quote), "quote": quote}
+                    ],
+                }
+            ],
+        }
+
+    for source_id in ("reference_a", "reference_b"):
+        content = f"第一章\n\n{source_id} 的钟声逐次加快。"
+        analysis.prepare(
+            source_id,
+            content,
+            relative_name=f"{source_id}.txt",
+            input_budget_tokens=500,
+        )
+        analysis.analyze(source_id, analyzer=analyzer)
+
+    app = StudioApplication(tmp_path)
+    try:
+        status = app.source_action(
+            {"action": "status_v2", "source_id": "reference_a"}
+        )
+        assert status["result"]["complete"] is True
+        assert status["result"]["report"]["findings"][0]["evidence"]
+        packs = status["workspace"]["operations"]["source_packs"]
+        assert packs[0]["analysis_v2"]["status"] == "completed"
+        assert packs[0]["analysis_v2"]["source_sha256"]
+
+        profile = app.source_action(
+            {
+                "action": "synthesize_v2",
+                "source_ids": ["reference_a", "reference_b"],
+            }
+        )["result"]
+        preview = app.source_action(
+            {
+                "action": "promotion_preview_v2",
+                "profile_id": profile["profile_id"],
+                "target": "style",
+            }
+        )["result"]
+        applied = app.source_action(
+            {
+                "action": "promote_v2",
+                "preview_id": preview["preview_id"],
+                "confirm": True,
+            }
+        )["result"]
+        assert applied["ok"] is True
+        assert (
+            tmp_path
+            / "data"
+            / "novels"
+            / "demo"
+            / "data"
+            / "style"
+            / "reference_profile.md"
+        ).is_file()
+    finally:
+        if app._task_runner is not None:
+            app._task_runner.shutdown(wait=True)
 
 
 def test_studio_http_exposes_context_and_import_routes(tmp_path: Path):

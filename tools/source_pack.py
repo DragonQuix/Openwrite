@@ -39,6 +39,92 @@ class SourcePackService:
             / source_id
         )
 
+    def prepare_v2(
+        self,
+        source_id: str,
+        content: str,
+        *,
+        relative_name: str,
+        focus: list[str] | None = None,
+        input_budget_tokens: int = 12000,
+    ) -> dict[str, Any]:
+        """Prepare the evidence-backed V2 manifest without changing V1 artifacts."""
+        from tools.source_analysis import SourceAnalysisService
+
+        return SourceAnalysisService(self.project_root, self.novel_id).prepare(
+            source_id,
+            content,
+            relative_name=relative_name,
+            focus=focus,
+            input_budget_tokens=input_budget_tokens,
+        )
+
+    def analyze_v2(
+        self,
+        source_id: str,
+        *,
+        analyzer: Any | None = None,
+        chunk_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisService
+
+        return SourceAnalysisService(self.project_root, self.novel_id).analyze(
+            source_id,
+            analyzer=analyzer,
+            chunk_ids=chunk_ids,
+        )
+
+    def status_v2(self, source_id: str) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisService
+
+        return SourceAnalysisService(self.project_root, self.novel_id).status(source_id)
+
+    def retry_v2(
+        self,
+        source_id: str,
+        chunk_id: str,
+        *,
+        analyzer: Any | None = None,
+    ) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisService
+
+        return SourceAnalysisService(self.project_root, self.novel_id).retry(
+            source_id,
+            chunk_id,
+            analyzer=analyzer,
+        )
+
+    def synthesize_v2(self, source_ids: list[str]) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisService
+
+        profile = SourceAnalysisService(self.project_root, self.novel_id).synthesize(
+            source_ids
+        )
+        return profile.model_dump(mode="json")
+
+    def profile_v2(self, profile_id: str) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisService
+
+        profile = SourceAnalysisService(
+            self.project_root, self.novel_id
+        ).require_profile(profile_id)
+        return profile.model_dump(mode="json")
+
+    def preview_promotion_v2(self, profile_id: str, target: str) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisService
+
+        preview = SourceAnalysisService(
+            self.project_root, self.novel_id
+        ).preview_promotion(profile_id, target)
+        return preview.model_dump(mode="json")
+
+    def apply_promotion_v2(self, preview_id: str, *, confirm: bool) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisService
+
+        return SourceAnalysisService(self.project_root, self.novel_id).apply_promotion(
+            preview_id, confirm=confirm
+        )
+
     def extract(
         self,
         source_id: str,

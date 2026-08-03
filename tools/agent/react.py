@@ -286,6 +286,21 @@ class ReActAgent:
                             tool_call_id=tc_id,
                         )
                     )
+                    if not failure_reason:
+                        terminal_response = self._terminal_tool_response(result)
+                        if terminal_response:
+                            on_message and on_message(terminal_response)
+                            self._emit_activity(
+                                "response_ready",
+                                turn=turn + 1,
+                                content_chars=len(terminal_response),
+                                source_tool=tc_name,
+                            )
+                            self._emit_activity(
+                                "run_completed",
+                                content_chars=len(terminal_response),
+                            )
+                            return terminal_response
                 except Exception as e:
                     failure_reason = str(e)
                     error_result = json.dumps({"error": failure_reason})
@@ -396,6 +411,20 @@ class ReActAgent:
             or "工具返回失败"
         )
         return str(reason)
+
+    @staticmethod
+    def _terminal_tool_response(result: str) -> str:
+        try:
+            payload = json.loads(result)
+        except (TypeError, json.JSONDecodeError):
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        if payload.get("ok") is False or payload.get("error"):
+            return ""
+        if payload.get("next_action") != "request_outline_confirmation":
+            return ""
+        return str(payload.get("message") or "").strip()
 
     def _coerce_messages(self, messages: Sequence[Any] | None) -> list[Any]:
         from ..llm import Message
@@ -522,6 +551,270 @@ OPENWRITE_TOOLS = [
             "properties": {
                 "chapter_id": {"type": "string", "description": "章节 ID"},
                 "window_size": {"type": "integer", "description": "大纲窗口大小"},
+            },
+            "required": [],
+        },
+    ),
+    ToolDefinition(
+        name="inspect_agent_context",
+        description=(
+            "只读检查 canonical/Writer/Reviewer/Dante/Goethe 的首轮模型输入、"
+            "字段完整性、来源 revision、工具表和压缩警告。默认仅返回消息元数据；"
+            "需要审阅原文时设置 include_messages=true。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "chapter_id": {"type": "string", "description": "章节 ID，默认 next"},
+                "agent": {
+                    "type": "string",
+                    "enum": ["canonical", "writer", "reviewer", "dante", "goethe"],
+                    "description": "待检查 Agent，默认 writer",
+                },
+                "instruction": {"type": "string", "description": "Dante/Goethe 用户指令"},
+                "guidance": {"type": "string", "description": "Writer 临时写作要求"},
+                "target_words": {"type": "integer", "description": "Writer 临时目标字数"},
+                "include_messages": {
+                    "type": "boolean",
+                    "description": "是否返回完整首轮消息正文，默认 false",
+                },
+                "include_payload": {
+                    "type": "boolean",
+                    "description": "是否返回完整 Agent payload，默认 false",
+                },
+            },
+            "required": [],
+        },
+    ),
+    ToolDefinition(
+        name="list_chapter_runs",
+        description=(
+            "只读列出章节运行清单，包含目标字数、模型路由、上下文/草稿/审稿 revision、"
+            "阶段状态、usage 和错误码。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "chapter_id": {"type": "string", "description": "可选章节 ID"},
+                "statuses": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["running", "written", "reviewed", "failed"],
+                    },
+                    "description": "可选状态筛选",
+                },
+                "limit": {"type": "integer", "description": "返回数量，默认 20，最高 100"},
+            },
+            "required": [],
+        },
+    ),
+    ToolDefinition(
+        name="get_chapter_run_v2",
+        description=(
+            "读取 Chapter Run V2 的八阶段状态、revision、artifact、usage 和干预；"
+            "action=list 时列出，action=get 时按 run_id 查看。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "get"]},
+                "run_id": {"type": "string"},
+                "chapter_id": {"type": "string"},
+                "statuses": {"type": "array", "items": {"type": "string"}},
+                "limit": {"type": "integer"},
+            },
+        },
+    ),
+    ToolDefinition(
+        name="record_chapter_intervention",
+        description="在指定 run 记录创作方向干预；必须携带刚读取的 revision，不直接应用。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string"},
+                "revision": {"type": "string"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["project", "arc", "chapter", "asset"],
+                },
+                "risk": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "blocker"],
+                },
+                "request": {"type": "string"},
+                "affected_items": {"type": "array", "items": {"type": "string"}},
+                "rewrite_required": {"type": "boolean"},
+            },
+            "required": ["run_id", "revision", "request"],
+        },
+        required=["run_id", "revision", "request"],
+    ),
+    ToolDefinition(
+        name="update_chapter_intervention",
+        description=(
+            "推进干预状态并检查 run revision；confirmed/applied 必须在用户明确确认后"
+            "设置 confirm=true。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string"},
+                "revision": {"type": "string"},
+                "intervention_id": {"type": "string"},
+                "state": {"type": "string"},
+                "facts_revision": {"type": "string"},
+                "impact": {"type": "array", "items": {"type": "string"}},
+                "proposal": {"type": "string"},
+                "confirm": {"type": "boolean"},
+            },
+            "required": ["run_id", "revision", "intervention_id", "state"],
+        },
+        required=["run_id", "revision", "intervention_id", "state"],
+    ),
+    ToolDefinition(
+        name="cancel_chapter_run_v2",
+        description="取消指定 Chapter Run V2；必须携带刚读取的 revision。",
+        parameters={
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string"},
+                "revision": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["run_id", "revision"],
+        },
+        required=["run_id", "revision"],
+    ),
+    ToolDefinition(
+        name="diagnose_runtime",
+        description=(
+            "只读汇总任务、章节运行、审稿、大纲、伏笔、上下文、时间线与 Skill 诊断；"
+            "不返回完整正文或本地绝对路径。"
+        ),
+        parameters={"type": "object", "properties": {}},
+    ),
+    ToolDefinition(
+        name="manage_rolling_plan",
+        description=(
+            "创建或读取 revision 绑定的滚动规划候选；stage 只暂存 Goethe 的完整 Markdown "
+            "大纲提案，后续仍需独立确认才会更新 canonical 大纲。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "create", "get", "stage"],
+                },
+                "candidate_id": {"type": "string"},
+                "revision": {"type": "string"},
+                "current_arc": {"type": "string"},
+                "window_size": {"type": "integer"},
+                "proposal": {"type": "string"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["action"],
+        },
+        required=["action"],
+    ),
+    ToolDefinition(
+        name="manage_manuscript_versions",
+        description=(
+            "列出、读取或创建正文 checkpoint；restore 会先保存当前正文，且必须携带"
+            "当前 revision、confirm=true 和用户当轮的明确恢复指令。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "get", "checkpoint", "restore"],
+                },
+                "chapter_id": {"type": "string"},
+                "version_id": {"type": "string"},
+                "revision": {"type": "string"},
+                "label": {"type": "string"},
+                "confirm": {"type": "boolean"},
+            },
+            "required": ["action", "chapter_id"],
+        },
+        required=["action", "chapter_id"],
+    ),
+    ToolDefinition(
+        name="manage_annotations",
+        description=(
+            "列出、创建或完成正文批注。创建时必须携带来源 revision、原文 quote 与"
+            "Python 字符位置；正文变化后锚点会明确标为 relocated 或 detached。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "create", "resolve"]},
+                "chapter_id": {"type": "string"},
+                "revision": {"type": "string"},
+                "quote": {"type": "string"},
+                "start_hint": {"type": "integer"},
+                "end_hint": {"type": "integer"},
+                "note": {"type": "string"},
+                "annotation_id": {"type": "string"},
+            },
+            "required": ["action", "chapter_id"],
+        },
+        required=["action", "chapter_id"],
+    ),
+    ToolDefinition(
+        name="get_runtime_state",
+        description=(
+            "只读获取完整结构化 runtime state、状态 revision、来源章节、开放线索、"
+            "人物/资源/关系/时间线和 proposed entities；旧 Markdown 仅返回清单与哈希。"
+        ),
+        parameters={"type": "object", "properties": {}},
+    ),
+    ToolDefinition(
+        name="get_chapter_review",
+        description=(
+            "只读获取指定章节最近审稿结果、问题详情、分数、来源 revision，"
+            "并判断正文变化后审稿是否 stale。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "chapter_id": {"type": "string", "description": "章节 ID"},
+            },
+            "required": ["chapter_id"],
+        },
+        required=["chapter_id"],
+    ),
+    ToolDefinition(
+        name="get_task_activity",
+        description=(
+            "只读列出持久化任务摘要；提供 task_id 时返回该任务快照和追加式事件。"
+            "凭据字段始终脱敏。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "可选任务 ID"},
+                "statuses": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "列出任务时的可选状态筛选",
+                },
+                "limit": {"type": "integer", "description": "任务或事件数量，默认 20"},
+            },
+            "required": [],
+        },
+    ),
+    ToolDefinition(
+        name="get_goethe_handoff",
+        description=(
+            "只读获取最新 Goethe -> Dante 交接 manifest、Markdown、文件路径和 revision。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "max_chars": {"type": "integer", "description": "Markdown 最大字符数"},
             },
             "required": [],
         },
@@ -993,6 +1286,12 @@ OPENWRITE_SYSTEM_PROMPT = """你是 OpenWrite 小说创作引擎的 Agent。
 | review_chapter | 审查章节 |
 | get_status | 查看项目状态 |
 | get_context | 获取写作上下文 |
+| inspect_agent_context | 审计指定 Agent 的首轮模型输入 |
+| list_chapter_runs | 查看章节运行清单与阶段 usage |
+| get_runtime_state | 查看规范结构化运行态 |
+| get_chapter_review | 查看审稿结果并判断是否过期 |
+| get_task_activity | 查看任务快照和事件 |
+| get_goethe_handoff | 查看 Goethe 到 Dante 的交接产物 |
 | search_project | 搜索项目资产 |
 | read_project_document | 读取小说资产文档 |
 | edit_project_document | 预览或确认修改小说资产文档 |

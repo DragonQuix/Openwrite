@@ -73,18 +73,33 @@ class ChapterRunStore:
     def latest_for_chapter(
         self, chapter_id: str, *, statuses: set[str] | None = None
     ) -> ChapterRunManifest | None:
+        records = self.list(chapter_id=chapter_id, statuses=statuses, limit=1)
+        return records[0] if records else None
+
+    def list(
+        self,
+        *,
+        chapter_id: str = "",
+        statuses: set[str] | None = None,
+        limit: int = 20,
+    ) -> list[ChapterRunManifest]:
+        allowed_statuses = {"running", "written", "reviewed", "failed"}
+        if statuses is not None and not statuses.issubset(allowed_statuses):
+            raise ValueError("章节运行状态筛选无效")
+        clean_limit = max(1, min(100, int(limit)))
         if not self.root.is_dir():
-            return None
+            return []
         records: list[ChapterRunManifest] = []
         for path in self.root.glob("run_*.json"):
             record = self.load(path.stem)
-            if (
-                record is not None
-                and record.chapter_id == chapter_id
-                and (statuses is None or record.status in statuses)
-            ):
-                records.append(record)
-        return max(records, key=lambda item: item.created_at) if records else None
+            if record is None:
+                continue
+            if chapter_id and record.chapter_id != chapter_id:
+                continue
+            if statuses is not None and record.status not in statuses:
+                continue
+            records.append(record)
+        return sorted(records, key=lambda item: item.created_at, reverse=True)[:clean_limit]
 
     def complete_write(
         self,

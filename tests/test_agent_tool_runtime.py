@@ -197,9 +197,161 @@ def test_dante_direct_toolkit_exposes_only_light_tools():
         "edit_world_relations",
         "get_outline_structure",
         "edit_outline_structure",
+        "inspect_agent_context",
+        "list_chapter_runs",
+        "get_chapter_run_v2",
+        "record_chapter_intervention",
+        "update_chapter_intervention",
+        "cancel_chapter_run_v2",
+        "diagnose_runtime",
+        "manage_rolling_plan",
+        "manage_manuscript_versions",
+        "manage_annotations",
+        "get_runtime_state",
+        "get_chapter_review",
+        "get_task_activity",
+        "get_goethe_handoff",
     }
     assert "write_chapter" not in DANTE_DIRECT_TOOLKIT
     assert "review_chapter" not in DANTE_DIRECT_TOOLKIT
+
+
+def test_shared_agent_audit_tools_are_read_only_and_redacted(tmp_path: Path):
+    from tools.chapter_pipeline import save_chapter
+    from tools.chapter_run_store import ChapterRunStore
+    from tools.init_project import init_project
+    from tools.review_store import ReviewStore
+    from tools.story_planning import StoryPlanningStore
+    from tools.task_store import TaskStore
+    from tools.truth_manager import TruthFiles, TruthFilesManager
+
+    init_project(tmp_path, "demo", "审计工具", template="demo_short")
+    truth_manager = TruthFilesManager(tmp_path, "demo")
+    truth_manager.save_truth_files(
+        TruthFiles(
+            current_state="旧钟仍停在午夜。",
+            ledger="铜钥匙：主角持有。",
+            relationships="主角 -> 守钟人：怀疑。",
+        )
+    )
+    state = truth_manager.load_runtime_state()
+    truth_manager.apply_runtime_delta(
+        {
+            "chapter_id": "ch_001",
+            "source_revision": state.revision,
+            "operations": [
+                {"op": "append", "collection": "current_state", "value": "钟声重新响起。"}
+            ],
+        }
+    )
+    save_chapter(tmp_path, "demo", "ch_001", "钟差", "雨落在钟楼上。")
+
+    run_store = ChapterRunStore(tmp_path, "demo")
+    run = run_store.create(
+        "ch_001",
+        requested_target_words=800,
+        outline_target_words=1200,
+        effective_target_words=800,
+        provider="openai",
+        model="flash",
+        context_payload={"chapter_id": "ch_001"},
+        baseline_state_revision=0,
+    )
+    run_store.complete_write(run, draft_content="雨落在钟楼上。", usage={"total_tokens": 12})
+    ReviewStore(tmp_path, "demo").save(
+        "ch_001",
+        {"passed": True, "score": 95, "issue_details": []},
+    )
+    task_store = TaskStore(tmp_path, "demo")
+    task = task_store.create(
+        "write",
+        {"api_key": "sk-temporary-audit-secret", "chapter_id": "ch_001"},
+        chapter_id="ch_001",
+    )
+    StoryPlanningStore(tmp_path, "demo").save_goethe_handoff(
+        {"ready": True, "summary": "资产齐备，可以开始第一章。"}
+    )
+
+    tools = build_tool_executors(tmp_path)
+    context = tools["inspect_agent_context"](
+        {"chapter_id": "ch_001", "agent": "writer"}
+    )
+    assert context["ok"] is True
+    assert context["messages"]
+    assert all("content" not in message for message in context["messages"])
+    assert "agent_payload" not in context
+
+    runs = tools["list_chapter_runs"]({"chapter_id": "ch_001"})
+    assert runs["runs"][0]["run_id"] == run.run_id
+    assert runs["runs"][0]["stages"]["write"]["usage"]["total_tokens"] == 12
+
+    runtime = tools["get_runtime_state"]({})["runtime_state"]
+    assert runtime["revision"] == 1
+    assert "legacy_documents" not in runtime
+    assert runtime["legacy_document_manifest"]["current_state"]["characters"] > 0
+
+    review = tools["get_chapter_review"]({"chapter_id": "ch_001"})
+    assert review["ok"] is True
+    assert review["stale"] is False
+    assert review["review"]["score"] == 95
+
+    task_activity = tools["get_task_activity"]({"task_id": task["task_id"]})
+    assert task_activity["ok"] is True
+    assert task_activity["events"][0]["event"] == "task_created"
+    assert "temporary-audit-secret" not in str(task_activity)
+
+    handoff = tools["get_goethe_handoff"]({})
+    assert handoff["ok"] is True
+    assert handoff["manifest"]["ready"] is True
+    assert "资产齐备" in handoff["markdown"]
+
+
+def test_chapter_review_audit_marks_changed_manuscript_stale(tmp_path: Path):
+    from tools.chapter_pipeline import save_chapter
+    from tools.init_project import init_project
+    from tools.review_store import ReviewStore
+
+    init_project(tmp_path, "demo", "过期审稿", template="demo_short")
+    save_chapter(tmp_path, "demo", "ch_001", "旧稿", "第一版正文。")
+    ReviewStore(tmp_path, "demo").save(
+        "ch_001", {"passed": True, "score": 100, "issue_details": []}
+    )
+    save_chapter(tmp_path, "demo", "ch_001", "新稿", "第二版正文已经变化。")
+
+    result = build_tool_executors(tmp_path)["get_chapter_review"](
+        {"chapter_id": "ch_001"}
+    )
+
+    assert result["ok"] is True
+    assert result["stale"] is True
+
+
+def test_runtime_state_audit_does_not_migrate_or_write_legacy_project(tmp_path: Path):
+    from tools.init_project import init_project
+    from tools.truth_manager import TruthFiles, TruthFilesManager
+
+    init_project(tmp_path, "demo", "只读运行态", template="demo_short")
+    manager = TruthFilesManager(tmp_path, "demo")
+    manager.save_truth_files(TruthFiles(current_state="只存在于旧 Markdown。"))
+    runtime_path = manager.world_dir / "runtime_state.json"
+    assert not runtime_path.exists()
+
+    before = {
+        path.relative_to(tmp_path).as_posix()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    result = build_tool_executors(tmp_path)["get_runtime_state"]({})
+    after = {
+        path.relative_to(tmp_path).as_posix()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    assert result["ok"] is True
+    assert result["runtime_state"]["revision"] == 0
+    assert before == after
+    assert not runtime_path.exists()
 
 
 def test_goethe_and_dante_can_persist_persona_documents(tmp_path: Path):

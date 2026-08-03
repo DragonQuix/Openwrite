@@ -185,6 +185,60 @@ def test_react_agent_action_tool_call_uses_injected_context_messages():
     assert any(message.role == "tool" for message in client.calls[1]["messages"])
 
 
+def test_react_agent_stops_when_outline_draft_waits_for_confirmation():
+    client = RecordingClient(
+        [
+            _tool_response(
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "name": "generate_outline_draft",
+                        "arguments": '{"request_text": "生成大纲"}',
+                    }
+                ]
+            ),
+            _tool_response("不应该继续调用模型"),
+        ]
+    )
+    events: list[dict] = []
+    agent = ReActAgent(
+        client=client,
+        model="demo",
+        tools=[
+            ToolDefinition(
+                name="generate_outline_draft",
+                description="生成大纲草案",
+                parameters={"type": "object", "properties": {}},
+            )
+        ],
+        system_prompt="系统提示",
+        activity_callback=events.append,
+    )
+    agent._register_tool_executors(
+        {
+            "generate_outline_draft": lambda args: {
+                "ok": True,
+                "message": "大纲草案已生成。请确认可写范围。",
+                "next_action": "request_outline_confirmation",
+            }
+        }
+    )
+
+    result = asyncio.run(agent.run("确认汇总并生成大纲"))
+
+    assert result == "大纲草案已生成。请确认可写范围。"
+    assert len(client.calls) == 1
+    assert [event["event"] for event in events] == [
+        "run_started",
+        "model_started",
+        "model_completed",
+        "tool_started",
+        "tool_completed",
+        "response_ready",
+        "run_completed",
+    ]
+
+
 def test_react_agent_does_not_return_intermediate_tool_call_content():
     client = RecordingClient(
         [

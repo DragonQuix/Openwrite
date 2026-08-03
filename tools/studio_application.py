@@ -50,6 +50,7 @@ from tools.project_registry import (
     write_content_project_metadata,
 )
 from tools.project_search import ProjectSearchIndex
+from tools.research_service import ResearchService, ResearchServiceError
 from tools.review_store import normalize_review_issues
 from tools.revision_service import RevisionError, RevisionService
 from tools.structured_assets import StructuredAssetError, StructuredAssetService
@@ -130,6 +131,7 @@ class StudioApplication:
         self._task_runner: PersistentTaskRunner | None = None
         self._structured_asset_service: StructuredAssetService | None = None
         self._asset_package_service: AssetPackageService | None = None
+        self._research_service: ResearchService | None = None
         self._activate_project(self.project_root)
 
     def _activate_project(self, project_root: Path) -> None:
@@ -160,6 +162,9 @@ class StudioApplication:
             AssetPackageService(self.project_root, self.novel_id)
             if self.initialized
             else None
+        )
+        self._research_service = (
+            ResearchService(self.novel_root) if self.initialized else None
         )
         if self.initialized and self._project_registry is not None:
             self._project_registry.remember(self.project_root)
@@ -678,6 +683,7 @@ class StudioApplication:
                 "source_operation": self._task_source_operation,
                 "manuscript_import": self._task_import_manuscript,
                 "continuous_write": self._task_continuous_write,
+                "research": self._task_research,
             },
         )
 
@@ -705,6 +711,12 @@ class StudioApplication:
             )
         return self._asset_package_service
 
+    def _research(self) -> ResearchService:
+        self.require_project()
+        if self._research_service is None:
+            self._research_service = ResearchService(self.novel_root)
+        return self._research_service
+
     @staticmethod
     def _translate_service_error(exc: NovelServiceError) -> StudioError:
         status = {
@@ -713,6 +725,15 @@ class StudioApplication:
             "NOT_FOUND": HTTPStatus.NOT_FOUND,
             "INVALID_PROJECT": HTTPStatus.PRECONDITION_FAILED,
             "INVALID_INPUT": HTTPStatus.BAD_REQUEST,
+            "INVALID_STATE": HTTPStatus.CONFLICT,
+            "INVALID_EVIDENCE": HTTPStatus.UNPROCESSABLE_ENTITY,
+            "INVALID_MODEL_OUTPUT": HTTPStatus.BAD_GATEWAY,
+            "SOURCE_INCOMPLETE": HTTPStatus.CONFLICT,
+            "SOURCE_DELETED": HTTPStatus.GONE,
+            "SOURCE_CHANGED": HTTPStatus.CONFLICT,
+            "CONFIRMATION_REQUIRED": HTTPStatus.PRECONDITION_REQUIRED,
+            "DOCUMENT_CONFLICT": HTTPStatus.CONFLICT,
+            "PATH_OUT_OF_BOUNDS": HTTPStatus.BAD_REQUEST,
         }.get(exc.code, HTTPStatus.BAD_GATEWAY)
         return StudioError(str(exc), status)
 
@@ -721,14 +742,46 @@ class StudioApplication:
         source_packs = []
         if sources_root.exists():
             for path in sorted(sources_root.iterdir()):
-                if not path.is_dir():
+                if not path.is_dir() or path.name.startswith("_"):
                     continue
+                analysis_manifest = path / "analysis_v2" / "manifest.json"
+                analysis: dict[str, Any] = {}
+                if analysis_manifest.is_file():
+                    try:
+                        loaded = json.loads(analysis_manifest.read_text(encoding="utf-8"))
+                        if isinstance(loaded, dict):
+                            chunks = loaded.get("chunks") or []
+                            analysis = {
+                                "status": str(loaded.get("status") or ""),
+                                "change_status": str(
+                                    loaded.get("change_status") or ""
+                                ),
+                                "source_sha256": str(
+                                    loaded.get("source_sha256") or ""
+                                ),
+                                "total_chunks": len(chunks),
+                                "completed_chunks": sum(
+                                    1
+                                    for chunk in chunks
+                                    if isinstance(chunk, dict)
+                                    and chunk.get("status") == "completed"
+                                ),
+                                "failed_chunks": sum(
+                                    1
+                                    for chunk in chunks
+                                    if isinstance(chunk, dict)
+                                    and chunk.get("status") == "failed"
+                                ),
+                            }
+                    except (OSError, json.JSONDecodeError):
+                        analysis = {"status": "invalid"}
                 source_packs.append(
                     {
                         "source_id": path.name,
                         "review_ready": (path / "source.md").exists(),
                         "style_ready": (path / "style").is_dir(),
                         "setting_ready": (path / "setting_profile.md").exists(),
+                        "analysis_v2": analysis,
                     }
                 )
         sync = self._service().sync_status()
@@ -769,7 +822,159 @@ class StudioApplication:
             "source_packs": source_packs,
             "diagnostics": diagnostics,
             "git_checkpoint": GitCheckpointManager(self.project_root).status(),
+            "runtime_skills": self.runtime_skill_action({"action": "list"}),
+            "runtime_rules": self.rule_action({"action": "status"}),
+            "chapter_runs_v2": self.chapter_run_v2_action(
+                {"action": "list", "limit": 10}
+            ),
+            "runtime_diagnostics": self.runtime_diagnostics(),
+            "rolling_plans": self.rolling_plan_action({"action": "list", "limit": 10}),
         }
+
+    def chapter_run_v2_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from tools.chapter_run_v2 import (
+            ChapterRunV2Error,
+            chapter_run_v2_action,
+        )
+
+        self.require_project()
+        try:
+            return chapter_run_v2_action(
+                self.project_root,
+                self.novel_id,
+                payload,
+            )
+        except ChapterRunV2Error as exc:
+            if exc.code == "RUN_NOT_FOUND":
+                status = HTTPStatus.NOT_FOUND
+            elif exc.code in {
+                "REVISION_REQUIRED",
+                "CONFIRMATION_REQUIRED",
+            }:
+                status = HTTPStatus.PRECONDITION_REQUIRED
+            else:
+                status = HTTPStatus.CONFLICT
+            raise StudioError(str(exc), status, code=exc.code) from exc
+
+    def runtime_diagnostics(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        from tools.runtime_diagnostics import RuntimeDiagnosticsService
+
+        self.require_project()
+        options = payload if isinstance(payload, dict) else {}
+        return RuntimeDiagnosticsService(self.project_root, self.novel_id).run(
+            stuck_minutes=int(options.get("stuck_minutes") or 30)
+        ).model_dump(mode="json")
+
+    def rolling_plan_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from tools.rolling_planning import RollingPlanningError, rolling_plan_action
+
+        self.require_project()
+        try:
+            return rolling_plan_action(self.project_root, self.novel_id, payload)
+        except RollingPlanningError as exc:
+            status = (
+                HTTPStatus.NOT_FOUND
+                if exc.code == "CANDIDATE_NOT_FOUND"
+                else HTTPStatus.CONFLICT
+            )
+            raise StudioError(str(exc), status, code=exc.code) from exc
+
+    def manuscript_editing_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from tools.manuscript_editing import (
+            ManuscriptEditingError,
+            manuscript_editing_action,
+        )
+
+        self.require_project()
+        try:
+            return manuscript_editing_action(
+                self.project_root,
+                self.novel_id,
+                payload,
+            )
+        except ManuscriptEditingError as exc:
+            if exc.code in {
+                "CHAPTER_NOT_FOUND",
+                "VERSION_NOT_FOUND",
+                "ANNOTATION_NOT_FOUND",
+            }:
+                status = HTTPStatus.NOT_FOUND
+            elif exc.code == "CONFIRMATION_REQUIRED":
+                status = HTTPStatus.PRECONDITION_REQUIRED
+            else:
+                status = HTTPStatus.CONFLICT
+            raise StudioError(str(exc), status, code=exc.code) from exc
+
+    def runtime_skill_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from tools.agent.tool_runtime import build_tool_executors
+        from tools.agent.toolkits import (
+            DANTE_ACTION_TOOLKIT,
+            DANTE_DIRECT_TOOLKIT,
+            GOETHE_ACTION_TOOLKIT,
+            GOETHE_DIRECT_TOOLKIT,
+            ORCHESTRATOR_TOOLKIT,
+            WRITING_TOOLKIT,
+        )
+        from tools.runtime_skills import RuntimeSkillResolver
+
+        self.require_project()
+        resolver = RuntimeSkillResolver(self.project_root)
+        action = str(payload.get("action") or "list")
+        if action == "list":
+            return resolver.list_skills()
+        if action == "diagnose":
+            return resolver.diagnose()
+        if action != "resolve":
+            raise StudioError("未知 Runtime Skill 操作", HTTPStatus.BAD_REQUEST)
+        agent = str(payload.get("agent") or "studio")
+        baselines = {
+            "dante": set(DANTE_DIRECT_TOOLKIT) | set(DANTE_ACTION_TOOLKIT),
+            "goethe": set(GOETHE_DIRECT_TOOLKIT) | set(GOETHE_ACTION_TOOLKIT),
+            "writer": set(WRITING_TOOLKIT),
+            "reviewer": set(ORCHESTRATOR_TOOLKIT) | {"review_chapter"},
+        }
+        baseline = baselines.get(agent, set(build_tool_executors(self.project_root)))
+        explicit = payload.get("skills")
+        resolution = resolver.resolve(
+            agent=agent,
+            task=str(payload.get("task") or ""),
+            intent=str(payload.get("intent") or ""),
+            document_type=str(payload.get("document_type") or ""),
+            explicit_skills=(
+                [str(item) for item in explicit]
+                if isinstance(explicit, list)
+                else None
+            ),
+            base_tools=baseline,
+        )
+        return resolution.model_dump(mode="json")
+
+    def rule_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from tools.runtime_skills import RuleCompiler
+        from tools.runtime_skills.resolver import RuntimeSkillError
+
+        self.require_project()
+        compiler = RuleCompiler(self.project_root)
+        action = str(payload.get("action") or "status")
+        try:
+            if action == "status":
+                active = compiler.active()
+                return active.model_dump(mode="json") if active else {"active": False}
+            if action == "preview":
+                return compiler.preview().model_dump(mode="json")
+            if action == "apply":
+                return compiler.apply(
+                    str(payload.get("preview_id") or ""),
+                    confirm=bool(payload.get("confirm")),
+                ).model_dump(mode="json")
+            raise StudioError("未知规则操作", HTTPStatus.BAD_REQUEST)
+        except RuntimeSkillError as exc:
+            status = (
+                HTTPStatus.PRECONDITION_REQUIRED
+                if exc.code == "CONFIRMATION_REQUIRED"
+                else HTTPStatus.CONFLICT
+            )
+            raise StudioError(str(exc), status) from exc
 
     def read_document(self, relative_path: str) -> dict[str, Any]:
         path = self._resolve_document(relative_path, write=False)
@@ -928,6 +1133,7 @@ class StudioApplication:
             profile = self._model_profile_store.save_profile(
                 payload,
                 api_key=str(payload.get("api_key") or ""),
+                embedding_api_key=str(payload.get("embedding_api_key") or ""),
                 remember_api_key=bool(payload.get("remember_api_key", True)),
             )
         except (ModelProfileError, OSError) as exc:
@@ -1344,7 +1550,16 @@ class StudioApplication:
     def search_project(self, query: str, scope: str = "all", limit: int = 20) -> dict[str, Any]:
         self.require_project()
         try:
-            return ProjectSearchIndex(self.novel_root).search(query, scope=scope, limit=limit)
+            profile = self._operation_profile(
+                "search",
+                injected_executor=ProjectSearchIndex,
+            )
+            with self._model_context(profile):
+                return ProjectSearchIndex(self.novel_root).search(
+                    query,
+                    scope=scope,
+                    limit=limit,
+                )
         except (OSError, ValueError) as exc:
             raise StudioError(str(exc)) from exc
 
@@ -1806,6 +2021,56 @@ class StudioApplication:
                             source_file=source,
                             focus=str(payload.get("focus") or "style"),
                         )
+            elif action == "analyze_v2":
+                profile = self._operation_profile("source_extract")
+                text = str(payload.get("content") or "")
+                if not text.strip():
+                    raise StudioError("来源文本不能为空")
+                raw_focus = payload.get("focus")
+                focus = (
+                    [str(item) for item in raw_focus]
+                    if isinstance(raw_focus, list)
+                    else None
+                )
+                prepared = self._service().prepare_source_analysis_v2(
+                    source_id=source_id,
+                    content=text,
+                    relative_name=str(payload.get("relative_name") or "source.txt"),
+                    focus=focus,
+                    input_budget_tokens=int(payload.get("input_budget_tokens") or 12000),
+                )
+                with self._model_context(profile):
+                    analyzed = self._service().analyze_source_v2(source_id)
+                result = {"prepared": prepared, "analysis": analyzed}
+            elif action == "status_v2":
+                result = self._service().source_status_v2(source_id)
+            elif action == "retry_v2":
+                profile = self._operation_profile("source_extract")
+                with self._model_context(profile):
+                    result = self._service().retry_source_v2(
+                        source_id, str(payload.get("chunk_id") or "")
+                    )
+            elif action == "synthesize_v2":
+                source_ids = payload.get("source_ids")
+                if not isinstance(source_ids, list):
+                    raise StudioError("请选择至少一个来源")
+                result = self._service().synthesize_sources_v2(
+                    [str(item) for item in source_ids]
+                )
+            elif action == "profile_v2":
+                result = self._service().source_profile_v2(
+                    str(payload.get("profile_id") or "")
+                )
+            elif action == "promotion_preview_v2":
+                result = self._service().preview_source_promotion_v2(
+                    str(payload.get("profile_id") or ""),
+                    str(payload.get("target") or ""),
+                )
+            elif action == "promote_v2":
+                result = self._service().apply_source_promotion_v2(
+                    str(payload.get("preview_id") or ""),
+                    confirm=bool(payload.get("confirm")),
+                )
             elif action == "review":
                 result = self._service().review_source(source_id)
             elif action == "promote":
@@ -1982,9 +2247,18 @@ class StudioApplication:
             raise self._translate_revision_error(exc) from exc
 
     def apply_revision(self, proposal_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        del payload
         try:
-            proposal = self._revisions().apply(proposal_id)
+            replacement_text = payload.get("replacement_text")
+            if replacement_text is not None and not isinstance(replacement_text, str):
+                raise RevisionError("替换文本格式无效", code="INVALID_INPUT")
+            selected_hunk_ids = payload.get("selected_hunk_ids")
+            if selected_hunk_ids is not None and not isinstance(selected_hunk_ids, list):
+                raise RevisionError("差异块选择格式无效", code="INVALID_INPUT")
+            proposal = self._revisions().apply(
+                proposal_id,
+                replacement_text=replacement_text,
+                selected_hunk_ids=selected_hunk_ids,
+            )
         except RevisionError as exc:
             raise self._translate_revision_error(exc) from exc
         self._debug_event(
@@ -2279,6 +2553,31 @@ class StudioApplication:
         context.checkpoint()
         return {"result": response.get("result", {})}
 
+    def _task_research(
+        self, payload: dict[str, Any], context: TaskContext
+    ) -> dict[str, Any]:
+        try:
+            return self._research().run(payload, context)
+        except ResearchServiceError as exc:
+            raise StudioError(str(exc), code=exc.code, recoverable=True) from exc
+
+    def research_surface(self) -> dict[str, Any]:
+        try:
+            return self._research().status()
+        except ResearchServiceError as exc:
+            raise StudioError(str(exc), code=exc.code, recoverable=True) from exc
+
+    def research_report(self, report_id: str) -> dict[str, Any]:
+        try:
+            return self._research().read_report(report_id)
+        except ResearchServiceError as exc:
+            status = (
+                HTTPStatus.NOT_FOUND
+                if exc.code == "REPORT_NOT_FOUND"
+                else HTTPStatus.BAD_REQUEST
+            )
+            raise StudioError(str(exc), status, code=exc.code) from exc
+
     def _task_import_manuscript(
         self, payload: dict[str, Any], context: TaskContext
     ) -> dict[str, Any]:
@@ -2310,12 +2609,60 @@ class StudioApplication:
             maximum=100,
             label="最低审稿分",
         )
+        max_tokens = self._bounded_int(
+            payload.get("max_tokens"),
+            default=0,
+            minimum=0,
+            maximum=10_000_000,
+            label="Token 上限",
+        )
+        max_failures = self._bounded_int(
+            payload.get("max_failures"),
+            default=2,
+            minimum=1,
+            maximum=10,
+            label="连续失败上限",
+        )
+        try:
+            max_cost_usd = max(0.0, min(10000.0, float(payload.get("max_cost_usd") or 0)))
+        except (TypeError, ValueError) as exc:
+            raise StudioError("成本上限必须是数字") from exc
         completed = list(payload.get("_already_completed") or [])
+        already_used = payload.get("_already_used")
+        usage = dict(already_used) if isinstance(already_used, dict) else {}
+        total_tokens = int(usage.get("total_tokens") or 0)
+        total_cost_usd = float(usage.get("cost_usd") or 0)
+        consecutive_failures = int(usage.get("consecutive_failures") or 0)
         remaining = max(0, max_chapters - len(completed))
         stop_reason = "max_chapters_reached"
         for _ in range(remaining):
             context.phase("reading", "读取下一章建议")
             context.checkpoint()
+            from tools.chapter_run_v2 import ChapterRunV2Store
+
+            latest_runs = ChapterRunV2Store(
+                self.project_root, self.novel_id
+            ).list(limit=20)
+            pending_intervention = next(
+                (
+                    item
+                    for run in latest_runs
+                    for item in run.interventions
+                    if item.state
+                    in {
+                        "recorded",
+                        "facts_read",
+                        "classified",
+                        "proposed",
+                        "awaiting_confirmation",
+                        "confirmed",
+                    }
+                ),
+                None,
+            )
+            if pending_intervention is not None:
+                stop_reason = "pending_intervention"
+                break
             outline = self.outline_structure()
             recommendation = outline.get("recommendation")
             if not isinstance(recommendation, dict) or recommendation.get("status") == "drafted":
@@ -2332,11 +2679,30 @@ class StudioApplication:
                 ),
                 "temperature": float(payload.get("temperature") or 0.7),
             }
-            write_result = self._task_write_chapter(write_payload, context)
-            context.checkpoint()
-            review_result = self._task_review_chapter(
-                {"chapter_id": chapter_id}, context
-            )
+            try:
+                write_result = self._task_write_chapter(write_payload, context)
+                context.checkpoint()
+                review_result = self._task_review_chapter(
+                    {"chapter_id": chapter_id}, context
+                )
+                consecutive_failures = 0
+            except Exception:
+                consecutive_failures += 1
+                usage["consecutive_failures"] = consecutive_failures
+                context.persist_progress(
+                    {
+                        "completed_chapters": completed,
+                        "usage": usage,
+                        "stop_reason": "chapter_failure",
+                    }
+                )
+                if consecutive_failures >= max_failures:
+                    return {
+                        "completed_chapters": completed,
+                        "usage": usage,
+                        "stop_reason": "max_failures_reached",
+                    }
+                raise
             completed.append(
                 {
                     "chapter_id": chapter_id,
@@ -2344,6 +2710,32 @@ class StudioApplication:
                     "review": review_result,
                 }
             )
+            write_usage = write_result.get("usage")
+            write_usage = write_usage if isinstance(write_usage, dict) else {}
+            total_tokens += int(
+                write_usage.get("total_tokens")
+                or write_usage.get("output_tokens")
+                or 0
+            )
+            total_cost_usd += float(write_usage.get("cost_usd") or 0)
+            usage = {
+                "total_tokens": total_tokens,
+                "cost_usd": total_cost_usd,
+                "consecutive_failures": consecutive_failures,
+            }
+            context.persist_progress(
+                {
+                    "completed_chapters": completed,
+                    "usage": usage,
+                    "stop_reason": "in_progress",
+                }
+            )
+            if max_tokens and total_tokens >= max_tokens:
+                stop_reason = "max_tokens_reached"
+                break
+            if max_cost_usd and total_cost_usd >= max_cost_usd:
+                stop_reason = "max_cost_reached"
+                break
             issue_details = review_result.get("issue_details") or []
             has_blocker = any(item.get("severity") == "blocker" for item in issue_details)
             has_continuity = any(
@@ -2370,7 +2762,11 @@ class StudioApplication:
                         "stop_reason": "confirmation_required",
                     }
                 )
-        return {"completed_chapters": completed, "stop_reason": stop_reason}
+        return {
+            "completed_chapters": completed,
+            "usage": usage,
+            "stop_reason": stop_reason,
+        }
 
     @staticmethod
     def _chapter_id_from_document(path: str) -> str:
@@ -2391,6 +2787,7 @@ class StudioApplication:
             "source_operation": "处理来源文本",
             "manuscript_import": "导入旧稿",
             "continuous_write": "受控连续写作",
+            "research": "深度研究",
         }
         return " · ".join(item for item in (labels.get(task_type, task_type), chapter) if item)
 
@@ -2557,8 +2954,8 @@ class StudioApplication:
         )
 
     def export_download(self, format_name: str) -> tuple[str, bytes, str]:
-        if format_name not in {"md", "txt"}:
-            raise StudioError("导出格式仅支持 md 或 txt")
+        if format_name not in {"md", "txt", "epub"}:
+            raise StudioError("导出格式仅支持 md、txt 或 epub")
         title = str(self.config.get("title") or self.novel_id)
         with tempfile.TemporaryDirectory(prefix="openwrite-export-") as temp_dir:
             output = Path(temp_dir) / f"{self.novel_id}.{format_name}"
@@ -2571,9 +2968,11 @@ class StudioApplication:
             except NovelServiceError as exc:
                 raise self._translate_service_error(exc) from exc
             content = output.read_bytes()
-        mime = (
-            "text/markdown; charset=utf-8" if format_name == "md" else "text/plain; charset=utf-8"
-        )
+        mime = {
+            "md": "text/markdown; charset=utf-8",
+            "txt": "text/plain; charset=utf-8",
+            "epub": "application/epub+zip",
+        }[format_name]
         return f"{self.novel_id}.{format_name}", content, mime
 
     def _load_config(self) -> dict[str, Any]:
@@ -2852,6 +3251,12 @@ class LegacyStudioRequestHandler(SimpleHTTPRequestHandler):
                 return
             if route == "/api/source":
                 self._json(self.app.source_action(payload))
+                return
+            if route == "/api/runtime-skills":
+                self._json(self.app.runtime_skill_action(payload))
+                return
+            if route == "/api/rules":
+                self._json(self.app.rule_action(payload))
                 return
             raise StudioError("接口不存在", HTTPStatus.NOT_FOUND)
         except StudioError as exc:

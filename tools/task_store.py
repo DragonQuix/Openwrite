@@ -261,6 +261,10 @@ class TaskStore:
         value = self._materialize(task.get("input"))
         return value if isinstance(value, dict) else {}
 
+    def materialize_result(self, task: dict[str, Any]) -> dict[str, Any]:
+        value = self._materialize(task.get("result"))
+        return value if isinstance(value, dict) else {}
+
     def snapshot_path(self, task_id: str) -> Path:
         return self.root / f"task_{self._task_id(task_id)}.yaml"
 

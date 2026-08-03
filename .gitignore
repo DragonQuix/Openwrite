@@ -94,6 +94,9 @@ data/novels/*/data/test_outputs/
 /reference/
 /live_test_artifacts/
 
+# Local planning documents (kept outside Git history)
+OpenWritePlans/
+
 # Personal conversation history and private novel settings
 *.私人设定.md
 *对话历史*.md

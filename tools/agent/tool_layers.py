@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from tools.runtime_skills import resolve_runtime
+
 from .tool_runtime import build_tool_executors
 
 
@@ -99,16 +101,41 @@ def build_dante_tool_layers(project_root: Path) -> dict[str, object]:
             else _missing_required("delegate_chapter_review", "chapter_id")
         ),
     }
+    baseline = set(DANTE_DIRECT_TOOLKIT) | set(DANTE_ACTION_TOOLKIT)
+    runtime_resolution = resolve_runtime(
+        project_root,
+        agent="dante",
+        task="chapter.write",
+        base_tools=baseline,
+    )
+    allowed = set(runtime_resolution.allowed_tools)
+    direct_toolkit = set(DANTE_DIRECT_TOOLKIT) & allowed
+    action_toolkit = set(DANTE_ACTION_TOOLKIT) & allowed
+    if allowed != baseline:
+        action_tool_executors = {
+            name: executor
+            for name, executor in action_tool_executors.items()
+            if name in action_toolkit
+        }
     return {
         "tool_executors": tool_executors,
-        "direct_toolkit": DANTE_DIRECT_TOOLKIT,
-        "action_toolkit": DANTE_ACTION_TOOLKIT,
+        "direct_toolkit": (
+            DANTE_DIRECT_TOOLKIT
+            if direct_toolkit == set(DANTE_DIRECT_TOOLKIT)
+            else direct_toolkit
+        ),
+        "action_toolkit": (
+            DANTE_ACTION_TOOLKIT
+            if action_toolkit == set(DANTE_ACTION_TOOLKIT)
+            else action_toolkit
+        ),
         "direct_tool_executors": {
             name: tool_executors[name]
-            for name in DANTE_DIRECT_TOOLKIT
+            for name in direct_toolkit
             if name in tool_executors
         },
         "action_tool_executors": action_tool_executors,
+        "runtime_resolution": runtime_resolution,
     }
 
 
@@ -130,6 +157,9 @@ def build_goethe_tool_layers(
     adapter = GoetheActionAdapter(runtime)
     action_tool_executors: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
         "summarize_ideation": lambda args: adapter.summarize_ideation(),
+        "confirm_ideation_summary": lambda args: adapter.confirm_ideation_summary(
+            _read_text_arg(args, "text", "confirmation", default="这个汇总可以")
+        ),
         "generate_foundation_draft": lambda args: (
             adapter.generate_foundation_draft(
                 _read_text_arg(args, "request_text", "text", "brief")
@@ -187,14 +217,39 @@ def build_goethe_tool_layers(
         ),
         "prepare_dante_handoff": lambda args: adapter.prepare_dante_handoff(),
     }
+    baseline = set(GOETHE_DIRECT_TOOLKIT) | set(GOETHE_ACTION_TOOLKIT)
+    runtime_resolution = resolve_runtime(
+        project_root,
+        agent="goethe",
+        task="planning",
+        base_tools=baseline,
+    )
+    allowed = set(runtime_resolution.allowed_tools)
+    direct_toolkit = set(GOETHE_DIRECT_TOOLKIT) & allowed
+    action_toolkit = set(GOETHE_ACTION_TOOLKIT) & allowed
+    if allowed != baseline:
+        action_tool_executors = {
+            name: executor
+            for name, executor in action_tool_executors.items()
+            if name in action_toolkit
+        }
     return {
         "tool_executors": tool_executors,
-        "direct_toolkit": GOETHE_DIRECT_TOOLKIT,
-        "action_toolkit": GOETHE_ACTION_TOOLKIT,
+        "direct_toolkit": (
+            GOETHE_DIRECT_TOOLKIT
+            if direct_toolkit == set(GOETHE_DIRECT_TOOLKIT)
+            else direct_toolkit
+        ),
+        "action_toolkit": (
+            GOETHE_ACTION_TOOLKIT
+            if action_toolkit == set(GOETHE_ACTION_TOOLKIT)
+            else action_toolkit
+        ),
         "direct_tool_executors": {
             name: tool_executors[name]
-            for name in GOETHE_DIRECT_TOOLKIT
+            for name in direct_toolkit
             if name in tool_executors
         },
         "action_tool_executors": action_tool_executors,
+        "runtime_resolution": runtime_resolution,
     }

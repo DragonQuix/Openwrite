@@ -19,14 +19,12 @@
 
 from __future__ import annotations
 
-import re
 import logging
+import re
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Optional, List
 
-from .base import BaseAgent, AgentContext
-from ..llm import Message, LLMResponse
+from ..llm import Message
+from .base import BaseAgent
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +72,7 @@ class WriterAgent(BaseAgent):
         context: dict,
         chapter_number: int,
         temperature: float = 0.7,
-        target_words: Optional[int] = None,
+        target_words: int | None = None,
     ) -> WritingResult:
         """写章节（两阶段）
 
@@ -424,7 +422,10 @@ state_delta:
     # 可用 collection：current_state / ledger / relationships / characters /
     # resources / relationship_states / open_threads / foreshadowing_refs /
     # timeline / proposed_entities
-    # set/append/remove/resolve/propose 必须符合对应字段结构。
+    # current_state / ledger / relationships 的 value 使用字符串。
+    # 其余集合（timeline 除外）的 value 必须是对象，示例：
+    # value: {title: "待确认线索", status: open, detail: "本章新增事实"}
+    # 不确定对象结构时，不要输出该 operation，只写下方 state_updates。
 state_updates:
   current_state: |
     [旧客户端兼容字段：只写本章新增事实，不要重写整份文件]
@@ -492,7 +493,8 @@ chapter_summary: |
 
         if context.get("chapter_summaries"):
             parts.append(
-                f"## hierarchy.yaml / compressed/*.md（摘要）\n{context['chapter_summaries'][:500]}\n"
+                "## hierarchy.yaml / compressed/*.md（摘要）\n"
+                f"{context['chapter_summaries'][:500]}\n"
             )
 
         if context.get("active_characters"):
@@ -531,6 +533,7 @@ chapter_summary: |
 
         payload = self._load_settlement_payload(content)
         if payload:
+            delta_error: Exception | None = None
             raw_delta = payload.get("state_delta")
             if isinstance(raw_delta, dict):
                 try:
@@ -545,12 +548,7 @@ chapter_summary: |
                     )
                     result["state_delta"] = parsed_delta.model_dump(mode="json")
                 except (ImportError, ValueError) as exc:
-                    from ..llm.response import ProviderResponseError
-
-                    raise ProviderResponseError(
-                        "MALFORMED_STRUCTURED_OUTPUT",
-                        "模型返回的状态增量不符合 runtime-delta-v1",
-                    ) from exc
+                    delta_error = exc
             updates = payload.get("state_updates", {})
             if isinstance(updates, dict):
                 aliases = {
@@ -575,6 +573,13 @@ chapter_summary: |
                     result["state_updates"],
                     chapter_id=f"ch_{int(context.get('chapter_number') or 0):03d}",
                 ).model_dump(mode="json")
+            elif delta_error is not None:
+                from ..llm.response import ProviderResponseError
+
+                raise ProviderResponseError(
+                    "MALFORMED_STRUCTURED_OUTPUT",
+                    "模型返回的状态增量不符合 runtime-delta-v1",
+                ) from delta_error
 
         if not result["chapter_summary"] and observations:
             compact = " ".join(

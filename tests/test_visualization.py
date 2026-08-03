@@ -347,10 +347,10 @@ class TestContextVisualization:
 
 
 class TestToolsRegistry:
-    """31工具注册验证测试"""
+    """Agent 工具注册验证测试。"""
 
     def test_all_tools_registered(self):
-        """验证所有31个工具都已注册"""
+        """验证 canonical 工具集合与运行时定义保持一致。"""
         print("\n" + "=" * 60)
         print("测试: 工具注册验证")
         print("=" * 60)
@@ -389,6 +389,20 @@ class TestToolsRegistry:
             "advance_workflow",
             "chunk_text",
             "compress_section",
+            "inspect_agent_context",
+            "list_chapter_runs",
+            "get_chapter_run_v2",
+            "record_chapter_intervention",
+            "update_chapter_intervention",
+            "cancel_chapter_run_v2",
+            "diagnose_runtime",
+            "manage_rolling_plan",
+            "manage_manuscript_versions",
+            "manage_annotations",
+            "get_runtime_state",
+            "get_chapter_review",
+            "get_task_activity",
+            "get_goethe_handoff",
         }
 
         registered_names = {t.name for t in OPENWRITE_TOOLS}
@@ -405,8 +419,7 @@ class TestToolsRegistry:
         if extra:
             print(f"\n⚠️ 额外工具: {extra}")
 
-        assert len(registered_names) == 31, f"Expected 31 tools, got {len(registered_names)}"
-        assert not missing, f"Missing tools: {missing}"
+        assert registered_names == EXPECTED_TOOLS
 
         print(f"\n✅ 所有 {len(registered_names)} 个工具已正确注册")
 

@@ -68,6 +68,13 @@ def main():
     _add_style_command(subparsers)
     _add_setting_command(subparsers)
     _add_source_command(subparsers)
+    _add_skill_command(subparsers)
+    _add_rule_command(subparsers)
+    _add_run_command(subparsers)
+    _add_diagnose_command(subparsers)
+    _add_planning_command(subparsers)
+    _add_version_command(subparsers)
+    _add_annotation_command(subparsers)
     _add_radar_command(subparsers)
     _add_status_command(subparsers)
     _add_focus_command(subparsers)
@@ -144,6 +151,20 @@ def _dispatch_in_project(args) -> int:
         return _cmd_setting(args)
     elif args.command == "source":
         return _cmd_source(args)
+    elif args.command == "skill":
+        return _cmd_skill(args)
+    elif args.command == "rule":
+        return _cmd_rule(args)
+    elif args.command == "run":
+        return _cmd_run(args)
+    elif args.command == "diagnose":
+        return _cmd_diagnose(args)
+    elif args.command == "planning":
+        return _cmd_planning(args)
+    elif args.command == "version":
+        return _cmd_version(args)
+    elif args.command == "annotation":
+        return _cmd_annotation(args)
     elif args.command == "radar":
         return _cmd_radar(args)
     elif args.command == "goethe":
@@ -231,6 +252,7 @@ def _add_write_command(subparsers):
     p.add_argument("chapter", nargs="?", default="next", help="章节 ID 或 'next'")
     p.add_argument("--no-review", action="store_true", help="跳过审查")
     p.add_argument("--temperature", "-T", type=float, default=0.7, help="写作温度")
+    p.add_argument("--resume-run", help="从指定 Chapter Run V2 的安全阶段恢复")
 
 
 def _add_multi_write_command(subparsers):
@@ -255,6 +277,22 @@ def _add_context_command(subparsers):
     p = subparsers.add_parser("context", help="构建上下文")
     p.add_argument("chapter", nargs="?", default="next", help="章节 ID")
     p.add_argument("--show", action="store_true", help="显示上下文内容")
+    p.add_argument(
+        "--agent",
+        choices=["canonical", "writer", "reviewer", "dante", "goethe"],
+        default="canonical",
+        help="检查指定 Agent 的实际首轮输入（默认 canonical）",
+    )
+    p.add_argument("--instruction", default="", help="Dante/Goethe 的首轮用户指令")
+    p.add_argument("--guidance", default="", help="Writer 的额外写作要求")
+    p.add_argument("--target-words", type=int, default=0, help="Writer 临时目标字数")
+    p.add_argument(
+        "--format",
+        choices=["markdown", "json"],
+        default="markdown",
+        help="检查结果格式",
+    )
+    p.add_argument("--output", "-o", help="将完整检查结果写入文件")
 
 
 def _add_assemble_command(subparsers):
@@ -308,6 +346,65 @@ def _add_source_command(subparsers):
     p = subparsers.add_parser("source", help="来源文本 source pack 管理")
     sub = p.add_subparsers(dest="source_action")
 
+    analyze = sub.add_parser("analyze", help="执行证据化 Source Analysis V2")
+    analyze.add_argument("source_id", help="来源 ID")
+    analyze.add_argument("--source", required=True, help="源文本路径")
+    analyze.add_argument(
+        "--focus",
+        nargs="+",
+        choices=[
+            "promise",
+            "structure",
+            "character",
+            "conflict",
+            "hook",
+            "pacing",
+            "voice",
+            "reader_drive",
+            "method",
+            "risk",
+        ],
+        default=None,
+        help="分析重点；默认覆盖全部维度",
+    )
+    analyze.add_argument(
+        "--input-budget",
+        type=int,
+        default=12000,
+        help="每个分块的保守输入 token 预算",
+    )
+    analyze.add_argument("--novel-id", default="current", help="小说 ID")
+
+    status = sub.add_parser("status", help="查看 Source Analysis V2 状态")
+    status.add_argument("source_id", help="来源 ID")
+    status.add_argument("--novel-id", default="current", help="小说 ID")
+
+    retry = sub.add_parser("retry", help="重试一个失败或过时分块")
+    retry.add_argument("source_id", help="来源 ID")
+    retry.add_argument("chunk_id", help="分块 ID")
+    retry.add_argument("--novel-id", default="current", help="小说 ID")
+
+    synthesize = sub.add_parser("synthesize", help="综合多个完整 V2 来源")
+    synthesize.add_argument("source_ids", nargs="+", help="来源 ID 列表")
+    synthesize.add_argument("--novel-id", default="current", help="小说 ID")
+
+    profile = sub.add_parser("profile", help="查看参考方法画像")
+    profile_sub = profile.add_subparsers(dest="source_profile_action")
+    profile_show = profile_sub.add_parser("show", help="显示画像 JSON")
+    profile_show.add_argument("profile_id", help="画像 ID")
+    profile_show.add_argument("--novel-id", default="current", help="小说 ID")
+
+    promotion_preview = sub.add_parser(
+        "promotion-preview", help="生成可确认的晋升 diff"
+    )
+    promotion_preview.add_argument("profile_id", help="画像 ID")
+    promotion_preview.add_argument(
+        "--target",
+        choices=["style", "rules", "inspiration", "setting_candidates"],
+        required=True,
+    )
+    promotion_preview.add_argument("--novel-id", default="current", help="小说 ID")
+
     review = sub.add_parser("review", help="审阅提取后的 source pack")
     review.add_argument("source_id", help="来源 ID")
     review.add_argument(
@@ -317,7 +414,7 @@ def _add_source_command(subparsers):
     )
 
     promote = sub.add_parser("promote", help="将 source pack 晋升到当前项目")
-    promote.add_argument("source_id", help="来源 ID")
+    promote.add_argument("identifier", help="V1 来源 ID 或 V2 promotion_ 预览 ID")
     promote.add_argument(
         "--novel-id",
         default="current",
@@ -329,6 +426,11 @@ def _add_source_command(subparsers):
         default="all",
         help="晋升目标",
     )
+    promote.add_argument(
+        "--confirm",
+        action="store_true",
+        help="确认并应用 V2 晋升预览；V1 晋升不使用此参数",
+    )
 
 
 def _add_radar_command(subparsers):
@@ -337,6 +439,127 @@ def _add_radar_command(subparsers):
     p.add_argument("--platform", "-p", nargs="+", help="平台列表（默认全部）")
     p.add_argument("--top", "-n", type=int, default=5, help="每个平台推荐数")
     p.add_argument("--output", "-o", help="保存结果到文件")
+
+
+def _add_skill_command(subparsers):
+    """Runtime Skill inspection and resolution."""
+    parser = subparsers.add_parser("skill", help="查看 Runtime Skill 与权限解析")
+    sub = parser.add_subparsers(dest="skill_action")
+    sub.add_parser("list", help="列出三层合并后的 Runtime Skill")
+    resolve = sub.add_parser("resolve", help="解析一次 Agent Runtime Skill")
+    resolve.add_argument(
+        "--agent",
+        choices=["dante", "goethe", "writer", "reviewer", "cli", "studio"],
+        required=True,
+    )
+    resolve.add_argument("--task", default="")
+    resolve.add_argument("--intent", default="")
+    resolve.add_argument("--document-type", default="")
+    resolve.add_argument("--skill", action="append", default=[])
+    sub.add_parser("diagnose", help="检查坏 manifest、依赖和冲突")
+
+
+def _add_rule_command(subparsers):
+    """Project Rule preview and confirmation."""
+    parser = subparsers.add_parser("rule", help="编译项目级声明式规则")
+    sub = parser.add_subparsers(dest="rule_action")
+    sub.add_parser("preview", help="生成规则 diff，不启用")
+    apply = sub.add_parser("apply", help="确认并启用规则预览")
+    apply.add_argument("preview_id")
+    apply.add_argument("--confirm", action="store_true")
+    sub.add_parser("status", help="查看当前已确认规则")
+
+
+def _add_run_command(subparsers):
+    """Chapter Run V2 inspection and intervention."""
+    parser = subparsers.add_parser("run", help="查看 Chapter Run V2 与管理干预")
+    sub = parser.add_subparsers(dest="run_action")
+    listing = sub.add_parser("list", help="列出 Chapter Run V2")
+    listing.add_argument("--chapter-id", default="")
+    listing.add_argument("--status", action="append", default=[])
+    listing.add_argument("--limit", type=int, default=20)
+    show = sub.add_parser("show", help="显示一个 Chapter Run V2")
+    show.add_argument("run_id")
+    intervene = sub.add_parser("intervene", help="记录一个创作干预")
+    intervene.add_argument("run_id")
+    intervene.add_argument("revision")
+    intervene.add_argument("request")
+    intervene.add_argument(
+        "--scope", choices=["project", "arc", "chapter", "asset"], default="chapter"
+    )
+    intervene.add_argument(
+        "--risk", choices=["low", "medium", "high", "blocker"], default="medium"
+    )
+    intervene.add_argument("--affected-item", action="append", default=[])
+    intervene.add_argument("--rewrite-required", action="store_true")
+    transition = sub.add_parser("transition", help="推进干预状态")
+    transition.add_argument("run_id")
+    transition.add_argument("revision")
+    transition.add_argument("intervention_id")
+    transition.add_argument("state")
+    transition.add_argument("--facts-revision")
+    transition.add_argument("--impact", action="append", default=[])
+    transition.add_argument("--proposal")
+    transition.add_argument("--confirm", action="store_true")
+    cancel = sub.add_parser("cancel", help="取消 Chapter Run V2")
+    cancel.add_argument("run_id")
+    cancel.add_argument("revision")
+    cancel.add_argument("--reason", default="user_cancelled")
+
+
+def _add_diagnose_command(subparsers):
+    parser = subparsers.add_parser("diagnose", help="运行统一项目诊断")
+    parser.add_argument("--stuck-minutes", type=int, default=30)
+
+
+def _add_planning_command(subparsers):
+    parser = subparsers.add_parser("planning", help="管理 revision 绑定的滚动规划候选")
+    sub = parser.add_subparsers(dest="planning_action")
+    listing = sub.add_parser("list")
+    listing.add_argument("--limit", type=int, default=20)
+    create = sub.add_parser("create")
+    create.add_argument("--current-arc", default="")
+    create.add_argument("--window-size", type=int, default=5)
+    show = sub.add_parser("show")
+    show.add_argument("candidate_id")
+    stage = sub.add_parser("stage")
+    stage.add_argument("candidate_id")
+    stage.add_argument("revision")
+    stage.add_argument("proposal_file")
+
+
+def _add_version_command(subparsers):
+    parser = subparsers.add_parser("version", help="管理正文 checkpoint")
+    sub = parser.add_subparsers(dest="version_action")
+    listing = sub.add_parser("list", help="列出一章的正文版本")
+    listing.add_argument("chapter_id")
+    show = sub.add_parser("show", help="读取一个正文版本")
+    show.add_argument("chapter_id")
+    show.add_argument("version_id")
+    checkpoint = sub.add_parser("checkpoint", help="手动创建正文 checkpoint")
+    checkpoint.add_argument("chapter_id")
+    checkpoint.add_argument("--label", default="")
+    restore = sub.add_parser("restore", help="恢复正文版本并自动备份当前正文")
+    restore.add_argument("chapter_id")
+    restore.add_argument("version_id")
+    restore.add_argument("revision", help="当前正文 sha256 revision")
+    restore.add_argument("--confirm", action="store_true")
+
+
+def _add_annotation_command(subparsers):
+    parser = subparsers.add_parser("annotation", help="管理 revision 绑定的正文批注")
+    sub = parser.add_subparsers(dest="annotation_action")
+    listing = sub.add_parser("list", help="列出一章的批注")
+    listing.add_argument("chapter_id")
+    create = sub.add_parser("create", help="为当前正文字符区间创建批注")
+    create.add_argument("chapter_id")
+    create.add_argument("revision", help="当前正文 sha256 revision")
+    create.add_argument("start", type=int)
+    create.add_argument("end", type=int)
+    create.add_argument("note")
+    resolve = sub.add_parser("resolve", help="将批注标记为完成")
+    resolve.add_argument("chapter_id")
+    resolve.add_argument("annotation_id")
 
 
 def _add_status_command(subparsers):
@@ -370,9 +593,14 @@ def _add_import_command(subparsers):
 def _add_export_command(subparsers):
     """export 命令 - 导出整书。"""
     p = subparsers.add_parser("export", help="按章节顺序导出整书")
-    p.add_argument("--format", choices=["md", "txt"], default="md", help="导出格式")
+    p.add_argument(
+        "--format", choices=["md", "txt", "epub"], default="md", help="导出格式"
+    )
     p.add_argument("--output", "-o", help="输出路径")
     p.add_argument("--title", help="覆盖导出书名")
+    p.add_argument("--author", default="", help="EPUB 作者")
+    p.add_argument("--language", default="zh-CN", help="EPUB 语言")
+    p.add_argument("--cover", help="项目目录内的 EPUB 封面图片")
 
 
 def _add_asset_command(subparsers):
@@ -474,6 +702,7 @@ def _cmd_write(args) -> int:
                 "guidance": "",
                 "target_words": 0,
                 "temperature": args.temperature,
+                "run_id_v2": str(getattr(args, "resume_run", "") or ""),
             }
         )
     except NovelServiceError as exc:
@@ -645,19 +874,53 @@ def _cmd_context(args) -> int:
     from tools.novel_service import NovelApplicationService, NovelServiceError
 
     project_root = Path.cwd()
+    agent = str(getattr(args, "agent", "canonical") or "canonical")
     try:
-        preview = NovelApplicationService(project_root).context_preview(args.chapter)
-    except NovelServiceError as exc:
+        service = NovelApplicationService(project_root)
+        preview = service.context_preview(args.chapter)
+        inspection = None
+        if agent != "canonical" or getattr(args, "output", None):
+            from tools.agent_context_inspector import AgentContextInspector
+
+            inspector = AgentContextInspector(project_root)
+            inspection = inspector.inspect(
+                args.chapter,
+                agent=agent,
+                instruction=str(getattr(args, "instruction", "") or ""),
+                guidance=str(getattr(args, "guidance", "") or ""),
+                target_words=int(getattr(args, "target_words", 0) or 0),
+            )
+    except (NovelServiceError, RuntimeError, ValueError) as exc:
         logger.error(str(exc))
         return 1
 
-    if args.show:
+    if agent == "canonical" and inspection is None and args.show:
         print(preview["markdown"])
-    else:
+        return 0
+
+    if inspection is None:
         sections = preview["packet"].get("prompt_sections", {})
         logger.info(f"上下文 ({len(sections)} 个段落):")
         for name in sections:
             logger.info(f"  - {name}")
+        logger.info("检查实际 Agent 输入: openwrite context <chapter> --agent writer --show")
+        return 0
+
+    from tools.agent_context_inspector import AgentContextInspector
+
+    rendered = (
+        json.dumps(inspection, ensure_ascii=False, indent=2)
+        if getattr(args, "format", "markdown") == "json"
+        else AgentContextInspector(project_root).render_markdown(inspection)
+    )
+    output = str(getattr(args, "output", "") or "").strip()
+    if output:
+        output_path = Path(output).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(rendered, encoding="utf-8")
+        logger.info(f"Agent 上下文检查已输出: {output_path}")
+    if args.show or not output:
+        print(rendered)
 
     return 0
 
@@ -727,12 +990,309 @@ def _cmd_setting(args) -> int:
 
 def _cmd_source(args) -> int:
     """来源文本 source pack 管理。"""
+    if args.source_action == "analyze":
+        return _cmd_source_analyze_v2(args)
+    if args.source_action == "status":
+        return _cmd_source_status_v2(args)
+    if args.source_action == "retry":
+        return _cmd_source_retry_v2(args)
+    if args.source_action == "synthesize":
+        return _cmd_source_synthesize_v2(args)
+    if args.source_action == "profile":
+        return _cmd_source_profile_v2(args)
+    if args.source_action == "promotion-preview":
+        return _cmd_source_promotion_preview_v2(args)
     if args.source_action == "review":
         return _cmd_source_review(args)
     if args.source_action == "promote":
         return _cmd_source_promote(args)
-    logger.error("请指定 source 子命令: review, promote")
+    logger.error(
+        "请指定 source 子命令: analyze, status, retry, synthesize, profile, "
+        "promotion-preview, review, promote"
+    )
     return 1
+
+
+def _runtime_baseline(agent: str) -> set[str]:
+    from tools.agent.tool_runtime import build_tool_executors
+    from tools.agent.toolkits import (
+        DANTE_ACTION_TOOLKIT,
+        DANTE_DIRECT_TOOLKIT,
+        GOETHE_ACTION_TOOLKIT,
+        GOETHE_DIRECT_TOOLKIT,
+        ORCHESTRATOR_TOOLKIT,
+        WRITING_TOOLKIT,
+    )
+
+    if agent == "dante":
+        return set(DANTE_DIRECT_TOOLKIT) | set(DANTE_ACTION_TOOLKIT)
+    if agent == "goethe":
+        return set(GOETHE_DIRECT_TOOLKIT) | set(GOETHE_ACTION_TOOLKIT)
+    if agent == "writer":
+        return set(WRITING_TOOLKIT)
+    if agent == "reviewer":
+        return set(ORCHESTRATOR_TOOLKIT) | {"review_chapter"}
+    return set(build_tool_executors(Path.cwd()))
+
+
+def _cmd_skill(args) -> int:
+    from tools.runtime_skills import RuntimeSkillResolver
+
+    resolver = RuntimeSkillResolver(Path.cwd())
+    if args.skill_action == "list":
+        payload = resolver.list_skills()
+    elif args.skill_action == "diagnose":
+        payload = resolver.diagnose()
+    elif args.skill_action == "resolve":
+        resolution = resolver.resolve(
+            agent=args.agent,
+            base_tools=_runtime_baseline(args.agent),
+            task=args.task,
+            intent=args.intent,
+            document_type=args.document_type,
+            explicit_skills=args.skill or None,
+        )
+        payload = resolution.model_dump(mode="json")
+    else:
+        logger.error("请指定 skill 子命令: list, resolve, diagnose")
+        return 1
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_rule(args) -> int:
+    from tools.runtime_skills import RuleCompiler
+    from tools.runtime_skills.resolver import RuntimeSkillError
+
+    compiler = RuleCompiler(Path.cwd())
+    try:
+        if args.rule_action == "preview":
+            payload: object = compiler.preview().model_dump(mode="json")
+        elif args.rule_action == "apply":
+            payload = compiler.apply(
+                args.preview_id, confirm=bool(args.confirm)
+            ).model_dump(mode="json")
+        elif args.rule_action == "status":
+            active = compiler.active()
+            payload = active.model_dump(mode="json") if active else {"active": False}
+        else:
+            logger.error("请指定 rule 子命令: preview, apply, status")
+            return 1
+    except RuntimeSkillError as exc:
+        logger.error(f"{exc.code}: {exc}")
+        return 1
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_run(args) -> int:
+    from tools.chapter_run_v2 import ChapterRunV2Error, chapter_run_v2_action
+
+    config = _load_config(Path.cwd()) or {}
+    novel_id = str(config.get("novel_id") or "")
+    if not novel_id:
+        logger.error("未找到有效的 novel_config.yaml")
+        return 1
+    action = str(args.run_action or "")
+    if action == "list":
+        payload = {
+            "action": "list",
+            "chapter_id": args.chapter_id,
+            "statuses": args.status,
+            "limit": args.limit,
+        }
+    elif action == "show":
+        payload = {"action": "get", "run_id": args.run_id}
+    elif action == "intervene":
+        payload = {
+            "action": "record_intervention",
+            "run_id": args.run_id,
+            "revision": args.revision,
+            "request": args.request,
+            "scope": args.scope,
+            "risk": args.risk,
+            "affected_items": args.affected_item,
+            "rewrite_required": args.rewrite_required,
+        }
+    elif action == "transition":
+        payload = {
+            "action": "update_intervention",
+            "run_id": args.run_id,
+            "revision": args.revision,
+            "intervention_id": args.intervention_id,
+            "state": args.state,
+            "impact": args.impact,
+            "confirm": args.confirm,
+        }
+        if args.facts_revision is not None:
+            payload["facts_revision"] = args.facts_revision
+        if args.proposal is not None:
+            payload["proposal"] = args.proposal
+    elif action == "cancel":
+        payload = {
+            "action": "cancel",
+            "run_id": args.run_id,
+            "revision": args.revision,
+            "reason": args.reason,
+        }
+    else:
+        logger.error("请指定 run 子命令: list, show, intervene, transition, cancel")
+        return 1
+    try:
+        result = chapter_run_v2_action(Path.cwd(), novel_id, payload)
+    except ChapterRunV2Error as exc:
+        logger.error(f"{exc.code}: {exc}")
+        return 1
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_diagnose(args) -> int:
+    from tools.runtime_diagnostics import RuntimeDiagnosticsService
+
+    config = _load_config(Path.cwd()) or {}
+    novel_id = str(config.get("novel_id") or "")
+    if not novel_id:
+        logger.error("未找到有效的 novel_config.yaml")
+        return 1
+    report = RuntimeDiagnosticsService(Path.cwd(), novel_id).run(
+        stuck_minutes=args.stuck_minutes
+    )
+    print(report.model_dump_json(indent=2))
+    return 0
+
+
+def _cmd_planning(args) -> int:
+    from tools.rolling_planning import RollingPlanningError, rolling_plan_action
+
+    config = _load_config(Path.cwd()) or {}
+    novel_id = str(config.get("novel_id") or "")
+    if not novel_id:
+        logger.error("未找到有效的 novel_config.yaml")
+        return 1
+    action = str(args.planning_action or "")
+    if action == "list":
+        payload = {"action": "list", "limit": args.limit}
+    elif action == "create":
+        payload = {
+            "action": "create",
+            "current_arc": args.current_arc,
+            "window_size": args.window_size,
+        }
+    elif action == "show":
+        payload = {"action": "get", "candidate_id": args.candidate_id}
+    elif action == "stage":
+        try:
+            proposal = Path(args.proposal_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.error(f"无法读取提案文件: {exc}")
+            return 1
+        payload = {
+            "action": "stage",
+            "candidate_id": args.candidate_id,
+            "revision": args.revision,
+            "proposal": proposal,
+        }
+    else:
+        logger.error("请指定 planning 子命令: list, create, show, stage")
+        return 1
+    try:
+        result = rolling_plan_action(Path.cwd(), novel_id, payload)
+    except RollingPlanningError as exc:
+        logger.error(f"{exc.code}: {exc}")
+        return 1
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _manuscript_editing_command(payload: dict[str, object]) -> int:
+    from tools.manuscript_editing import ManuscriptEditingError, manuscript_editing_action
+
+    config = _load_config(Path.cwd()) or {}
+    novel_id = str(config.get("novel_id") or "")
+    if not novel_id:
+        logger.error("未找到有效的 novel_config.yaml")
+        return 1
+    try:
+        result = manuscript_editing_action(Path.cwd(), novel_id, payload)
+    except ManuscriptEditingError as exc:
+        logger.error(f"{exc.code}: {exc}")
+        return 1
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_version(args) -> int:
+    action = str(args.version_action or "")
+    if action == "list":
+        payload = {"action": "versions", "chapter_id": args.chapter_id}
+    elif action == "show":
+        payload = {
+            "action": "version",
+            "chapter_id": args.chapter_id,
+            "version_id": args.version_id,
+        }
+    elif action == "checkpoint":
+        payload = {
+            "action": "checkpoint",
+            "chapter_id": args.chapter_id,
+            "label": args.label,
+        }
+    elif action == "restore":
+        payload = {
+            "action": "restore",
+            "chapter_id": args.chapter_id,
+            "version_id": args.version_id,
+            "revision": args.revision,
+            "confirm": args.confirm,
+        }
+    else:
+        logger.error("请指定 version 子命令: list, show, checkpoint, restore")
+        return 1
+    return _manuscript_editing_command(payload)
+
+
+def _cmd_annotation(args) -> int:
+    action = str(args.annotation_action or "")
+    if action == "list":
+        payload = {"action": "annotations", "chapter_id": args.chapter_id}
+    elif action == "create":
+        from tools.manuscript_editing import ManuscriptEditingError, ManuscriptVersionStore
+
+        if args.start < 0 or args.end <= args.start:
+            logger.error("批注字符区间无效")
+            return 1
+        config = _load_config(Path.cwd()) or {}
+        novel_id = str(config.get("novel_id") or "")
+        if not novel_id:
+            logger.error("未找到有效的 novel_config.yaml")
+            return 1
+        try:
+            content = ManuscriptVersionStore(Path.cwd(), novel_id).chapter_path(
+                args.chapter_id
+            ).read_text(encoding="utf-8")
+        except (OSError, ManuscriptEditingError) as exc:
+            logger.error(str(exc))
+            return 1
+        payload = {
+            "action": "annotate",
+            "chapter_id": args.chapter_id,
+            "revision": args.revision,
+            "quote": content[args.start : args.end],
+            "start_hint": args.start,
+            "end_hint": args.end,
+            "note": args.note,
+        }
+    elif action == "resolve":
+        payload = {
+            "action": "resolve_annotation",
+            "chapter_id": args.chapter_id,
+            "annotation_id": args.annotation_id,
+        }
+    else:
+        logger.error("请指定 annotation 子命令: list, create, resolve")
+        return 1
+    return _manuscript_editing_command(payload)
 
 
 def _cmd_style_synthesize(args) -> int:
@@ -998,6 +1558,9 @@ def _cmd_export(args) -> int:
             output,
             format_name=format_name,
             title=args.title,
+            author=args.author,
+            language=args.language,
+            cover=Path(args.cover).expanduser() if args.cover else None,
         )
     except NovelServiceError as exc:
         logger.error(f"导出失败: {exc}")
@@ -1480,6 +2043,101 @@ def _cmd_source_review(args) -> int:
     return 0
 
 
+def _source_v2_service(args):
+    project_root = Path.cwd()
+    novel_id = _resolve_novel_id(project_root, getattr(args, "novel_id", "current"))
+    if not novel_id:
+        raise ValueError("未找到 novel_config.yaml，请指定 --novel-id")
+    from tools.source_pack import SourcePackService
+
+    return SourcePackService(project_root, novel_id)
+
+
+def _print_source_v2(payload: dict) -> int:
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _cmd_source_analyze_v2(args) -> int:
+    source_path = Path(args.source).expanduser()
+    if not source_path.is_file():
+        logger.error(f"源文件不存在: {source_path}")
+        return 1
+    try:
+        content = source_path.read_text(encoding="utf-8")
+        service = _source_v2_service(args)
+        prepared = service.prepare_v2(
+            args.source_id,
+            content,
+            relative_name=source_path.name,
+            focus=args.focus,
+            input_budget_tokens=args.input_budget,
+        )
+        result = service.analyze_v2(args.source_id)
+    except Exception as exc:
+        logger.error(str(exc))
+        return 1
+    return _print_source_v2(
+        {
+            "prepared": {
+                "reused_chunks": prepared["reused_chunks"],
+                "pending_chunks": prepared["pending_chunks"],
+                "model_calls_needed": prepared["model_calls_needed"],
+            },
+            **result,
+        }
+    )
+
+
+def _cmd_source_status_v2(args) -> int:
+    try:
+        return _print_source_v2(_source_v2_service(args).status_v2(args.source_id))
+    except Exception as exc:
+        logger.error(str(exc))
+        return 1
+
+
+def _cmd_source_retry_v2(args) -> int:
+    try:
+        result = _source_v2_service(args).retry_v2(args.source_id, args.chunk_id)
+        return _print_source_v2(result)
+    except Exception as exc:
+        logger.error(str(exc))
+        return 1
+
+
+def _cmd_source_synthesize_v2(args) -> int:
+    try:
+        result = _source_v2_service(args).synthesize_v2(args.source_ids)
+        return _print_source_v2(result)
+    except Exception as exc:
+        logger.error(str(exc))
+        return 1
+
+
+def _cmd_source_profile_v2(args) -> int:
+    if getattr(args, "source_profile_action", "") != "show":
+        logger.error("请指定 source profile show")
+        return 1
+    try:
+        result = _source_v2_service(args).profile_v2(args.profile_id)
+        return _print_source_v2(result)
+    except Exception as exc:
+        logger.error(str(exc))
+        return 1
+
+
+def _cmd_source_promotion_preview_v2(args) -> int:
+    try:
+        result = _source_v2_service(args).preview_promotion_v2(
+            args.profile_id, args.target
+        )
+        return _print_source_v2(result)
+    except Exception as exc:
+        logger.error(str(exc))
+        return 1
+
+
 def _promote_source_style(
     project_root: Path,
     novel_id: str,
@@ -1520,15 +2178,32 @@ def _cmd_source_promote(args) -> int:
         logger.error("未找到 novel_config.yaml，请指定 --novel-id")
         return 1
 
+    identifier = str(
+        getattr(args, "identifier", "") or getattr(args, "source_id", "")
+    )
+    if identifier.startswith("promotion_"):
+        try:
+            result = _source_v2_service(args).apply_promotion_v2(
+                identifier,
+                confirm=bool(getattr(args, "confirm", False)),
+            )
+            return _print_source_v2(result)
+        except Exception as exc:
+            logger.error(str(exc))
+            return 1
+    if getattr(args, "confirm", False):
+        logger.error("--confirm 仅用于 promotion_ V2 预览")
+        return 1
+
     from tools.novel_service import NovelApplicationService, NovelServiceError
 
     try:
-        NovelApplicationService(project_root).promote_source(args.source_id, args.target)
+        NovelApplicationService(project_root).promote_source(identifier, args.target)
     except NovelServiceError as exc:
         logger.error(str(exc))
         return 1
 
-    logger.info(f"source promote 完成: {args.source_id} -> {args.target}")
+    logger.info(f"source promote 完成: {identifier} -> {args.target}")
     return 0
 
 

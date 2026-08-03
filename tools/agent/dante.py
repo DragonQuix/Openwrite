@@ -4,28 +4,32 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+from ..goethe import build_prompt_session, is_exit_command
+from ..llm import LLMClient, LLMConfig, Message
+from ..runtime_skills import RuleCompiler, render_runtime_context
 from .book_state import BookState, BookStateStore
 from .confirmation import guard_confirmable_executors
 from .react import OPENWRITE_TOOLS, ReActAgent, ToolDefinition
-from .toolkits import DANTE_DIRECT_TOOLKIT
 from .session_state import DanteSessionState, SessionStateStore, SessionTurn
 from .tool_layers import build_dante_tool_layers
-from ..goethe import build_prompt_session, is_exit_command
-from ..llm import LLMClient, LLMConfig, Message
+from .toolkits import DANTE_DIRECT_TOOLKIT
 
 DEFAULT_DANTE_SYSTEM_PROMPT = (
     "你是 OpenWrite 的 Dante，长期会话正文创作 Agent。"
     "你的默认职责是基于已确认的人物、设定和大纲持续推进正文写作、预检、审查与状态结算。"
-    "当写作推进需要修正人物、设定或大纲时，你可以提出并执行必要回修，但不要把自己当成建书向导或一次性 wizard。"
+    "当写作推进需要修正人物、设定或大纲时，你可以提出并执行必要回修，"
+    "但不要把自己当成建书向导或一次性 wizard。"
     "若作者意图、背景、人物或大纲明显未就绪，先明确告知用户应先回到 Goethe 补齐资产，不要硬写。"
     "优先保持对话连续性，并让一切回修都为正文推进服务。"
     "修改人物或世界关系时，先用 search_relation_targets/get_world_relations 定位，"
     "再用 edit_world_relation 或 edit_world_relations 且 confirm=false 预览 diff；"
-    "只有用户明确确认后，才能携带预览返回的 base_revision/source_revisions 并设置 confirm=true 写入。"
+    "只有用户明确确认后，才能携带预览返回的 base_revision/source_revisions "
+    "并设置 confirm=true 写入。"
     "普通讨论、分析和未确认建议不得写入关系。"
     "修改已有角色、故事资料、世界设定或正文时，先 read_project_document 读取 revision，"
     "再 edit_project_document(confirm=false) 预览 diff；只有用户明确确认后才写入。"
@@ -34,7 +38,8 @@ DEFAULT_DANTE_SYSTEM_PROMPT = (
     "如果状态显示 pending_confirmation=outline_scope，或阶段仍是 rolling_outline 但用户明确要求"
     "“根据现在/当前大纲写下一章”、“就按这个大纲写”或等价表达，先调用 confirm_outline_scope，"
     "再执行章节预检与写作。"
-    "用户要求修改大纲时，先用 get_outline_structure 获取 revision，再用 edit_outline_structure(confirm=false) 预览；"
+    "用户要求修改大纲时，先用 get_outline_structure 获取 revision，"
+    "再用 edit_outline_structure(confirm=false) 预览；"
     "只有用户明确确认后才用相同 revision 和 confirm=true 写入；"
     "不要用 create_outline 重写整份大纲。"
 )
@@ -113,11 +118,16 @@ _DANTE_ACTION_TOOL_DEFINITIONS = [
 ]
 
 
-def _build_dante_tool_definitions() -> list[ToolDefinition]:
+def _build_dante_tool_definitions(
+    allowed_tools: set[str] | None = None,
+) -> list[ToolDefinition]:
     direct_tool_defs = [
         tool for tool in OPENWRITE_TOOLS if tool.name in DANTE_DIRECT_TOOLKIT
     ]
-    return direct_tool_defs + _DANTE_ACTION_TOOL_DEFINITIONS
+    combined = direct_tool_defs + _DANTE_ACTION_TOOL_DEFINITIONS
+    if allowed_tools is None:
+        return combined
+    return [tool for tool in combined if tool.name in allowed_tools]
 
 
 @dataclass
@@ -353,11 +363,12 @@ class DanteChatAgent:
 
     def _build_default_react_agent(self) -> ReActAgent:
         client = self.llm_client_factory()
+        allowed_tools, runtime_prompt = self._runtime_surface()
         react_agent = ReActAgent(
             client=client,
             model=client.config.model,
-            tools=_build_dante_tool_definitions(),
-            system_prompt=DEFAULT_DANTE_SYSTEM_PROMPT,
+            tools=_build_dante_tool_definitions(allowed_tools),
+            system_prompt=f"{DEFAULT_DANTE_SYSTEM_PROMPT}\n\n{runtime_prompt}",
             max_turns=20,
             activity_callback=self.activity_callback,
         )
@@ -374,7 +385,8 @@ class DanteChatAgent:
     def _ensure_react_agent_surface(self, react_agent: Any) -> None:
         if react_agent is None:
             return
-        combined_tools = _build_dante_tool_definitions()
+        allowed_tools, _ = self._runtime_surface()
+        combined_tools = _build_dante_tool_definitions(allowed_tools)
         canonical_tools = {tool.name: tool for tool in combined_tools}
         if hasattr(react_agent, "tools"):
             existing_tools = list(getattr(react_agent, "tools", []) or [])
@@ -501,6 +513,19 @@ class DanteChatAgent:
         if self._tool_layers is None:
             self._tool_layers = dict(self.tool_layer_factory(self.project_root))
         return self._tool_layers
+
+    def _runtime_surface(self) -> tuple[set[str], str]:
+        layers = self._load_tool_layers()
+        resolution = layers.get("runtime_resolution")
+        if resolution is None:
+            return (
+                set(DANTE_DIRECT_TOOLKIT)
+                | {item.name for item in _DANTE_ACTION_TOOL_DEFINITIONS},
+                "",
+            )
+        allowed_tools = set(getattr(resolution, "allowed_tools", ()) or ())
+        rules = RuleCompiler(self.project_root).active()
+        return allowed_tools, render_runtime_context(resolution, rules)
 
     def _append_user_turn(self, content: str) -> None:
         state = self._require_session_state()

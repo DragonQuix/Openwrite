@@ -169,11 +169,8 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
                     chapter_id=str(args.get("chapter_id") or ""),
                 )
             if operation == "edit_outline_structure":
-                from tools.outline_tree import (
-                    OutlineEditError,
-                    build_outline_structure as build_structure,
-                    mutate_outline_structure,
-                )
+                from tools.outline_tree import OutlineEditError, mutate_outline_structure
+                from tools.outline_tree import build_outline_structure as build_structure
 
                 root = project_root / "data" / "novels" / novel_id
                 outline_path = root / "src" / "outline.md"
@@ -362,9 +359,102 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
                 return _chunk_text(args)
             if operation == "compress_section":
                 return _compress_section(project_root, novel_id, args)
+            if operation in {
+                "get_chapter_run_v2",
+                "record_chapter_intervention",
+                "update_chapter_intervention",
+                "cancel_chapter_run_v2",
+            }:
+                from tools.chapter_run_v2 import chapter_run_v2_action
+
+                action_by_operation = {
+                    "get_chapter_run_v2": str(args.get("action") or "list"),
+                    "record_chapter_intervention": "record_intervention",
+                    "update_chapter_intervention": "update_intervention",
+                    "cancel_chapter_run_v2": "cancel",
+                }
+                return chapter_run_v2_action(
+                    project_root,
+                    novel_id,
+                    {**args, "action": action_by_operation[operation]},
+                )
+            if operation == "diagnose_runtime":
+                from tools.runtime_diagnostics import RuntimeDiagnosticsService
+
+                return RuntimeDiagnosticsService(
+                    project_root, novel_id
+                ).run().model_dump(mode="json")
+            if operation == "manage_rolling_plan":
+                from tools.rolling_planning import rolling_plan_action
+
+                return rolling_plan_action(project_root, novel_id, args)
+            if operation in {"manage_manuscript_versions", "manage_annotations"}:
+                from tools.manuscript_editing import manuscript_editing_action
+
+                if operation == "manage_manuscript_versions":
+                    action_map = {
+                        "list": "versions",
+                        "get": "version",
+                        "checkpoint": "checkpoint",
+                        "restore": "restore",
+                    }
+                    default_action = "list"
+                else:
+                    action_map = {
+                        "list": "annotations",
+                        "create": "annotate",
+                        "resolve": "resolve_annotation",
+                    }
+                    default_action = "list"
+                requested = str(args.get("action") or default_action)
+                if requested not in action_map:
+                    return {
+                        "ok": False,
+                        "blocked": False,
+                        "code": "INVALID_EDITING_ACTION",
+                        "error": "未知正文编辑操作",
+                    }
+                return manuscript_editing_action(
+                    project_root,
+                    novel_id,
+                    {**args, "action": action_map[requested]},
+                )
+            from tools.agent.audit_tools import AUDIT_TOOL_NAMES, execute_audit_tool
+
+            if operation in AUDIT_TOOL_NAMES:
+                return execute_audit_tool(project_root, novel_id, operation, args)
             raise NovelServiceError(f"未知应用工具: {operation}")
         except NovelServiceError as exc:
             return _service_error(exc)
+        except Exception as exc:
+            from tools.chapter_run_v2 import ChapterRunV2Error
+            from tools.manuscript_editing import ManuscriptEditingError
+            from tools.rolling_planning import RollingPlanningError
+
+            if isinstance(exc, ChapterRunV2Error):
+                return {
+                    "ok": False,
+                    "blocked": exc.code
+                    in {"REVISION_REQUIRED", "STALE_REVISION", "CONFIRMATION_REQUIRED"},
+                    "code": exc.code,
+                    "error": str(exc),
+                }
+            if isinstance(exc, RollingPlanningError):
+                return {
+                    "ok": False,
+                    "blocked": exc.code.startswith("STALE_"),
+                    "code": exc.code,
+                    "error": str(exc),
+                }
+            if isinstance(exc, ManuscriptEditingError):
+                return {
+                    "ok": False,
+                    "blocked": exc.code
+                    in {"CONFIRMATION_REQUIRED", "STALE_REVISION"},
+                    "code": exc.code,
+                    "error": str(exc),
+                }
+            raise
 
     return execute
 
@@ -803,6 +893,20 @@ def build_tool_executors(project_root: Path) -> dict[str, ToolExecutor]:
         "validate_post_write",
         "chunk_text",
         "compress_section",
+        "inspect_agent_context",
+        "list_chapter_runs",
+        "get_chapter_run_v2",
+        "record_chapter_intervention",
+        "update_chapter_intervention",
+        "cancel_chapter_run_v2",
+        "diagnose_runtime",
+        "manage_rolling_plan",
+        "manage_manuscript_versions",
+        "manage_annotations",
+        "get_runtime_state",
+        "get_chapter_review",
+        "get_task_activity",
+        "get_goethe_handoff",
     }
     executors.update(
         {

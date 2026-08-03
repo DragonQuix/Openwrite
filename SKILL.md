@@ -172,6 +172,7 @@ packet 典型包含：
 - Goethe / Dante 的 AI 回复按 CommonMark 渲染标题、列表、引用、链接与代码块；
   原始 HTML 被转义，用户消息与错误消息保持纯文本
 - Studio 左侧“大纲”直接打开 `src/outline.md`；“故事”不混入大纲，搜索可单独限定大纲
+- 项目搜索由 MIT 许可的 HKUDS/LightRAG 提供知识图谱与向量混合检索；索引位于作品私有目录 `.openwrite/lightrag/`，通过文档内容 revision 增量插入、更新和删除，并把检索块映射回原始文件、标题和行号。未配置 embedding 或服务不可用时只做带状态提示的精确文本降级
 - Studio 与 ReAct 通过 `get_outline_structure` 共用卷/幕/节/章树；按最早未写章纲智能选章，并用 outline revision 防止写错目标
 - Studio 与 ReAct 通过 `edit_outline_structure` 做最小增量改名、增删卷幕节章；删除子树时，后续同类卷/幕/节/章在同一次原子写入中连续补位，附录不参与。ReAct 先以 `confirm=false` 预览完整级联 diff，再在用户确认后写入。禁止用整份 `create_outline` 覆盖已有大纲；删除包含正文的节点，或补位会改变已有正文 `ch_XXX` 的操作必须阻止
 - Studio 关系拓扑与 ReAct 的 `get_world_relations` 共用人物和世界实体真源；不维护 `graph.yaml`。
@@ -198,6 +199,7 @@ packet 典型包含：
 | 工作流调度 | `tools/workflow_scheduler.py` | `wf_ch_*.yaml` |
 | 书级状态 | `tools/agent/book_state.py` | `book_state.yaml` |
 | 真相文件 | `tools/truth_manager.py` | runtime truth files |
+| 项目搜索 | `tools/project_search.py` | LightRAG 图谱/向量索引与原文定位 |
 | 世界查询 | `tools/world_query.py` | 世界观实体与关系 |
 | 共享文档规范化 | `tools/shared_documents.py` | 单源文档规范化 |
 

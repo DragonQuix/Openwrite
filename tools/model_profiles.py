@@ -23,6 +23,7 @@ ROUTE_KEYS = (
     "review",
     "source_extract",
     "revision",
+    "search",
 )
 PROFILE_FIELDS = (
     "id",
@@ -36,6 +37,11 @@ PROFILE_FIELDS = (
     "temperature",
     "timeout_seconds",
     "credential_ref",
+    "embedding_base_url",
+    "embedding_model",
+    "embedding_dimension",
+    "embedding_max_tokens",
+    "embedding_credential_ref",
 )
 
 _ACTIVE_PROFILE: ContextVar[dict[str, Any] | None] = ContextVar(
@@ -113,6 +119,15 @@ class ModelProfileStore:
             "temperature": float(os.environ.get("LLM_TEMPERATURE", "0.7")),
             "timeout_seconds": float(os.environ.get("LLM_TIMEOUT_SECONDS", "120")),
             "credential_ref": "key_default",
+            "embedding_base_url": os.environ.get(
+                "OPENWRITE_LIGHTRAG_EMBEDDING_BASE_URL", ""
+            ).strip(),
+            "embedding_model": os.environ.get(
+                "OPENWRITE_LIGHTRAG_EMBEDDING_MODEL", "text-embedding-3-small"
+            ).strip(),
+            "embedding_dimension": 1536,
+            "embedding_max_tokens": 8192,
+            "embedding_credential_ref": "embedding_key_default",
         }
         credential = self.legacy.load_credential()
         if credential:
@@ -135,7 +150,23 @@ class ModelProfileStore:
                 or persisted_credentials.get(credential_ref)
                 or (profile["id"] == "default" and os.environ.get("LLM_API_KEY", "").strip())
             )
-            profiles.append({**profile, "configured": configured})
+            embedding_credential_ref = str(profile.get("embedding_credential_ref") or "")
+            separate_embedding_key = bool(
+                self._session_credentials.get(embedding_credential_ref)
+                or persisted_credentials.get(embedding_credential_ref)
+                or (
+                    profile["id"] == "default"
+                    and os.environ.get("OPENWRITE_LIGHTRAG_EMBEDDING_API_KEY", "").strip()
+                )
+            )
+            profiles.append(
+                {
+                    **profile,
+                    "configured": configured,
+                    "embedding_configured": separate_embedding_key or configured,
+                    "embedding_key_configured": separate_embedding_key,
+                }
+            )
         routes = dict(payload["routes"])
         routes.update(self._routes(project_routes))
         default_id = str(payload.get("default_profile_id") or "default")
@@ -153,6 +184,7 @@ class ModelProfileStore:
         profile: dict[str, Any],
         *,
         api_key: str = "",
+        embedding_api_key: str = "",
         remember_api_key: bool = True,
     ) -> dict[str, Any]:
         payload = self.load()
@@ -160,6 +192,10 @@ class ModelProfileStore:
         profile_id = metadata["id"]
         credential_ref = str(metadata.get("credential_ref") or f"key_{profile_id}")
         metadata["credential_ref"] = credential_ref
+        embedding_credential_ref = str(
+            metadata.get("embedding_credential_ref") or f"embedding_key_{profile_id}"
+        )
+        metadata["embedding_credential_ref"] = embedding_credential_ref
         profiles = [item for item in payload["profiles"] if item["id"] != profile_id]
         profiles.append(metadata)
         payload["profiles"] = sorted(profiles, key=lambda item: item["id"])
@@ -180,6 +216,20 @@ class ModelProfileStore:
             self._session_credentials.pop(credential_ref, None)
             credentials = self._credentials()
             credentials.pop(credential_ref, None)
+            self._write_json(self.credentials_path, credentials)
+        embedding_secret = str(embedding_api_key or "").strip()
+        if embedding_secret:
+            self._session_credentials[embedding_credential_ref] = embedding_secret
+            credentials = self._credentials()
+            if remember_api_key:
+                credentials[embedding_credential_ref] = embedding_secret
+            else:
+                credentials.pop(embedding_credential_ref, None)
+            self._write_json(self.credentials_path, credentials)
+        elif not remember_api_key:
+            self._session_credentials.pop(embedding_credential_ref, None)
+            credentials = self._credentials()
+            credentials.pop(embedding_credential_ref, None)
             self._write_json(self.credentials_path, credentials)
         self._write_payload(payload)
         return metadata
@@ -258,8 +308,11 @@ class ModelProfileStore:
         }
         credential_ref = str(removed.get("credential_ref") or "")
         self._session_credentials.pop(credential_ref, None)
+        embedding_credential_ref = str(removed.get("embedding_credential_ref") or "")
+        self._session_credentials.pop(embedding_credential_ref, None)
         credentials = self._credentials()
         credentials.pop(credential_ref, None)
+        credentials.pop(embedding_credential_ref, None)
         self._write_json(self.credentials_path, credentials)
         self._write_payload(payload)
         return {"deleted": profile_id, "routes": payload["routes"]}
@@ -300,7 +353,22 @@ class ModelProfileStore:
                 f"模型档案 {profile['label']} 缺少 API Key",
                 code="MODEL_CREDENTIAL_MISSING",
             )
-        return {**profile, "api_key": api_key, "operation": operation}
+        embedding_credential_ref = str(profile.get("embedding_credential_ref") or "")
+        embedding_api_key = (
+            self._session_credentials.get(embedding_credential_ref)
+            or self._credentials().get(embedding_credential_ref)
+            or (
+                os.environ.get("OPENWRITE_LIGHTRAG_EMBEDDING_API_KEY", "").strip()
+                if profile["id"] == "default"
+                else ""
+            )
+        )
+        return {
+            **profile,
+            "api_key": api_key,
+            "embedding_api_key": embedding_api_key,
+            "operation": operation,
+        }
 
     @staticmethod
     def _profile_metadata(value: dict[str, Any]) -> dict[str, Any]:
@@ -354,6 +422,36 @@ class ModelProfileStore:
         timeout_seconds = ModelProfileStore._bounded_number(
             value.get("timeout_seconds"), 120, 1, 1800, float, "超时"
         )
+        embedding_base_url = str(value.get("embedding_base_url") or "").strip().rstrip("/")
+        if embedding_base_url:
+            parsed_embedding_url = urlparse(embedding_base_url)
+            if (
+                parsed_embedding_url.scheme not in {"http", "https"}
+                or not parsed_embedding_url.netloc
+            ):
+                raise ModelProfileError(
+                    "Embedding Base URL 必须是有效的 HTTP(S) 地址",
+                    code="INVALID_MODEL_PROFILE",
+                )
+        embedding_model = str(
+            value.get("embedding_model") or "text-embedding-3-small"
+        ).strip()
+        if not embedding_model or len(embedding_model) > 120:
+            raise ModelProfileError(
+                "Embedding 模型名称不能为空且不能超过 120 字",
+                code="INVALID_MODEL_PROFILE",
+            )
+        embedding_dimension = ModelProfileStore._bounded_number(
+            value.get("embedding_dimension"), 1536, 1, 65536, int, "Embedding 维度"
+        )
+        embedding_max_tokens = ModelProfileStore._bounded_number(
+            value.get("embedding_max_tokens"),
+            8192,
+            256,
+            131072,
+            int,
+            "Embedding Token 上限",
+        )
         return {
             "id": profile_id,
             "label": str(value.get("label") or profile_id).strip()[:80],
@@ -366,6 +464,13 @@ class ModelProfileStore:
             "temperature": temperature,
             "timeout_seconds": timeout_seconds,
             "credential_ref": str(value.get("credential_ref") or f"key_{profile_id}"),
+            "embedding_base_url": embedding_base_url,
+            "embedding_model": embedding_model,
+            "embedding_dimension": embedding_dimension,
+            "embedding_max_tokens": embedding_max_tokens,
+            "embedding_credential_ref": str(
+                value.get("embedding_credential_ref") or f"embedding_key_{profile_id}"
+            ),
         }
 
     @staticmethod

@@ -378,7 +378,7 @@ def test_exec_write_chapter_uses_asyncio_run_without_missing_import(
         },
     )
 
-    assert result == {
+    expected = {
         "ok": True,
         "chapter_id": "ch_001",
         "title": "测试标题",
@@ -386,6 +386,9 @@ def test_exec_write_chapter_uses_asyncio_run_without_missing_import(
         "draft_path": str(expected_draft_path),
         "truth_updates": {},
     }
+    assert {key: result[key] for key in expected} == expected
+    assert result["run_id_v2"].startswith("runv2_")
+    assert result["usage"] == {}
     assert captured["target_words"] == 3500
     assert captured["context"]["target_words"] == 3500
     assert "背景设定" in captured["context"]["external_context"]

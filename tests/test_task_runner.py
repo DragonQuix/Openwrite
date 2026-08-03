@@ -177,3 +177,43 @@ def test_startup_marks_orphaned_running_tasks_interrupted_and_retryable(tmp_path
         assert completed["result"]["score"] == 90
     finally:
         runner.shutdown(wait=True)
+
+
+def test_retry_preserves_persisted_continuous_write_progress(tmp_path: Path):
+    init_project(tmp_path, "demo")
+    store = TaskStore(tmp_path, "demo")
+    original = store.create("continuous_write", {"max_chapters": 2})
+    store.transition(
+        original["task_id"],
+        status="running",
+        phase="committing",
+        updates={
+            "result": {
+                "completed_chapters": [{"chapter_id": "ch_001"}],
+                "usage": {"total_tokens": 120},
+            }
+        },
+        event="task_progress_saved",
+    )
+    observed: dict = {}
+
+    def handler(payload: dict, context: TaskContext) -> dict:
+        del context
+        observed.update(payload)
+        return {"completed_chapters": payload["_already_completed"]}
+
+    runner = PersistentTaskRunner(
+        tmp_path,
+        "demo",
+        handlers={"continuous_write": handler},
+    )
+    try:
+        retried = runner.retry(original["task_id"])
+        completed = _wait_for(runner.store, retried["task_id"], "completed")
+        assert observed["_already_completed"] == [{"chapter_id": "ch_001"}]
+        assert observed["_already_used"] == {"total_tokens": 120}
+        assert completed["result"]["completed_chapters"] == [
+            {"chapter_id": "ch_001"}
+        ]
+    finally:
+        runner.shutdown(wait=True)

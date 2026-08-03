@@ -5,13 +5,14 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from typing import Any
 
-
 CONFIRMABLE_TOOLS = {
     "confirm_outline_edits",
     "edit_outline_structure",
     "edit_project_document",
     "edit_world_relation",
     "edit_world_relations",
+    "manage_manuscript_versions",
+    "update_chapter_intervention",
 }
 
 CONFIRMATION_BLOCK_ERROR = "explicit_user_confirmation_required"
@@ -44,6 +45,7 @@ _EXPLICIT_MARKERS = (
     "确认修改",
     "确认大纲",
     "确认关系",
+    "确认恢复",
     "确认写入",
     "同意修改",
     "同意应用",
@@ -53,6 +55,7 @@ _EXPLICIT_MARKERS = (
     "写入关系",
     "保存修改",
     "保存大纲",
+    "恢复这个版本",
     "采用这版",
     "就按这版",
     "提交修改",

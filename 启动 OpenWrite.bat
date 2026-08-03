@@ -6,6 +6,10 @@ cd /d "%~dp0"
 set "OPENWRITE_PYTHON="
 set "OPENWRITE_PY_VERSION="
 
+if exist "%~dp0..\..\Scripts\python.exe" call :try_exe "%~dp0..\..\Scripts\python.exe"
+if defined OPENWRITE_PYTHON goto :launch
+if exist "%~dp0Scripts\python.exe" call :try_exe "%~dp0Scripts\python.exe"
+if defined OPENWRITE_PYTHON goto :launch
 if exist "%~dp0.venv\Scripts\python.exe" call :try_exe "%~dp0.venv\Scripts\python.exe"
 if defined OPENWRITE_PYTHON goto :launch
 if exist "%~dp0.venv312\Scripts\python.exe" call :try_exe "%~dp0.venv312\Scripts\python.exe"
@@ -45,9 +49,17 @@ exit /b 0
 
 :launch
 if "%OPENWRITE_PYTHON%"=="py" (
-  py %OPENWRITE_PY_VERSION% -u "%~dp0tools\desktop_launcher.py" %*
+  if exist "%~dp0tools\desktop_launcher.py" (
+    py %OPENWRITE_PY_VERSION% -u "%~dp0tools\desktop_launcher.py" %*
+  ) else (
+    py %OPENWRITE_PY_VERSION% -u -m tools.desktop_launcher %*
+  )
 ) else (
-  "%OPENWRITE_PYTHON%" -u "%~dp0tools\desktop_launcher.py" %*
+  if exist "%~dp0tools\desktop_launcher.py" (
+    "%OPENWRITE_PYTHON%" -u "%~dp0tools\desktop_launcher.py" %*
+  ) else (
+    "%OPENWRITE_PYTHON%" -u -m tools.desktop_launcher %*
+  )
 )
 set "OPENWRITE_STATUS=%ERRORLEVEL%"
 if not "%OPENWRITE_STATUS%"=="0" (

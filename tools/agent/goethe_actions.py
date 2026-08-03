@@ -48,6 +48,9 @@ class GoethePlanningRuntime:
     def summarize_ideation(self) -> OrchestratorResult:
         return self.orchestrator.summarize_ideation()
 
+    def confirm_ideation_summary(self, text: str) -> OrchestratorResult:
+        return self.orchestrator.confirm_ideation_summary(text)
+
     def generate_outline_draft(self, request_text: str) -> OrchestratorResult:
         return self.orchestrator.generate_outline_draft(request_text)
 
@@ -495,6 +498,12 @@ class GoetheActionAdapter:
 
     def summarize_ideation(self) -> dict[str, Any]:
         return self._wrap("summarize_ideation", self.runtime.summarize_ideation())
+
+    def confirm_ideation_summary(self, text: str) -> dict[str, Any]:
+        return self._wrap(
+            "confirm_ideation_summary",
+            self.runtime.confirm_ideation_summary(text),
+        )
 
     def generate_foundation_draft(self, request_text: str) -> dict[str, Any]:
         return self._wrap(

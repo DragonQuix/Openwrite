@@ -247,7 +247,13 @@ class RevisionService:
             full_chapter=previous.get("kind") == "full_chapter_revision",
         )
 
-    def apply(self, proposal_id: str) -> dict[str, Any]:
+    def apply(
+        self,
+        proposal_id: str,
+        *,
+        replacement_text: str | None = None,
+        selected_hunk_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
         proposal = self.store.load(proposal_id)
         if proposal is None:
             raise RevisionError("修订提案不存在", code="REVISION_NOT_FOUND")
@@ -270,7 +276,36 @@ class RevisionService:
                 selection = proposal.get("selection") or {}
                 start = int(selection.get("start") or 0)
                 end = int(selection.get("end") or 0)
-                replacement = str(proposal.get("replacement_text") or "")
+                replacement = (
+                    str(proposal.get("replacement_text") or "")
+                    if replacement_text is None
+                    else str(replacement_text)
+                )
+                if len(replacement.encode("utf-8")) > MAX_CHAPTER_BYTES:
+                    raise RevisionError(
+                        "确认后的替换文本过大",
+                        code="REVISION_RESULT_TOO_LARGE",
+                    )
+                accepted_hunks = [str(item) for item in (selected_hunk_ids or [])]
+                available_hunks = {
+                    str(item.get("id"))
+                    for item in self._diff(
+                        str(selection.get("original_text") or ""),
+                        str(proposal.get("replacement_text") or ""),
+                    )["hunks"]
+                }
+                if any(item not in available_hunks for item in accepted_hunks):
+                    raise RevisionError("差异块选择已失效", code="INVALID_INPUT")
+                proposal = self.store.update_status(
+                    proposal_id,
+                    "proposed",
+                    expected={"proposed"},
+                    updates={
+                        "accepted_replacement_text": replacement,
+                        "selected_hunk_ids": accepted_hunks,
+                        "accepted_at": self._now(),
+                    },
+                )
                 updated = f"{current[:start]}{replacement}{current[end:]}"
                 findings = self.validator(current, updated)
                 blocking = [item for item in findings if item.get("blocking")]
@@ -281,6 +316,21 @@ class RevisionService:
                         recoverable=True,
                         details={"findings": blocking},
                     )
+                from tools.manuscript_editing import ManuscriptVersionStore
+
+                checkpoint_reason = (
+                    "full_rewrite"
+                    if proposal.get("kind") == "full_chapter_revision"
+                    else "ai_revision"
+                )
+                ManuscriptVersionStore(
+                    self.project_root, self.novel_id
+                ).checkpoint(
+                    chapter_id,
+                    reason=checkpoint_reason,
+                    label=f"应用修订 {proposal_id} 前",
+                    content=current,
+                )
                 backup = self.store.save_backup(chapter_id, proposal_id, current)
                 self._atomic_write(path, updated)
                 try:
@@ -622,18 +672,24 @@ class RevisionService:
             )
         )
         matcher = difflib.SequenceMatcher(a=before, b=after)
-        hunks = [
-            {
+        segments = []
+        hunks = []
+        hunk_index = 0
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            segment = {
                 "tag": tag,
                 "before": "".join(before[i1:i2]),
                 "after": "".join(after[j1:j2]),
             }
-            for tag, i1, i2, j1, j2 in matcher.get_opcodes()
-            if tag != "equal"
-        ]
+            if tag != "equal":
+                segment["id"] = f"hunk_{hunk_index}"
+                hunk_index += 1
+                hunks.append(dict(segment))
+            segments.append(segment)
         return {
             "unified": unified,
             "hunks": hunks,
+            "segments": segments,
             "stats": {
                 "removed_units": len(original),
                 "added_units": len(replacement),

@@ -198,6 +198,9 @@ async function submitControlledWrite(event) {
         max_chapters: Number($("#controlled-write-count").value),
         minimum_review_score: Number($("#controlled-write-score").value),
         target_words: Number($("#controlled-write-words").value || 0),
+        max_tokens: Number($("#controlled-write-tokens").value || 0),
+        max_cost_usd: Number($("#controlled-write-cost").value || 0),
+        max_failures: Number($("#controlled-write-failures").value || 2),
         stop_on_blocker: $("#controlled-stop-blocker").checked,
         stop_on_continuity_error: $("#controlled-stop-continuity").checked,
         stop_on_outline_gap: true,
@@ -218,6 +221,7 @@ function resultSummary(task) {
   const result = task.result || {};
   if (result.score !== undefined) return `审稿 ${Math.round(Number(result.score))} 分`;
   if (result.proposal_id) return "修订提案已生成";
+  if (result.report_id) return "研究报告已归档";
   if (result.chapter_id) return `${result.chapter_id} 已完成`;
   if (result.completed_chapters) return `已推进 ${result.completed_chapters.length} 章`;
   return "";
@@ -237,7 +241,7 @@ function taskTypeLabel(type) {
     chapter_write: "章节写作", chapter_review: "章节审稿",
     revision_selection: "局部修订", revision_from_review: "审稿问题修订",
     source_operation: "来源处理", manuscript_import: "旧稿导入",
-    continuous_write: "受控连续写作",
+    continuous_write: "受控连续写作", research: "深度研究",
   }[type] || type;
 }
 

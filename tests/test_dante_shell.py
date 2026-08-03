@@ -296,11 +296,13 @@ def test_goethe_exposes_incremental_outline_react_tools():
     tool_names = {tool.name for tool in _build_goethe_tool_definitions()}
 
     assert {
+        "confirm_ideation_summary",
         "read_outline",
         "stage_outline_edits",
         "confirm_outline_edits",
         "discard_outline_edits",
     }.issubset(tool_names)
+    assert "confirm_ideation_summary" in DEFAULT_GOETHE_SYSTEM_PROMPT
     assert "已有大纲时绝不整篇重写" in DEFAULT_GOETHE_SYSTEM_PROMPT
     assert "未提及内容必须逐字保留" in DEFAULT_GOETHE_SYSTEM_PROMPT
     assert "edit_world_relation" in DEFAULT_GOETHE_SYSTEM_PROMPT

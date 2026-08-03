@@ -183,6 +183,28 @@ chapter_summary: summary
     assert raised.value.code == "MALFORMED_STRUCTURED_OUTPUT"
 
 
+def test_writer_settlement_falls_back_when_object_delta_has_string_value():
+    writer = WriterAgent.__new__(WriterAgent)
+
+    parsed = writer._parse_settlement(
+        """state_delta:
+  chapter_id: ch_007
+  operations:
+    - op: append
+      collection: open_threads
+      value: 收购者身份仍未确认
+state_updates:
+  current_state: 沈烬确认有人正在收购残页。
+chapter_summary: 沈烬发现残页收购线索。
+""",
+        {"chapter_number": 7},
+    )
+
+    assert parsed["state_updates"] == {"current_state": "沈烬确认有人正在收购残页。"}
+    assert parsed["state_delta"]["chapter_id"] == "ch_007"
+    assert parsed["state_delta"]["operations"][0]["collection"] == "current_state"
+
+
 def test_writer_parses_chinese_numeral_chapter_heading():
     writer = WriterAgent.__new__(WriterAgent)
 

@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "openwrite"
 version = "5.8.0"
@@ -10,16 +14,34 @@ dependencies = [
     "anthropic>=0.18",
     "markdown-it-py>=3.0",
     "prompt_toolkit>=3.0",
+    "lightrag-hku>=1.5.5,<2.0",
     "tomli>=2.0; python_version < '3.11'",
 ]
 
 [tool.setuptools.packages.find]
-include = ["tools*", "models*", "craft*"]
+include = ["tools*", "models*", "craft*", "integrations*"]
 exclude = ["tests*", "data*", "skills*", "config*", "docs*"]
 
 [tool.setuptools.package-data]
-tools = ["studio_assets/*", "studio_assets/js/*"]
+tools = [
+    "studio_assets/*",
+    "studio_assets/js/*",
+    "runtime_skills/*/manifest.yaml",
+    "runtime_skills/*/*.md",
+    "runtime_skills/*/references/*",
+]
 craft = ["*.md", "*.yaml", "*.yml"]
+integrations = ["deepresearch/**"]
+
+[tool.setuptools.exclude-package-data]
+integrations = [
+    "deepresearch/node_modules/**",
+    "deepresearch/dist/**",
+    "deepresearch/**/node_modules/**",
+    "deepresearch/**/dist/**",
+    "deepresearch/artifacts/**",
+    "deepresearch/**/artifacts/**",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -31,6 +53,10 @@ dev = [
 
 [project.scripts]
 openwrite = "tools.cli:main"
+openwrite-launcher = "tools.desktop_launcher:main"
+
+[tool.setuptools.data-files]
+"share/openwrite" = ["启动 OpenWrite.command", "启动 OpenWrite.bat"]
 
 [tool.mypy]
 python_version = "3.10"

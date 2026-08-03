@@ -385,14 +385,14 @@ class OpenWriteOrchestrator:
         if self._looks_like_foundation_confirmation(text):
             return self._handle_foundation_confirmation()
 
-        if self._looks_like_outline_confirmation(text):
-            return self._handle_outline_confirmation()
+        if self._looks_like_ideation_summary_confirmation(text):
+            return self._handle_ideation_summary_confirmation(text)
 
         if self._looks_like_ideation_summary_request(text):
             return self._handle_ideation_summary_request(blocked=False)
 
-        if self._looks_like_ideation_summary_confirmation(text):
-            return self._handle_ideation_summary_confirmation(text)
+        if self._looks_like_outline_confirmation(text):
+            return self._handle_outline_confirmation()
 
         if self._looks_like_outline_generation_request(text):
             return self._handle_outline_generation(text)
@@ -460,13 +460,20 @@ class OpenWriteOrchestrator:
         self.state.last_agent_action = "confirmed_ideation_summary"
         if self.state.stage == BookStage.DISCOVERY:
             self.state.stage = BookStage.FOUNDATION
+        seeded_foundation = (
+            self.story_planning_store.seed_placeholder_foundation_from_ideation_summary()
+        )
         self.state_store.save(self.state)
 
-        if self._looks_like_outline_generation_request(text):
+        if self._looks_like_outline_generation_request(text, allow_confirmation=True):
             return self._handle_outline_generation(text)
 
         return OrchestratorResult(
-            message="已确认当前想法汇总。下一步可以继续补基础设定，或让我开始整理大纲。",
+            message=(
+                "已确认当前想法汇总，并已写入基础设定。下一步可以让我开始整理大纲。"
+                if seeded_foundation
+                else "已确认当前想法汇总。下一步可以继续补基础设定，或让我开始整理大纲。"
+            ),
             stage=self.state.stage,
             blocked=False,
             next_action="ready_for_outline_generation",
@@ -628,6 +635,17 @@ class OpenWriteOrchestrator:
             and not self.story_planning_store.ideation_summary_is_current()
         ):
             return self._ensure_ideation_summary_confirmation(blocked=True)
+
+        if (
+            self.state.pending_confirmation == "outline_scope"
+            and self.story_planning_store.outline_draft_path.is_file()
+        ):
+            return OrchestratorResult(
+                message="大纲草案已生成，正在等待确认可写范围。",
+                stage=self.state.stage,
+                blocked=False,
+                next_action="request_outline_confirmation",
+            )
 
         if (
             self.story_planning_store.outline_src_path.exists()
@@ -863,8 +881,15 @@ class OpenWriteOrchestrator:
             or re.search(fr"{outline}.{{0,12}}{negation}", compact)
         )
 
-    def _looks_like_outline_generation_request(self, text: str) -> bool:
-        if any(token in text for token in ("确认", "确认好了", "确认通过", "可写")):
+    def _looks_like_outline_generation_request(
+        self,
+        text: str,
+        *,
+        allow_confirmation: bool = False,
+    ) -> bool:
+        if not allow_confirmation and any(
+            token in text for token in ("确认", "确认好了", "确认通过", "可写")
+        ):
             return False
         if not any(token in text for token in ("大纲", "提纲", "四级大纲", "章节规划")):
             return False
@@ -1179,21 +1204,59 @@ class OpenWriteOrchestrator:
         max_tokens: int,
     ) -> str:
         from ..llm import LLMClient, LLMConfig, Message
+        from ..llm.response import ProviderResponseError, classify_response
 
         config = LLMConfig.from_env()
+        provider = str(getattr(config, "provider", "") or "").lower()
+        base_url = str(getattr(config, "base_url", "") or "").lower()
+        model = str(getattr(config, "model", "") or "").lower()
+        if (
+            provider in {"openai", "custom"}
+            and "api.deepseek.com" in base_url
+            and model == "deepseek-v4-flash"
+        ):
+            extra = dict(getattr(config, "extra", {}) or {})
+            extra_body = dict(extra.get("extra_body") or {})
+            thinking = extra_body.get("thinking")
+            if not (isinstance(thinking, dict) and thinking.get("type")):
+                extra_body["thinking"] = {"type": "disabled"}
+                extra["extra_body"] = extra_body
+                config.extra = extra
         client = LLMClient(config)
-        response = client.chat(
-            messages=[
-                Message("system", system_prompt),
-                Message("user", user_prompt),
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens,
+
+        def request(prompt: str, token_budget: int) -> str:
+            response = client.chat(
+                messages=[
+                    Message("system", system_prompt),
+                    Message("user", prompt),
+                ],
+                temperature=temperature,
+                max_tokens=token_budget,
+            )
+            classify_response(
+                response.content,
+                finish_reason=getattr(response, "finish_reason", ""),
+                reasoning=getattr(response, "reasoning", ""),
+            )
+            return response.content.strip()
+
+        try:
+            return request(user_prompt, max_tokens)
+        except ProviderResponseError as exc:
+            if exc.code not in {
+                "MODEL_EMPTY_RESPONSE",
+                "MODEL_OUTPUT_TRUNCATED",
+                "MODEL_REASONING_ONLY",
+            }:
+                raise
+
+        retry_budget = max(max_tokens, int(config.max_tokens))
+        retry_prompt = (
+            user_prompt
+            + "\n\n上一次生成没有形成完整的最终答案。请压缩内部推理，立即从要求的最终内容开始输出，"
+            "并优先保证结构完整。"
         )
-        content = response.content.strip()
-        if not content:
-            raise RuntimeError("LLM returned empty content")
-        return content
+        return request(retry_prompt, retry_budget)
 
     def _build_story_context(self) -> str:
         parts: list[str] = []

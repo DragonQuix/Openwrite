@@ -7,6 +7,7 @@ const routeLabels = {
   review: "章节审稿",
   source_extract: "来源提取",
   revision: "修订生成",
+  search: "项目搜索",
 };
 
 let selectedProfileId = "";
@@ -21,6 +22,7 @@ function operationForCurrentView() {
     chapters: "chapter_write",
     review: "review",
     tools: "source_extract",
+    search: "search",
   }[state.view] || "goethe";
 }
 
@@ -103,6 +105,10 @@ function emptyProfile() {
     max_output_tokens: 24000,
     temperature: 0.7,
     timeout_seconds: 120,
+    embedding_base_url: "",
+    embedding_model: "text-embedding-3-small",
+    embedding_dimension: 1536,
+    embedding_max_tokens: 8192,
     configured: false,
   };
 }
@@ -131,10 +137,18 @@ function fillProfileForm(value) {
   $("#model-max-tokens").value = String(profile.max_output_tokens || 24000);
   $("#model-temperature").value = String(profile.temperature ?? 0.7);
   $("#model-timeout").value = String(profile.timeout_seconds || 120);
+  $("#model-embedding-base-url").value = profile.embedding_base_url || "";
+  $("#model-embedding-name").value = profile.embedding_model || "text-embedding-3-small";
+  $("#model-embedding-dimension").value = String(profile.embedding_dimension || 1536);
+  $("#model-embedding-max-tokens").value = String(profile.embedding_max_tokens || 8192);
   $("#model-api-key").value = "";
+  $("#model-embedding-api-key").value = "";
   $("#model-key-state").textContent = profile.configured
     ? "本机已有凭据；留空即可沿用"
     : "此档案尚未保存 Key";
+  $("#model-embedding-key-state").textContent = profile.embedding_key_configured
+    ? "本机已有独立 Embedding Key；留空即可沿用"
+    : "留空时沿用主模型 API Key";
   $("#model-dialog-current").textContent = profile.id
     ? `${profile.label} · ${formatNumber(profile.context_tokens)} 上下文`
     : "新建模型档案";
@@ -170,6 +184,11 @@ function profilePayload() {
     max_output_tokens: Number($("#model-max-tokens").value),
     temperature: Number($("#model-temperature").value),
     timeout_seconds: Number($("#model-timeout").value),
+    embedding_base_url: $("#model-embedding-base-url").value.trim(),
+    embedding_model: $("#model-embedding-name").value.trim(),
+    embedding_dimension: Number($("#model-embedding-dimension").value),
+    embedding_max_tokens: Number($("#model-embedding-max-tokens").value),
+    embedding_api_key: $("#model-embedding-api-key").value.trim(),
     credential_ref: existing?.credential_ref || "",
     remember_api_key: $("#model-remember-key").checked,
   };

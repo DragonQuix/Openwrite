@@ -1,6 +1,7 @@
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tools.context_manifest import build_context_manifest
@@ -9,6 +10,59 @@ from tools.init_project import init_project
 from tools.project_registry import ProjectRegistry, is_framework_root
 from tools.project_search import ProjectSearchIndex
 from tools.resources import resolve_craft_dir
+
+
+def test_distribution_excludes_deepresearch_runtime_artifacts() -> None:
+    root = Path(__file__).parents[1]
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    manifest = (root / "MANIFEST.in").read_text(encoding="utf-8")
+
+    assert '"deepresearch/**/artifacts/**"' in pyproject
+    assert "prune integrations/deepresearch/packages/*/artifacts" in manifest
+
+
+@pytest.mark.parametrize(
+    "novel_id",
+    ["", "a", "../escape", "/tmp/book", "book/part", "含空格", "two words"],
+)
+def test_project_initialization_rejects_unsafe_novel_ids(
+    tmp_path: Path, novel_id: str
+):
+    project = tmp_path / "novel"
+
+    with pytest.raises(ValueError, match="小说 ID"):
+        init_project(project, novel_id)
+
+    assert not project.exists()
+
+
+def test_project_initialization_rejects_existing_id_conflict(tmp_path: Path):
+    init_project(tmp_path, "first_book")
+
+    with pytest.raises(ValueError, match="已经绑定"):
+        init_project(tmp_path, "second_book")
+
+    config = yaml.safe_load((tmp_path / "novel_config.yaml").read_text(encoding="utf-8"))
+    assert config["novel_id"] == "first_book"
+    assert not (tmp_path / "data" / "novels" / "second_book").exists()
+
+
+def test_project_initialization_rolls_back_new_files_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import tools.outline_sync as outline_sync
+
+    project = tmp_path / "failed-project"
+
+    def fail_sync(*args, **kwargs):
+        raise RuntimeError("forced sync failure")
+
+    monkeypatch.setattr(outline_sync, "sync_outline_to_hierarchy", fail_sync)
+
+    with pytest.raises(RuntimeError, match="forced sync failure"):
+        init_project(project, "failed_book")
+
+    assert not project.exists()
 
 
 def test_project_registry_keeps_only_existing_projects(tmp_path: Path):

@@ -9,6 +9,8 @@ is_compatible_python() {
 
 PYTHON_BIN=""
 for candidate in \
+  "$ROOT_DIR/../../bin/python" \
+  "$ROOT_DIR/bin/python" \
   "$ROOT_DIR/.venv/bin/python" \
   "$ROOT_DIR/.venv312/bin/python" \
   python3.13 python3.12 python3.11 python3.10 python3 \
@@ -28,7 +30,11 @@ if [[ -z "$PYTHON_BIN" ]]; then
   exit 2
 fi
 
-"$PYTHON_BIN" -u "$ROOT_DIR/tools/desktop_launcher.py" "$@"
+if [[ -f "$ROOT_DIR/tools/desktop_launcher.py" ]]; then
+  "$PYTHON_BIN" -u "$ROOT_DIR/tools/desktop_launcher.py" "$@"
+else
+  "$PYTHON_BIN" -u -m tools.desktop_launcher "$@"
+fi
 launch_status=$?
 if [[ $launch_status -ne 0 ]]; then
   echo

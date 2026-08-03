@@ -10,17 +10,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .agent.confirmation import (
+    guard_confirmable_executors,
+    is_explicit_mutation_confirmation,
+)
 from .agent.goethe_session_state import (
     GoetheSessionState,
     GoetheSessionStateStore,
     GoetheSessionTurn,
 )
-from .agent.confirmation import (
-    guard_confirmable_executors,
-    is_explicit_mutation_confirmation,
-)
 from .agent.react import OPENWRITE_TOOLS, ReActAgent, ToolDefinition
 from .agent.toolkits import GOETHE_DIRECT_TOOLKIT
+from .runtime_skills import RuleCompiler, render_runtime_context
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,9 @@ GOETHE_TOOL_DESCRIPTIONS: dict[str, str] = {
         "用户明确确认后才以 confirm=true 写入。"
     ),
     "summarize_ideation": "汇总当前灵感与讨论，形成共识摘要。",
+    "confirm_ideation_summary": (
+        "持久化用户对当前想法汇总的明确确认；可继续执行同句中的大纲生成请求。"
+    ),
     "generate_foundation_draft": "生成背景与基础设定草案。",
     "generate_character_draft": "生成角色草案。",
     "generate_outline_draft": "只在尚无大纲时生成首版完整草稿；不会直接写入 src。",
@@ -126,6 +130,8 @@ DEFAULT_GOETHE_SYSTEM_PROMPT = """你是 OpenWrite 的 Goethe，长期会话规�
 大纲修改必须遵守以下 ReAct 流程：
 1. 普通问答、讨论、分析和征求建议只回复用户，不调用任何会修改大纲的工具。
 2. 只有用户明确要求“生成大纲”且当前没有已确认大纲时，才能调用 generate_outline_draft。
+   summarize_ideation 返回 next_action=confirm_ideation_summary 后，用户明确确认时必须先调用
+   confirm_ideation_summary，并把用户完整确认原文传入 text；若同句还要求生成大纲，该动作会继续推进。
 3. 已有大纲时绝不整篇重写。先调用 read_outline 读取目标附近原文和 revision，再调用
    stage_outline_edits，以精确 old_text/new_text 修改最小必要片段；未提及内容必须逐字保留。
 4. stage_outline_edits 只暂存草稿。调用后向用户展示 diff 摘要并等待确认，不得在同一轮自动调用
@@ -150,7 +156,9 @@ search_relation_targets/get_world_relations 定位候选，再用 edit_world_rel
 """
 
 
-def _build_goethe_tool_definitions() -> list[ToolDefinition]:
+def _build_goethe_tool_definitions(
+    allowed_tools: set[str] | None = None,
+) -> list[ToolDefinition]:
     direct_tool_defs = [
         tool for tool in OPENWRITE_TOOLS if tool.name in GOETHE_DIRECT_TOOLKIT
     ]
@@ -160,6 +168,21 @@ def _build_goethe_tool_definitions() -> list[ToolDefinition]:
             name="summarize_ideation",
             description=GOETHE_TOOL_DESCRIPTIONS["summarize_ideation"],
             parameters={"type": "object", "properties": {}},
+        ),
+        ToolDefinition(
+            name="confirm_ideation_summary",
+            description=GOETHE_TOOL_DESCRIPTIONS["confirm_ideation_summary"],
+            parameters={
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "用户本轮完整确认原文",
+                    },
+                },
+                "required": ["text"],
+            },
+            required=["text"],
         ),
         ToolDefinition(
             name="generate_foundation_draft",
@@ -313,7 +336,10 @@ def _build_goethe_tool_definitions() -> list[ToolDefinition]:
             parameters={"type": "object", "properties": {}},
         ),
     ]
-    return direct_tool_defs + action_tool_defs
+    combined = direct_tool_defs + action_tool_defs
+    if allowed_tools is None:
+        return combined
+    return [tool for tool in combined if tool.name in allowed_tools]
 
 
 class GoetheChatAgent:
@@ -380,7 +406,8 @@ class GoetheChatAgent:
         if is_first_run:
             lines = [
                 "Goethe 首次规划会话。",
-                "建议顺序：1) 书名与题材 2) 一句话冲突 3) 风格与禁忌 4) 背景/人物/大纲 5) 交接 Dante",
+                "建议顺序：1) 书名与题材 2) 一句话冲突 3) 风格与禁忌 "
+                "4) 背景/人物/大纲 5) 交接 Dante",
             ]
         else:
             lines = [
@@ -594,11 +621,12 @@ class GoetheChatAgent:
 
     def _build_default_react_agent(self) -> ReActAgent:
         client = self.llm_client_factory()
+        allowed_tools, runtime_prompt = self._runtime_surface()
         react_agent = ReActAgent(
             client=client,
             model=client.config.model,
-            tools=_build_goethe_tool_definitions(),
-            system_prompt=DEFAULT_GOETHE_SYSTEM_PROMPT,
+            tools=_build_goethe_tool_definitions(allowed_tools),
+            system_prompt=f"{DEFAULT_GOETHE_SYSTEM_PROMPT}\n\n{runtime_prompt}",
             max_turns=20,
             activity_callback=self.activity_callback,
         )
@@ -617,7 +645,10 @@ class GoetheChatAgent:
         if react_agent is None:
             return
 
-        canonical_tools = {tool.name: tool for tool in _build_goethe_tool_definitions()}
+        allowed_tools, _ = self._runtime_surface()
+        canonical_tools = {
+            tool.name: tool for tool in _build_goethe_tool_definitions(allowed_tools)
+        }
         if hasattr(react_agent, "tools"):
             existing_tools = list(getattr(react_agent, "tools", []) or [])
             merged_tools = []
@@ -755,6 +786,18 @@ class GoetheChatAgent:
             except TypeError:
                 self._tool_layers = dict(self.tool_layer_factory(self.project_root))
         return self._tool_layers
+
+    def _runtime_surface(self) -> tuple[set[str], str]:
+        layers = self._load_tool_layers()
+        resolution = layers.get("runtime_resolution")
+        if resolution is None:
+            return (
+                {tool.name for tool in _build_goethe_tool_definitions()},
+                "",
+            )
+        allowed_tools = set(getattr(resolution, "allowed_tools", ()) or ())
+        rules = RuleCompiler(self.project_root).active()
+        return allowed_tools, render_runtime_context(resolution, rules)
 
     def _should_use_handoff_shortcut(self, text: str) -> bool:
         if not self._looks_like_handoff_request(text):

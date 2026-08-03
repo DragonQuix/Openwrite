@@ -26,6 +26,15 @@ def _post(opener, url: str, payload: dict) -> dict:
         return json.loads(response.read())
 
 
+def test_studio_id_patterns_escape_hyphens_for_browser_v_mode():
+    index_path = Path(__file__).parents[1] / "tools" / "studio_assets" / "index.html"
+    html = index_path.read_text(encoding="utf-8")
+
+    assert 'pattern="[A-Za-z0-9][A-Za-z0-9_\\-]{0,47}"' in html
+    assert 'pattern="[A-Za-z0-9][A-Za-z0-9_\\-]+"' in html
+    assert 'pattern="[A-Za-z0-9][A-Za-z0-9_-]' not in html
+
+
 def test_studio_structured_assets_support_fields_and_validated_raw_mode(tmp_path: Path):
     init_project(tmp_path, "demo")
     app = StudioApplication(tmp_path)

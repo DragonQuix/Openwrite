@@ -7,6 +7,13 @@ The diagnostics use the realistic `reference/my_novel` fixture, copy only its Op
 data to a temporary directory, and allow all model-driven writes to happen in that copy. The
 canonical fixture is never mutated by a live run.
 
+To use a dedicated external test-novel checkout instead, point the diagnostics at it explicitly.
+The same copy-on-run protection applies, so existing chapters and runtime state are not modified:
+
+```bash
+export OPENWRITE_LIVE_FIXTURE="~/my_novel"
+```
+
 ## Tiers
 
 - `smoke`: provider connectivity and OpenAI-compatible tool calling.

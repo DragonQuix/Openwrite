@@ -13,6 +13,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -119,6 +120,38 @@ class StoryPlanningStore:
         if max_chars and len(rendered) > max_chars:
             return rendered[:max_chars]
         return rendered
+
+    def seed_placeholder_foundation_from_ideation_summary(self) -> bool:
+        """Persist a confirmed summary when the foundation is still a template."""
+        if not self.ideation_summary_is_current():
+            return False
+
+        foundation_path = self.story_src_dir / "foundation.md"
+        existing = (
+            foundation_path.read_text(encoding="utf-8")
+            if foundation_path.exists()
+            else ""
+        )
+        if self._story_document_has_content(existing):
+            return False
+
+        summary_text = self.ideation_summary_path.read_text(encoding="utf-8")
+        summary_meta, summary_body = parse_toml_front_matter(summary_text)
+        summary = strip_front_matter_padding(
+            summary_body if summary_meta else summary_text
+        ).strip()
+        if not summary:
+            return False
+
+        content = self._normalize_story_document(
+            "foundation",
+            "# 基础设定\n\n## 已确认想法汇总\n\n" + summary,
+        )
+        self.runtime_planning_dir.mkdir(parents=True, exist_ok=True)
+        self.story_src_dir.mkdir(parents=True, exist_ok=True)
+        self._atomic_write_text(self.foundation_draft_path, content)
+        self._atomic_write_text(foundation_path, content)
+        return True
 
     def save_foundation_draft(self, background: str, foundation: str) -> None:
         """保存基础设定草案，并同步刷新 canonical `src/story/*` 镜像。"""
@@ -689,6 +722,25 @@ class StoryPlanningStore:
         normalized_body = strip_front_matter_padding(body if meta else text)
         normalized_meta = meta or self._default_story_metadata(kind, normalized_body)
         return compose_toml_document(normalized_meta, normalized_body)
+
+    @staticmethod
+    def _story_document_has_content(text: str) -> bool:
+        meta, body = parse_toml_front_matter(str(text or ""))
+        candidate = strip_front_matter_padding(body if meta else str(text or ""))
+        for line in candidate.splitlines():
+            cleaned = line.strip()
+            if not cleaned or cleaned.startswith("#"):
+                continue
+            cleaned = re.sub(r"^[>\-*+\s]+", "", cleaned).strip()
+            cleaned = re.sub(
+                r"[（(]?\s*(?:待填写|待定义|TODO|TBD).*?[）)]?$",
+                "",
+                cleaned,
+                flags=re.IGNORECASE,
+            ).strip()
+            if cleaned:
+                return True
+        return False
 
     def _default_story_metadata(self, kind: str, body: str) -> dict[str, object]:
         summary = self._extract_story_summary(body)

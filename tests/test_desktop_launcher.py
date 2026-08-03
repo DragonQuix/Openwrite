@@ -94,3 +94,36 @@ def test_double_click_launchers_are_present_and_use_shared_bootstrap():
     assert "launch_status=$?" in mac
     assert " -u " in mac
     assert " -u " in windows
+    assert "-m tools.desktop_launcher" in mac
+    assert "-m tools.desktop_launcher" in windows
+
+
+def test_installed_launcher_reuses_the_active_environment(monkeypatch) -> None:
+    health_checks = []
+    monkeypatch.setattr(
+        desktop_launcher,
+        "_installation_healthy",
+        lambda *args, **kwargs: health_checks.append((args, kwargs)) or True,
+    )
+
+    assert desktop_launcher.ensure_runtime(Path(desktop_launcher.sys.prefix)) == Path(
+        desktop_launcher.sys.executable
+    ).absolute()
+    assert health_checks[0][1] == {"check_dependencies": False}
+
+
+def test_installation_health_can_skip_pip_check(tmp_path: Path, monkeypatch) -> None:
+    python = tmp_path / "python"
+    python.touch()
+    commands = []
+    monkeypatch.setattr(
+        desktop_launcher,
+        "_run",
+        lambda command, **_: commands.append([str(item) for item in command]),
+    )
+
+    assert desktop_launcher._installation_healthy(
+        python, tmp_path, check_dependencies=False
+    )
+    assert len(commands) == 1
+    assert commands[0][1] == "-c"

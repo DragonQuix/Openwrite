@@ -34,7 +34,10 @@ class LauncherError(RuntimeError):
 
 
 def repository_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    source_root = Path(__file__).resolve().parents[1]
+    if (source_root / "pyproject.toml").is_file():
+        return source_root
+    return Path(sys.prefix).resolve()
 
 
 def runtime_directory(
@@ -89,7 +92,12 @@ def _run(
     )
 
 
-def _installation_healthy(python: Path, root: Path) -> bool:
+def _installation_healthy(
+    python: Path,
+    root: Path,
+    *,
+    check_dependencies: bool = True,
+) -> bool:
     if not python.is_file():
         return False
     imports = ", ".join(REQUIRED_IMPORTS)
@@ -98,13 +106,22 @@ def _installation_healthy(python: Path, root: Path) -> bool:
             [python, "-c", f"import {imports}; import tools.cli"],
             cwd=root,
         )
-        _run([python, "-m", "pip", "check"], cwd=root)
+        if check_dependencies:
+            _run([python, "-m", "pip", "check"], cwd=root)
     except (OSError, subprocess.CalledProcessError):
         return False
     return True
 
 
 def ensure_runtime(root: Path) -> Path:
+    installed_root = Path(sys.prefix).resolve()
+    if root.resolve() == installed_root and not (root / "pyproject.toml").is_file():
+        installed_python = Path(sys.executable).absolute()
+        if _installation_healthy(installed_python, root, check_dependencies=False):
+            print("[OpenWrite] 已安装环境与依赖已就绪。")
+            return installed_python
+        raise LauncherError("当前 OpenWrite 安装不完整，请重新安装后再启动。")
+
     runtime = runtime_directory(root)
     python = runtime_python(runtime)
     stamp_path = runtime / ".openwrite-dependencies.json"

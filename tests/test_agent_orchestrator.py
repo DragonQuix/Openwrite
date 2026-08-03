@@ -1,6 +1,7 @@
 import sys
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -275,6 +276,112 @@ def test_dante_actions_confirm_summary_advances_discovery_to_foundation(
     assert state.stage == BookStage.FOUNDATION
     assert state.pending_confirmation == ""
     assert state.last_agent_action == "confirmed_ideation_summary"
+
+
+def test_summary_confirmation_and_outline_request_are_handled_in_one_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    init_project(tmp_path, "demo", "顶流")
+    state_store = BookStateStore(tmp_path, "demo")
+    planning_store = StoryPlanningStore(tmp_path, "demo")
+    planning_store.append_ideation("主角是被雪藏的穿越艺人")
+    planning_store.save_ideation_summary(
+        "# 当前想法汇总\n\n## 核心方向\n\n- 娱乐圈成长爽文\n"
+    )
+    state = state_store.load_or_create()
+    state.pending_confirmation = "ideation_summary"
+    state.last_agent_action = "generated_ideation_summary"
+    state_store.save(state)
+    orchestrator = OpenWriteOrchestrator.for_testing(
+        tmp_path,
+        "demo",
+        state_store=state_store,
+        planning_store=planning_store,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_generate_outline_draft",
+        lambda text: "# 四卷大纲\n\n## 第一卷\n\n从雪藏危机重新出发。\n",
+    )
+
+    result = orchestrator.handle_user_message("确认汇总了，生成大纲草案吧")
+
+    state = state_store.load_or_create()
+    assert result.blocked is False
+    assert result.next_action == "request_outline_confirmation"
+    assert state.stage == BookStage.ROLLING_OUTLINE
+    assert state.pending_confirmation == "outline_scope"
+    assert "第一卷" in planning_store.outline_draft_path.read_text(encoding="utf-8")
+    assert "娱乐圈成长爽文" in (
+        planning_store.story_src_dir / "foundation.md"
+    ).read_text(encoding="utf-8")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_generate_outline_draft",
+        lambda text: pytest.fail("pending outline draft must be reused"),
+    )
+    repeated = orchestrator.generate_outline_draft("再生成一次大纲")
+    assert repeated.blocked is False
+    assert repeated.next_action == "request_outline_confirmation"
+    assert state_store.load_or_create().pending_confirmation == "outline_scope"
+
+
+def test_chat_text_retries_reasoning_only_response_with_configured_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    import tools.llm as llm_module
+
+    calls: list[tuple[int, str]] = []
+    responses = iter(
+        [
+            SimpleNamespace(
+                content="",
+                finish_reason="length",
+                reasoning="尚未形成最终答案",
+            ),
+            SimpleNamespace(
+                content="# 完整大纲",
+                finish_reason="stop",
+                reasoning="",
+            ),
+        ]
+    )
+
+    class FakeConfig:
+        provider = "openai"
+        base_url = "https://api.deepseek.com"
+        model = "deepseek-v4-flash"
+        max_tokens = 8192
+        extra = {}
+
+        @classmethod
+        def from_env(cls):
+            return cls()
+
+    class FakeClient:
+        def __init__(self, config):
+            assert config.max_tokens == 8192
+            assert config.extra["extra_body"]["thinking"] == {"type": "disabled"}
+
+        def chat(self, *, messages, temperature, max_tokens):
+            calls.append((max_tokens, messages[-1].content))
+            return next(responses)
+
+    monkeypatch.setattr(llm_module, "LLMConfig", FakeConfig)
+    monkeypatch.setattr(llm_module, "LLMClient", FakeClient)
+    orchestrator = OpenWriteOrchestrator.for_testing(tmp_path, "demo")
+
+    content = orchestrator._chat_text(
+        "system",
+        "生成大纲",
+        temperature=0.4,
+        max_tokens=6000,
+    )
+
+    assert content == "# 完整大纲"
+    assert [budget for budget, _ in calls] == [6000, 8192]
+    assert "立即从要求的最终内容开始输出" in calls[1][1]
 
 
 def test_dante_actions_require_outline_scope_confirmation_before_preflight(

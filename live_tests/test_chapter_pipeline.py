@@ -36,17 +36,24 @@ def test_full_chapter_seven_write_settlement_and_review(
     before_truth = truth_manager.load_truth_files()
     before_snapshots = truth_manager.list_snapshots()
 
-    write_result = service.write_chapter(
-        {
-            "chapter_id": "ch_007",
-            "target_words": target_words,
-            "temperature": 0.65,
-            "guidance": (
-                "这是端到端诊断稿。严格服从现有作者意图与创作罗盘；"
-                "不要提前揭示收购者、白续或老马克的真实身份。"
-            ),
-        }
-    )
+    try:
+        write_result = service.write_chapter(
+            {
+                "chapter_id": "ch_007",
+                "target_words": target_words,
+                "temperature": 0.65,
+                "guidance": (
+                    "这是端到端诊断稿。严格服从现有作者意图与创作罗盘；"
+                    "不要提前揭示收购者、白续或老马克的真实身份。"
+                ),
+            }
+        )
+    except Exception as exc:
+        write_artifact(
+            "chapter_ch_007_failure.json",
+            {"stage": "write", "error_type": type(exc).__name__, "error": str(exc)},
+        )
+        raise
     draft_path = Path(write_result["draft_path"])
     memory = ChapterMemoryStore(live_project, "mujianzhe").load("ch_007")
     after_truth = truth_manager.load_truth_files()
@@ -54,6 +61,12 @@ def test_full_chapter_seven_write_settlement_and_review(
     runtime_state = truth_manager.load_runtime_state()
     chapter_run = ChapterRunStore(live_project, "mujianzhe").latest_for_chapter(
         "ch_007", statuses={"written", "reviewed"}
+    )
+    actual_word_count = int(getattr(memory, "word_count", 0) or 0) if memory else 0
+    if isinstance(memory, dict):
+        actual_word_count = int(memory.get("word_count") or 0)
+    target_deviation_ratio = (
+        abs(actual_word_count - target_words) / target_words if target_words > 0 else 0
     )
     combined_truth = "\n".join(
         [after_truth.current_state, after_truth.ledger, after_truth.relationships]
@@ -77,6 +90,9 @@ def test_full_chapter_seven_write_settlement_and_review(
             "diagnostics": {
                 "requested_target_words": target_words,
                 "outline_target_words": 3200,
+                "actual_word_count": actual_word_count,
+                "target_deviation_ratio": round(target_deviation_ratio, 4),
+                "within_review_tolerance": target_deviation_ratio <= 0.3,
                 "lost_baseline_markers": lost_baseline_markers,
             },
             "draft": draft_path.read_text(encoding="utf-8") if draft_path.is_file() else "",
@@ -103,6 +119,13 @@ def test_full_chapter_seven_write_settlement_and_review(
     )
 
     review_result = service.review_chapter("ch_007")
+    issue_details = review_result.get("issue_details") or []
+    if target_deviation_ratio > 0.3:
+        assert any(
+            str(item.get("category") or "") == "目标字数偏差"
+            for item in issue_details
+            if isinstance(item, dict)
+        ), "reviewer did not report a >30% target-word deviation"
     workflow = WorkflowScheduler(live_project, "mujianzhe").load_workflow("ch_007")
     book_state = BookStateStore(live_project, "mujianzhe").load_or_create()
     persisted_memory = yaml.safe_load(
@@ -119,6 +142,17 @@ def test_full_chapter_seven_write_settlement_and_review(
             "book_state": book_state,
             "workflow": workflow.to_dict() if workflow else None,
             "draft": draft,
+            "diagnostics": {
+                "requested_target_words": target_words,
+                "actual_word_count": actual_word_count,
+                "target_deviation_ratio": round(target_deviation_ratio, 4),
+                "within_review_tolerance": target_deviation_ratio <= 0.3,
+                "target_deviation_reported": any(
+                    str(item.get("category") or "") == "目标字数偏差"
+                    for item in issue_details
+                    if isinstance(item, dict)
+                ),
+            },
         },
     )
 

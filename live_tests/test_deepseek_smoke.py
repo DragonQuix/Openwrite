@@ -14,7 +14,7 @@ def test_deepseek_flash_connectivity(live_env, write_artifact):
             Message("user", "Return OPENWRITE_LIVE_OK"),
         ],
         temperature=0,
-        max_tokens=64,
+        max_tokens=512,
     )
 
     write_artifact(

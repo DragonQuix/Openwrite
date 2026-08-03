@@ -197,6 +197,9 @@ class NovelApplicationService:
         *,
         format_name: str = "md",
         title: str = "",
+        author: str = "",
+        language: str = "zh-CN",
+        cover: Path | None = None,
     ) -> Path:
         from tools.novel_workspace import export_manuscript
 
@@ -207,6 +210,9 @@ class NovelApplicationService:
                 Path(output),
                 format_name=format_name,
                 title=title or str(self.config.get("title") or ""),
+                author=author or str(self.config.get("author") or ""),
+                language=language or str(self.config.get("language") or "zh-CN"),
+                cover=cover,
             )
             return path
         except (OSError, ValueError) as exc:
@@ -560,6 +566,115 @@ class NovelApplicationService:
             "source_id": source_id,
             "review_report": report,
         }
+
+    def prepare_source_analysis_v2(
+        self,
+        *,
+        source_id: str,
+        content: str,
+        relative_name: str,
+        focus: list[str] | None = None,
+        input_budget_tokens: int = 12000,
+    ) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisError
+        from tools.source_pack import SourcePackService
+
+        source_id = self._validate_source_id(source_id)
+        try:
+            return SourcePackService(self.project_root, self.novel_id).prepare_v2(
+                source_id,
+                content,
+                relative_name=relative_name,
+                focus=focus,
+                input_budget_tokens=input_budget_tokens,
+            )
+        except SourceAnalysisError as exc:
+            raise NovelServiceError(str(exc), code=exc.code) from exc
+
+    def analyze_source_v2(self, source_id: str) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisError
+        from tools.source_pack import SourcePackService
+
+        source_id = self._validate_source_id(source_id)
+        try:
+            return SourcePackService(self.project_root, self.novel_id).analyze_v2(
+                source_id
+            )
+        except SourceAnalysisError as exc:
+            raise NovelServiceError(str(exc), code=exc.code) from exc
+
+    def source_status_v2(self, source_id: str) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisError
+        from tools.source_pack import SourcePackService
+
+        source_id = self._validate_source_id(source_id)
+        try:
+            return SourcePackService(self.project_root, self.novel_id).status_v2(
+                source_id
+            )
+        except SourceAnalysisError as exc:
+            raise NovelServiceError(str(exc), code=exc.code) from exc
+
+    def retry_source_v2(self, source_id: str, chunk_id: str) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisError
+        from tools.source_pack import SourcePackService
+
+        source_id = self._validate_source_id(source_id)
+        try:
+            return SourcePackService(self.project_root, self.novel_id).retry_v2(
+                source_id, chunk_id
+            )
+        except SourceAnalysisError as exc:
+            raise NovelServiceError(str(exc), code=exc.code) from exc
+
+    def synthesize_sources_v2(self, source_ids: list[str]) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisError
+        from tools.source_pack import SourcePackService
+
+        clean_ids = [self._validate_source_id(source_id) for source_id in source_ids]
+        try:
+            return SourcePackService(self.project_root, self.novel_id).synthesize_v2(
+                clean_ids
+            )
+        except SourceAnalysisError as exc:
+            raise NovelServiceError(str(exc), code=exc.code) from exc
+
+    def source_profile_v2(self, profile_id: str) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisError
+        from tools.source_pack import SourcePackService
+
+        try:
+            return SourcePackService(self.project_root, self.novel_id).profile_v2(
+                profile_id
+            )
+        except SourceAnalysisError as exc:
+            raise NovelServiceError(str(exc), code=exc.code) from exc
+
+    def preview_source_promotion_v2(
+        self, profile_id: str, target: str
+    ) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisError
+        from tools.source_pack import SourcePackService
+
+        try:
+            return SourcePackService(
+                self.project_root, self.novel_id
+            ).preview_promotion_v2(profile_id, target)
+        except SourceAnalysisError as exc:
+            raise NovelServiceError(str(exc), code=exc.code) from exc
+
+    def apply_source_promotion_v2(
+        self, preview_id: str, *, confirm: bool
+    ) -> dict[str, Any]:
+        from tools.source_analysis import SourceAnalysisError
+        from tools.source_pack import SourcePackService
+
+        try:
+            return SourcePackService(
+                self.project_root, self.novel_id
+            ).apply_promotion_v2(preview_id, confirm=confirm)
+        except SourceAnalysisError as exc:
+            raise NovelServiceError(str(exc), code=exc.code) from exc
 
     def promote_source(self, source_id: str, target: str = "all") -> dict[str, Any]:
         from tools.source_pack import SourcePackService

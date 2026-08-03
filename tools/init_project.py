@@ -16,16 +16,167 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Optional
+
+import yaml
 
 from tools.frontmatter import compose_toml_document
+
+NOVEL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}")
+PROJECT_TEMPLATES = {"default", "demo_short"}
+
+
+def validate_novel_id(novel_id: str) -> str:
+    """Return a normalized project ID or reject unsafe filesystem input."""
+    value = str(novel_id or "").strip()
+    if not NOVEL_ID_PATTERN.fullmatch(value):
+        raise ValueError(
+            "小说 ID 必须为 2-64 位字母、数字、下划线或连字符，且不能包含路径"
+        )
+    return value
 
 
 def init_project(
     project_root: Path,
     novel_id: str,
-    title: Optional[str] = None,
+    title: str | None = None,
+    *,
+    template: str = "default",
+):
+    """Validate and initialize a project with best-effort failure rollback."""
+    root = Path(project_root)
+    clean_id = validate_novel_id(novel_id)
+    if template not in PROJECT_TEMPLATES:
+        raise ValueError(f"不支持的项目模板: {template}")
+
+    config_path = root / "novel_config.yaml"
+    if config_path.is_file():
+        try:
+            existing_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            raise ValueError("现有 novel_config.yaml 无法读取") from exc
+        existing_id = (
+            str(existing_config.get("novel_id") or "").strip()
+            if isinstance(existing_config, dict)
+            else ""
+        )
+        if existing_id and existing_id != clean_id:
+            raise ValueError(
+                f"项目已经绑定小说 ID {existing_id}，不能初始化为 {clean_id}"
+            )
+
+    snapshot = _initialization_snapshot(root, clean_id)
+    try:
+        return _init_project_impl(root, clean_id, title, template=template)
+    except Exception:
+        _rollback_initialization(root, clean_id, snapshot)
+        raise
+
+
+def _initialization_snapshot(
+    project_root: Path, novel_id: str
+) -> dict[str, object]:
+    novel_root = project_root / "data" / "novels" / novel_id
+    targets = _initialization_targets(project_root, novel_id)
+    files: dict[Path, bytes | None] = {}
+    for path in targets:
+        files[path] = path.read_bytes() if path.is_file() else None
+    existing_dirs = (
+        {path for path in novel_root.rglob("*") if path.is_dir()} | {novel_root}
+        if novel_root.is_dir()
+        else set()
+    )
+    return {
+        "files": files,
+        "existing_dirs": existing_dirs,
+        "metadata_dir_existed": (project_root / ".openwrite").is_dir(),
+        "container_dirs": {
+            path: path.is_dir()
+            for path in (
+                project_root,
+                project_root / "data",
+                project_root / "data" / "novels",
+            )
+        },
+    }
+
+
+def _initialization_targets(project_root: Path, novel_id: str) -> list[Path]:
+    novel_root = project_root / "data" / "novels" / novel_id
+    return [
+        project_root / "novel_config.yaml",
+        project_root / ".openwrite" / "project.yaml",
+        novel_root / "src" / "outline.md",
+        novel_root / "src" / "story" / "author_intent.md",
+        novel_root / "src" / "story" / "background.md",
+        novel_root / "src" / "story" / "foundation.md",
+        novel_root / "src" / "story" / "current_focus.md",
+        novel_root / "src" / "characters" / "lin_zhou.md",
+        novel_root / "src" / "world" / "rules.md",
+        novel_root / "src" / "world" / "timeline.md",
+        novel_root / "src" / "world" / "terminology.md",
+        novel_root / "data" / "hierarchy.yaml",
+        novel_root / "data" / "foreshadowing" / "dag.yaml",
+        novel_root / "data" / "style" / "fingerprint.yaml",
+    ]
+
+
+def _rollback_initialization(
+    project_root: Path, novel_id: str, snapshot: dict[str, object]
+) -> None:
+    files = snapshot["files"]
+    assert isinstance(files, dict)
+    for path, content in files.items():
+        assert isinstance(path, Path)
+        if content is None:
+            if path.is_file() or path.is_symlink():
+                path.unlink(missing_ok=True)
+            continue
+        assert isinstance(content, bytes)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    novel_root = project_root / "data" / "novels" / novel_id
+    existing_dirs = snapshot["existing_dirs"]
+    assert isinstance(existing_dirs, set)
+    if novel_root.is_dir():
+        candidates = sorted(
+            (path for path in novel_root.rglob("*") if path.is_dir()),
+            key=lambda path: len(path.parts),
+            reverse=True,
+        )
+        candidates.append(novel_root)
+        for path in candidates:
+            if path in existing_dirs:
+                continue
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+
+    metadata_dir = project_root / ".openwrite"
+    if not snapshot["metadata_dir_existed"] and metadata_dir.is_dir():
+        try:
+            metadata_dir.rmdir()
+        except OSError:
+            pass
+
+    container_dirs = snapshot["container_dirs"]
+    assert isinstance(container_dirs, dict)
+    for path in reversed(tuple(container_dirs)):
+        if container_dirs[path] or not path.is_dir():
+            continue
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+
+
+def _init_project_impl(
+    project_root: Path,
+    novel_id: str,
+    title: str | None = None,
     *,
     template: str = "default",
 ):
@@ -301,14 +452,14 @@ rhythm: "待定义"
     print("4. openwrite studio   # 也可用网页端完成同样流程")
 
 
-def _seed_demo_assets(project_root: Path, novel_id: str, title: Optional[str]) -> None:
+def _seed_demo_assets(project_root: Path, novel_id: str, title: str | None) -> None:
     """写入示范资产，使 demo 项目可立刻进入写章流程。"""
     novel_root = project_root / "data" / "novels" / novel_id
     demo_title = title or "雾城来信"
     story_dir = novel_root / "src" / "story"
     story_dir.mkdir(parents=True, exist_ok=True)
     (story_dir / "author_intent.md").write_text(
-        f"""# 作者意图
+        """# 作者意图
 
 ## 核心承诺
 
@@ -330,7 +481,7 @@ def _seed_demo_assets(project_root: Path, novel_id: str, title: Optional[str]) -
         encoding="utf-8",
     )
     (story_dir / "background.md").write_text(
-        f"""# 故事背景
+        """# 故事背景
 
 ## 一句话故事
 

@@ -52,6 +52,14 @@ class TaskContext:
     def progress_callback(self, phase: str, note: str = "") -> None:
         self.phase(phase, note)
 
+    def persist_progress(self, result: dict[str, Any]) -> None:
+        self.store.transition(
+            self.task_id,
+            updates={"result": result},
+            event="task_progress_saved",
+            details={"completed": len(result.get("completed_chapters") or [])},
+        )
+
     def await_confirmation(self, result: dict[str, Any]) -> None:
         raise TaskAwaitingConfirmation(result)
 
@@ -115,6 +123,11 @@ class PersistentTaskRunner:
         if previous.get("status") not in {"failed", "cancelled", "interrupted"}:
             raise TaskStoreError("Only failed, cancelled or interrupted tasks can be retried")
         payload = self.store.materialize_input(previous)
+        result = self.store.materialize_result(previous)
+        if result.get("completed_chapters"):
+            payload["_already_completed"] = list(result["completed_chapters"])
+        if result.get("usage"):
+            payload["_already_used"] = dict(result["usage"])
         return self.submit(
             str(previous["type"]),
             payload,
@@ -141,8 +154,10 @@ class PersistentTaskRunner:
         if previous.get("status") != "awaiting_confirmation":
             raise TaskStoreError("Task is not awaiting confirmation")
         payload = self.store.materialize_input(previous)
-        result = previous.get("result") if isinstance(previous.get("result"), dict) else {}
+        result = self.store.materialize_result(previous)
         payload["_already_completed"] = list(result.get("completed_chapters") or [])
+        if result.get("usage"):
+            payload["_already_used"] = dict(result["usage"])
         return self.submit(
             str(previous["type"]),
             payload,

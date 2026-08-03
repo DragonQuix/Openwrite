@@ -4,11 +4,13 @@ from pathlib import Path
 import pytest
 
 import tools.chapter_pipeline as chapter_pipeline_module
+from tools.agent.book_state import BookStateStore
 from tools.agent.tool_layers import build_goethe_tool_layers
 from tools.agent.tool_runtime import build_tool_executors
 from tools.init_project import init_project
 from tools.novel_service import NovelApplicationService, NovelServiceError
 from tools.source_pack import SourcePackService
+from tools.story_planning import StoryPlanningStore
 from tools.studio import StudioApplication
 
 
@@ -122,6 +124,26 @@ def test_goethe_outline_tools_stage_diff_before_confirming_src(tmp_path: Path):
     assert confirmed["ok"] is True
     assert confirmed["action"] == "confirm_outline_edits"
     assert "核心主题: 记忆与代价" in source_path.read_text(encoding="utf-8")
+
+
+def test_goethe_exposes_persistent_ideation_summary_confirmation(tmp_path: Path):
+    init_project(tmp_path, "demo", "汇总确认")
+    layers = build_goethe_tool_layers(tmp_path, "demo")
+    actions = layers["action_tool_executors"]
+    planning = StoryPlanningStore(tmp_path, "demo")
+    planning.append_ideation("主角能听见旧唱片里的记忆")
+    planning.save_ideation_summary("# 当前想法汇总\n\n- 音乐悬疑成长故事\n")
+    state_store = BookStateStore(tmp_path, "demo")
+    state = state_store.load_or_create()
+    state.pending_confirmation = "ideation_summary"
+    state_store.save(state)
+
+    result = actions["confirm_ideation_summary"]({"text": "确认这版汇总"})
+
+    assert "confirm_ideation_summary" in layers["action_toolkit"]
+    assert result["action"] == "confirm_ideation_summary"
+    assert result["blocked"] is False
+    assert state_store.load_or_create().pending_confirmation != "ideation_summary"
 
 
 @pytest.mark.parametrize(
