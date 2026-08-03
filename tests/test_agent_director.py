@@ -108,6 +108,30 @@ def test_assemble_packet_includes_runtime_truth_files(tmp_path: Path):
     assert "这是运行态 relationships。" in markdown
 
 
+def test_packet_budget_counts_canonical_groups_once_and_keeps_legacy_fallbacks():
+    canonical = ChapterAssemblyPacket(
+        novel_id="demo",
+        chapter_id="ch_001",
+        core_documents={"background": "核心"},
+        story_background="核心",
+        setting_documents={"world.rules": "设定"},
+        concept_documents={"world.rules": "设定"},
+        continuity_documents={"current_state": "连续"},
+        current_state="连续",
+    )
+    legacy = ChapterAssemblyPacket(
+        novel_id="demo",
+        chapter_id="ch_001",
+        story_background="核心",
+        concept_documents={"world.rules": "设定"},
+        current_state="连续",
+    )
+
+    expected = len("核心设定连续")
+    assert ChapterAssemblerV2._packet_character_count(canonical) == expected
+    assert ChapterAssemblerV2._packet_character_count(legacy) == expected
+
+
 def test_director_run_uses_runtime_truth_files_for_writer_and_reviewer(tmp_path: Path):
     captured: dict[str, dict] = {}
     ctx = SimpleNamespace(project_root=str(tmp_path))

@@ -8,12 +8,14 @@ The on-disk layout remains backward compatible (``src/story`` and
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
+
+import yaml
 
 from tools.frontmatter import parse_toml_front_matter
-
 
 LIBRARY_SCOPES = ("core", "characters", "settings")
 CANONICAL_SEARCH_SCOPES = {
@@ -25,7 +27,11 @@ CANONICAL_SEARCH_SCOPES = {
     "continuity",
     "chapters",
 }
-LEGACY_SCOPE_ALIASES = {"story": "core", "world": "settings"}
+LEGACY_SCOPE_ALIASES = {
+    "story": "core",
+    "world": "settings",
+    "assets": "characters",
+}
 SEARCH_SCOPES = CANONICAL_SEARCH_SCOPES | set(LEGACY_SCOPE_ALIASES)
 
 SCOPE_LABELS = {
@@ -192,7 +198,7 @@ def query_library(
             continue
         if clean_category and descriptor.category != clean_category:
             continue
-        title = _title(path, content)
+        title = document_title(path, content)
         haystack = "\n".join(
             (title, relative, descriptor.category_label, content[:4000])
         ).casefold()
@@ -203,7 +209,7 @@ def query_library(
                 "path": relative,
                 "title": title,
                 **descriptor.to_dict(),
-                "summary": _summary(content),
+                "summary": document_summary(path, content),
             }
         )
     items.sort(
@@ -303,12 +309,48 @@ def _settings_category(
         )
     ).casefold()
     groups = (
-        ("setting_places", ("location", "place", "domain", "region", "地点", "场所", "区域", "冠域")),
-        ("setting_factions", ("faction", "organization", "power", "group", "势力", "组织", "门派", "联邦", "帝国")),
+        (
+            "setting_places",
+            ("location", "place", "domain", "region", "地点", "场所", "区域", "冠域"),
+        ),
+        (
+            "setting_factions",
+            ("faction", "organization", "power", "group", "势力", "组织", "门派", "联邦", "帝国"),
+        ),
         ("setting_history", ("history", "timeline", "event", "历史", "时间线", "事件", "前史")),
-        ("setting_terms", ("item", "artifact", "terminology", "object", "物品", "道具", "术语", "遗物")),
-        ("setting_threats", ("antagonist", "threat", "disaster", "monster", "反派", "威胁", "灾难", "异常", "神性生物")),
-        ("setting_systems", ("system", "rule", "path", "technique", "ability", "规则", "体系", "能力", "修行", "机制")),
+        (
+            "setting_terms",
+            ("item", "artifact", "terminology", "object", "物品", "道具", "术语", "遗物"),
+        ),
+        (
+            "setting_threats",
+            (
+                "antagonist",
+                "threat",
+                "disaster",
+                "monster",
+                "反派",
+                "威胁",
+                "灾难",
+                "异常",
+                "神性生物",
+            ),
+        ),
+        (
+            "setting_systems",
+            (
+                "system",
+                "rule",
+                "path",
+                "technique",
+                "ability",
+                "规则",
+                "体系",
+                "能力",
+                "修行",
+                "机制",
+            ),
+        ),
     )
     for category, markers in groups:
         if any(marker in value for marker in markers):
@@ -330,16 +372,18 @@ def _legacy_entity_type(content: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _title(path: Path, content: str) -> str:
+def document_title(path: Path, content: str) -> str:
+    """Return the same creator-facing title across catalog and search surfaces."""
     match = re.search(r"^#\s+(.+?)\s*$", content, re.MULTILINE)
     if match:
         return match.group(1).strip()
-    metadata = _metadata(content)
+    metadata = _metadata(content) or _yaml_metadata(path, content)
     return str(metadata.get("name") or path.stem.replace("_", " ")).strip()
 
 
-def _summary(content: str) -> str:
-    metadata = _metadata(content)
+def document_summary(path: Path, content: str) -> str:
+    """Extract a short summary from Markdown front matter or structured YAML."""
+    metadata = _metadata(content) or _yaml_metadata(path, content)
     summary = str(metadata.get("summary") or "").strip()
     if summary:
         return summary[:240]
@@ -349,3 +393,13 @@ def _summary(content: str) -> str:
         if line and not line.startswith(("#", ">", "|", "- ", "* ")):
             return line[:240]
     return ""
+
+
+def _yaml_metadata(path: Path, content: str) -> dict[str, Any]:
+    if path.suffix.lower() not in {".yaml", ".yml"}:
+        return {}
+    try:
+        payload = yaml.safe_load(content) or {}
+    except yaml.YAMLError:
+        return {}
+    return payload if isinstance(payload, dict) else {}

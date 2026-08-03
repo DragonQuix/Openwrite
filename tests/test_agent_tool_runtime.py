@@ -78,6 +78,9 @@ def test_agent_direct_tools_do_not_call_cli_private_functions(monkeypatch, tmp_p
     )
     assert executors["list_chapters"]({}) == {"chapters": []}
     assert "current_state" in executors["get_truth_files"]({})
+    library = executors["query_library"]({"scope": "core"})
+    assert library["scope"] == "core"
+    assert all(item["scope"] == "core" for item in library["items"])
     assert executors["query_world"]({})["count"] >= 0
     assert "relations" in executors["get_world_relations"]({})
     outline = executors["get_outline_structure"]({})
@@ -184,6 +187,7 @@ def test_dante_direct_toolkit_exposes_only_light_tools():
     assert DANTE_DIRECT_TOOLKIT == {
         "get_status",
         "get_context",
+        "query_library",
         "search_project",
         "read_project_document",
         "edit_project_document",

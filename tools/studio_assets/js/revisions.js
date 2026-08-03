@@ -1,5 +1,6 @@
 import { $, api, formatNumber, showToast, state } from "/js/core.js";
 import { enqueueTask } from "/js/tasks.js";
+import { getPrimaryMarkdownEditor } from "/js/markdown-editor.js";
 
 let refreshWorkspace = async () => {};
 let reopenDocument = async () => {};
@@ -31,8 +32,8 @@ export function bindRevisionUI(callbacks = {}) {
 export function syncRevisionControls() {
   const chapter = state.document && state.document.path.startsWith("data/manuscript/");
   const configured = Boolean(state.workspace?.model?.configured);
-  const editor = $("#document-editor");
-  const hasSelection = chapter && editor.selectionEnd > editor.selectionStart;
+  const selection = getPrimaryMarkdownEditor().selection();
+  const hasSelection = chapter && selection.end > selection.start;
   $("#revision-selection").hidden = !chapter;
   $("#revision-selection").disabled = !configured || !hasSelection || state.dirty;
   $("#revision-full-chapter").hidden = !chapter;
@@ -65,19 +66,21 @@ function openRevisionRequest(fullChapter) {
     showToast(state.dirty ? "请先保存当前章节" : "请先打开章节", true);
     return;
   }
-  const editor = $("#document-editor");
-  const start = fullChapter ? 0 : editor.selectionStart;
-  const end = fullChapter ? editor.value.length : editor.selectionEnd;
+  const editor = getPrimaryMarkdownEditor();
+  const value = editor.getValue();
+  const selection = editor.selection();
+  const start = fullChapter ? 0 : selection.start;
+  const end = fullChapter ? value.length : selection.end;
   if (end <= start) {
     showToast("请先选择需要修改的文字", true);
     return;
   }
   $("#revision-full-mode").value = fullChapter ? "1" : "0";
-  $("#revision-selection-start").value = String(codePointOffset(editor.value, start));
-  $("#revision-selection-end").value = String(codePointOffset(editor.value, end));
-  $("#revision-original-text").value = editor.value.slice(start, end);
+  $("#revision-selection-start").value = String(codePointOffset(value, start));
+  $("#revision-selection-end").value = String(codePointOffset(value, end));
+  $("#revision-original-text").value = value.slice(start, end);
   $("#revision-request-title").textContent = fullChapter ? "整章修订" : "修订所选文字";
-  $("#revision-selection-preview").textContent = editor.value.slice(start, end);
+  $("#revision-selection-preview").textContent = value.slice(start, end);
   $("#revision-request-status").textContent = fullChapter
     ? "整章修订可能影响后续连续性，应用前请逐段检查差异。"
     : "提案不会直接覆盖正文，生成后需要再次确认。";
@@ -336,16 +339,18 @@ async function createManuscriptCheckpoint() {
 
 function createManuscriptAnnotation() {
   if (state.dirty) { showToast("请先保存当前章节", true); return; }
-  const editor = $("#document-editor");
-  const start = editor.selectionStart;
-  const end = editor.selectionEnd;
-  const quote = editor.value.slice(start, end);
+  const editor = getPrimaryMarkdownEditor();
+  const value = editor.getValue();
+  const selection = editor.selection();
+  const start = selection.start;
+  const end = selection.end;
+  const quote = value.slice(start, end);
   if (!quote) { showToast("请先在正文中选择要批注的文字", true); return; }
   pendingAnnotation = {
     revision: state.document.revision,
     quote,
-    start_hint: codePointOffset(editor.value, start),
-    end_hint: codePointOffset(editor.value, end),
+    start_hint: codePointOffset(value, start),
+    end_hint: codePointOffset(value, end),
   };
   $("#revision-history-dialog").close();
   $("#manuscript-annotation-quote").textContent = quote;
@@ -430,10 +435,9 @@ function renderManuscriptAnnotations(annotations) {
     locate.className = "quiet-button";
     locate.textContent = "定位";
     locate.disabled = annotation.anchor_state === "detached";
-    locate.addEventListener("click", () => {
+    locate.addEventListener("click", async () => {
       $("#revision-history-dialog").close();
-      $("#document-editor").focus();
-      $("#document-editor").setSelectionRange(annotation.current_start, annotation.current_end);
+      await getPrimaryMarkdownEditor().selectRange(annotation.current_start, annotation.current_end);
     });
     actions.append(locate);
     if (annotation.status === "open") {
@@ -486,20 +490,15 @@ function locateIssue(issue) {
     showToast("该问题没有可定位的正文证据", true);
     return;
   }
-  const editor = $("#document-editor");
   const [start, end] = anchor;
   $("#review-dialog").close();
-  editor.focus();
-  editor.setSelectionRange(start, end);
-  const lineHeight = Number.parseFloat(getComputedStyle(editor).lineHeight) || 28;
-  const line = editor.value.slice(0, start).split("\n").length - 1;
-  editor.scrollTop = Math.max(0, line * lineHeight - editor.clientHeight / 3);
+  getPrimaryMarkdownEditor().selectRange(start, end);
   syncRevisionControls();
 }
 
 function issueAnchor(issue) {
   if (!state.document) return null;
-  const content = $("#document-editor").value;
+  const content = getPrimaryMarkdownEditor().getValue();
   const quote = issue.evidence?.quote || "";
   const start = Number(issue.anchor?.start_hint);
   const end = Number(issue.anchor?.end_hint);

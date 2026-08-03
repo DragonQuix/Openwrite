@@ -820,15 +820,54 @@ OPENWRITE_TOOLS = [
         },
     ),
     ToolDefinition(
+        name="query_library",
+        description=(
+            "按与 Studio 相同的资料分类列出作品核心、角色和设定；返回子分类、"
+            "结构化编辑能力与源文件路径。适合先浏览资料目录，再按需读取原文。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "enum": ["all", "core", "characters", "settings"],
+                    "description": "资料范围，默认 all",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "可选子分类 ID，可从首次查询结果的 categories 获取",
+                },
+                "query": {"type": "string", "description": "可选关键词"},
+                "limit": {"type": "integer", "description": "返回数量，默认 80"},
+            },
+            "required": [],
+        },
+    ),
+    ToolDefinition(
         name="search_project",
-        description="搜索小说项目中的大纲、人物、世界设定、故事资产和正文。",
+        description=(
+            "使用 LightRAG 与精确文本搜索大纲、作品核心、角色、设定、"
+            "连续性资料和正文；结果包含统一资料子分类与源文件行号。"
+        ),
         parameters={
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "搜索关键词"},
                 "scope": {
                     "type": "string",
-                    "description": "范围：all/outline/story/characters/world/chapters",
+                    "enum": [
+                        "all",
+                        "outline",
+                        "core",
+                        "characters",
+                        "settings",
+                        "continuity",
+                        "chapters",
+                    ],
+                    "description": (
+                        "范围：all/outline/core/characters/settings/continuity/chapters；"
+                        "旧 story/world/assets 调用仍由运行时兼容"
+                    ),
                 },
                 "limit": {"type": "integer", "description": "返回数量，默认 20"},
             },
@@ -1064,10 +1103,10 @@ OPENWRITE_TOOLS = [
             "required": [],
         },
     ),
-    # 世界查询
+    # 设定查询（工具名保留 world 以兼容既有调用）
     ToolDefinition(
         name="query_world",
-        description="查询世界观实体。可列出所有实体或获取单个实体详情。",
+        description="查询设定实体（兼容工具名）。可列出所有实体或获取单个实体详情。",
         parameters={
             "type": "object",
             "properties": {
@@ -1274,7 +1313,7 @@ OPENWRITE_SYSTEM_PROMPT = """你是 OpenWrite 小说创作引擎的 Agent。
 
 你的职责是帮用户完成小说创作任务，包括：
 - 写章节、审查章节
-- 管理大纲、角色、世界观
+- 管理作品核心、角色、设定与连续性资料
 - 跟踪伏笔和真相文件
 - 回答创作相关问题
 
@@ -1292,9 +1331,10 @@ OPENWRITE_SYSTEM_PROMPT = """你是 OpenWrite 小说创作引擎的 Agent。
 | get_chapter_review | 查看审稿结果并判断是否过期 |
 | get_task_activity | 查看任务快照和事件 |
 | get_goethe_handoff | 查看 Goethe 到 Dante 的交接产物 |
-| search_project | 搜索项目资产 |
-| read_project_document | 读取小说资产文档 |
-| edit_project_document | 预览或确认修改小说资产文档 |
+| query_library | 按作品核心、角色、设定浏览资料目录 |
+| search_project | 搜索作品资料 |
+| read_project_document | 读取作品资料文档 |
+| edit_project_document | 预览或确认修改作品资料文档 |
 | list_chapters | 列出章节 |
 | create_outline | 创建/更新大纲 |
 | get_outline_structure | 读取卷/幕/节/章树并推荐下一章 |
@@ -1306,7 +1346,7 @@ OPENWRITE_SYSTEM_PROMPT = """你是 OpenWrite 小说创作引擎的 Agent。
 | list_foreshadowing | 列出伏笔 |
 | update_foreshadowing | 更新伏笔状态 |
 | validate_foreshadowing | 验证伏笔DAG |
-| query_world | 查询世界观实体 |
+| query_world | 查询设定实体（兼容名称） |
 | get_world_relations | 获取关系图谱 |
 | search_relation_targets | 搜索关系图候选节点 |
 | edit_world_relation | 预览或确认一个增量关系修改 |

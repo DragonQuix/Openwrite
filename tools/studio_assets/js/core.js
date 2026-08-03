@@ -30,6 +30,10 @@ export const state = {
   outline: null,
   outlineSelectedId: null,
   outlineRenamingId: null,
+  outlineExpandedIds: new Set(),
+  outlineExpansionInitialized: false,
+  outlineExpansionKey: "",
+  outlineInspectorAutoCollapsed: false,
   productTour: { active: false, step: "" },
   revisionProposal: null,
   revisionHunkSelection: new Set(),
@@ -41,6 +45,11 @@ export const state = {
     profile: null,
     promotionPreview: null,
   },
+  library: {
+    query: "",
+    category: "all",
+    editorMode: "document",
+  },
   runtimeSkill: { resolution: null, rulePreview: null },
   assets: {
     kind: "character",
@@ -49,6 +58,7 @@ export const state = {
     selectedForExport: new Set(),
     mode: "structured",
     draft: null,
+    dirty: false,
     packagePreview: null,
   },
   relationship: {
@@ -63,9 +73,9 @@ export const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 
 export const labels = {
   outline: "可写大纲",
-  story: "故事资产",
-  characters: "人物档案",
-  world: "世界设定",
+  core: "作品核心",
+  characters: "角色",
+  settings: "设定",
   chapters: "正文章节",
 };
 

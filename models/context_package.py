@@ -52,9 +52,9 @@ class ForeshadowingState(BaseModel):
 
 
 class WorldRules(BaseModel):
-    """世界观规则"""
+    """Static setting rules and related entities (legacy class name)."""
 
-    constraints: List[str] = Field(default_factory=list, description="世界观约束/涉及设定")
+    constraints: List[str] = Field(default_factory=list, description="设定约束/涉及设定")
     entities: List[Dict[str, Any]] = Field(default_factory=list, description="相关实体")
     relations: List[Dict[str, Any]] = Field(default_factory=list, description="实体关系")
 
@@ -62,7 +62,7 @@ class WorldRules(BaseModel):
         """生成世界观上下文文本"""
         parts: List[str] = []
         if self.constraints:
-            parts.append("【世界观约束】")
+            parts.append("【设定约束】")
             for c in self.constraints[:10]:
                 parts.append(f"  - {c}")
         if self.entities:
@@ -85,6 +85,10 @@ class GenerationContext(BaseModel):
     chapter_id: str = Field(default="", description="当前章节 ID")
     author_intent: str = Field(default="", description="整本书长期不变的作者意图")
     creative_focus: str = Field(default="", description="当前阶段的创作罗盘与硬约束")
+    core_documents: Dict[str, str] = Field(
+        default_factory=dict,
+        description="作品核心文档；通常包含故事背景与基础设定",
+    )
     chapter_goals: List[str] = Field(default_factory=list, description="本章写作目标")
     target_words: int = Field(default=6000, description="目标字数")
     emotion_arc: str = Field(default="", description="章内微观情绪变化")
@@ -112,8 +116,8 @@ class GenerationContext(BaseModel):
     # 风格
     style_profile: Any = Field(default=None, description="风格档案")
 
-    # 世界观
-    world_rules: WorldRules = Field(default_factory=WorldRules, description="世界观规则")
+    # 设定（world_rules 保留字段名以兼容既有调用）
+    world_rules: WorldRules = Field(default_factory=WorldRules, description="设定规则")
 
     # 最近文本
     recent_text: str = Field(default="", description="最近章节文本（用于连贯性）")
@@ -181,6 +185,16 @@ class GenerationContext(BaseModel):
         if self.creative_focus:
             sections["创作罗盘（当前最高优先级）"] = self.creative_focus
 
+        if self.core_documents:
+            labels = {"background": "故事背景", "foundation": "基础设定"}
+            core_parts = [
+                f"### {labels.get(key, key)}\n{content}"
+                for key, content in self.core_documents.items()
+                if str(content or "").strip()
+            ]
+            if core_parts:
+                sections["作品核心"] = "\n\n".join(core_parts)
+
         if self.recent_text:
             sections["上文"] = self.recent_text
 
@@ -218,7 +232,7 @@ class GenerationContext(BaseModel):
                 sections["风格指南"] = self.style_profile.to_summary(max_chars=500)
 
         if self.world_rules and (self.world_rules.constraints or self.world_rules.entities):
-            sections["世界观"] = self.world_rules.to_context_text(max_chars=300)
+            sections["设定"] = self.world_rules.to_context_text(max_chars=300)
 
         if self.chapter_goals:
             sections["本章目标"] = "\n".join(f"- {g}" for g in self.chapter_goals)

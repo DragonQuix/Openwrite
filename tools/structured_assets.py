@@ -102,11 +102,14 @@ class StructuredAssetService:
             }
         meta, body = parse_toml_front_matter(content)
         clean_body = strip_front_matter_padding(body if meta else content)
+        display_name = str(meta.get("name") or self._markdown_title(content) or path.stem)
+        data = dict(meta)
+        data.setdefault("name", display_name)
         return {
             "kind": asset_kind,
             "id": str(meta.get("id") or path.stem),
-            "name": str(meta.get("name") or path.stem),
-            "data": meta,
+            "name": display_name,
+            "data": data,
             "body_markdown": clean_body,
             "raw_text": content,
             "path": self._relative(path),
@@ -232,10 +235,15 @@ class StructuredAssetService:
         return {
             "kind": kind,
             "id": str(meta.get("id") or path.stem),
-            "name": str(meta.get("name") or path.stem),
+            "name": str(meta.get("name") or self._markdown_title(content) or path.stem),
             "summary": str(meta.get("summary") or ""),
             "path": self._relative(path),
         }
+
+    @staticmethod
+    def _markdown_title(content: str) -> str:
+        match = re.search(r"^#\s+(.+?)\s*$", str(content or ""), re.MULTILINE)
+        return match.group(1).strip() if match else ""
 
     def _find(self, kind: str, asset_id: str) -> Path | None:
         clean_id = self._asset_id(asset_id)

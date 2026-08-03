@@ -26,6 +26,12 @@ exclude = ["tests*", "data*", "skills*", "config*", "docs*"]
 tools = [
     "studio_assets/*",
     "studio_assets/js/*",
+    "studio_assets/vendor/vditor/*",
+    "studio_assets/vendor/vditor/dist/*",
+    "studio_assets/vendor/vditor/dist/css/content-theme/*",
+    "studio_assets/vendor/vditor/dist/js/i18n/*",
+    "studio_assets/vendor/vditor/dist/js/icons/*",
+    "studio_assets/vendor/vditor/dist/js/lute/*",
     "runtime_skills/*/manifest.yaml",
     "runtime_skills/*/*.md",
     "runtime_skills/*/references/*",

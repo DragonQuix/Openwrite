@@ -48,6 +48,17 @@ def test_writer_inspection_contains_exact_messages_manifest_and_checks(
     assert required and all(item["status"] == "included" for item in required)
 
 
+def test_canonical_inspection_checks_creator_facing_context_groups(tmp_path: Path):
+    result = AgentContextInspector(_project(tmp_path)).inspect(
+        "ch_001",
+        agent="canonical",
+    )
+
+    check_names = {item["field"] for item in result["checks"]}
+    assert {"core_documents", "setting_documents", "continuity_documents"} <= check_names
+    assert "concept_documents" not in check_names
+
+
 def test_reviewer_inspection_uses_canonical_state_and_written_run_target(tmp_path: Path):
     root = _project(tmp_path)
     save_chapter(root, "demo", "ch_001", "钟差", "雨落在钟楼上。")

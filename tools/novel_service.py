@@ -339,6 +339,7 @@ class NovelApplicationService:
                 "target_words",
                 "author_intent",
                 "creative_focus",
+                "core_documents",
                 "story_background",
                 "previous_chapter_content",
                 "current_state",
@@ -346,7 +347,9 @@ class NovelApplicationService:
                 "relationships",
                 "style_documents",
                 "character_documents",
+                "setting_documents",
                 "concept_documents",
+                "continuity_documents",
                 "prompt_sections",
                 "foundation",
             ):

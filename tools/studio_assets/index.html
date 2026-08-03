@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>OpenWrite Studio</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/vendor/vditor/dist/index.css">
+  <link rel="stylesheet" href="/styles.css?v=vditor-1">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true">
@@ -21,6 +22,8 @@
     <symbol id="icon-network" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="16" y="16" width="6" height="6" rx="1"/><path d="M5 16v-2a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v2M12 8v4"/></symbol>
     <symbol id="icon-sparkles" viewBox="0 0 24 24"><path d="m12 3-1.2 3.3L7.5 7.5l3.3 1.2L12 12l1.2-3.3 3.3-1.2-3.3-1.2ZM5 14l-.8 2.2L2 17l2.2.8L5 20l.8-2.2L8 17l-2.2-.8ZM18 13l-1.2 3.3-3.3 1.2 3.3 1.2L18 22l1.2-3.3 3.3-1.2-3.3-1.2Z"/></symbol>
     <symbol id="icon-pen" viewBox="0 0 24 24"><path d="M12 19h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="icon-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
     <symbol id="icon-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
     <symbol id="icon-focus" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/></symbol>
     <symbol id="icon-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
@@ -66,7 +69,7 @@
             <button class="nav-item" type="button" data-view="outline"><svg><use href="#icon-outline"/></svg><span>大纲</span></button>
             <button class="nav-item" type="button" data-view="chapters"><svg><use href="#icon-file"/></svg><span>正文</span></button>
             <button class="nav-item" type="button" data-view="review"><svg><use href="#icon-review"/></svg><span>审稿</span></button>
-            <button class="nav-item" type="button" data-view="story" data-nav-section="library"><svg><use href="#icon-book"/></svg><span>资料库</span></button>
+            <button class="nav-item" type="button" data-view="core" data-nav-section="library"><svg><use href="#icon-book"/></svg><span>资料库</span></button>
             <button class="nav-item" type="button" data-view="agents" data-nav-section="agents"><svg><use href="#icon-sparkles"/></svg><span>AI 协作</span></button>
           </div>
           <details class="nav-tools">
@@ -85,6 +88,12 @@
         <div class="document-heading">
           <span id="document-group-title">最近章节</span>
           <span id="document-count">0</span>
+        </div>
+        <div id="library-browser-tools" class="library-browser-tools" hidden>
+          <input id="library-filter" type="search" autocomplete="off" placeholder="筛选当前资料" aria-label="筛选当前资料">
+          <select id="library-category-filter" aria-label="资料子分类">
+            <option value="all">全部子分类</option>
+          </select>
         </div>
         <div id="document-list" class="document-list" role="list"></div>
         <div class="sidebar-footer">
@@ -238,7 +247,7 @@
               <p id="editor-path" class="editor-path"></p>
               <input id="editor-title" class="editor-title" aria-label="文档标题" readonly>
             </div>
-            <div class="editor-actions">
+            <div id="document-editor-actions" class="editor-actions">
               <span id="editor-word-count">0 字</span>
               <span id="editor-target-count" hidden>目标 0</span>
               <button id="outline-tree-back" class="quiet-button" type="button" hidden>返回大纲树</button>
@@ -250,15 +259,26 @@
               <button id="save-document" class="primary-button" type="button" disabled>保存</button>
             </div>
           </div>
-          <div id="library-tabs" class="library-tabs" role="tablist" aria-label="资料库分类" hidden>
-            <button type="button" role="tab" data-library-view="story" data-view="story">故事</button>
-            <button type="button" role="tab" data-library-view="characters" data-view="characters">人物</button>
-            <button type="button" role="tab" data-library-view="world" data-view="world">世界</button>
-            <button type="button" role="tab" data-library-view="assets" data-view="assets">结构化资产</button>
+          <div id="library-navigation" class="library-navigation" hidden>
+            <div id="library-tabs" class="library-tabs" role="tablist" aria-label="资料库分类">
+              <button type="button" role="tab" data-library-view="core" data-view="core">作品核心</button>
+              <button type="button" role="tab" data-library-view="characters" data-view="characters">角色</button>
+              <button type="button" role="tab" data-library-view="settings" data-view="settings">设定</button>
+            </div>
+            <div class="library-actions">
+              <select id="library-create-kind" aria-label="新建资料类型">
+                <option value="character">角色</option>
+                <option value="world">设定</option>
+                <option value="progression">成长体系</option>
+              </select>
+              <button id="asset-package-import-open" class="quiet-button" type="button">导入</button>
+              <button id="asset-package-export" class="quiet-button" type="button" disabled>导出当前</button>
+              <button id="asset-create" class="primary-button" type="button">新建</button>
+            </div>
           </div>
-          <div class="editor-commandbar" aria-label="编辑器工具">
+          <div id="editor-commandbar" class="editor-commandbar" aria-label="编辑器工具">
             <div class="editor-progress" aria-live="polite">
-              <span id="editor-autosave-state">自动保存已开启</span>
+              <span id="editor-autosave-state">即时渲染 · 自动保存已开启</span>
               <span id="editor-chapter-progress" hidden></span>
             </div>
             <div class="editor-tool-actions">
@@ -277,8 +297,33 @@
             <button id="editor-replace-all" class="quiet-button" type="button">全部替换</button>
             <button id="editor-find-close" class="icon-button" type="button" aria-label="关闭查找">×</button>
           </form>
-          <div class="editor-canvas">
-            <textarea id="document-editor" class="document-editor" spellcheck="false" aria-label="Markdown 文档正文"></textarea>
+          <div id="asset-editor-pane" class="asset-editor-pane" hidden>
+            <div id="asset-empty" class="asset-empty-state" hidden></div>
+            <form id="asset-form" class="asset-form" hidden>
+              <div class="asset-editor-heading">
+                <div>
+                  <span id="asset-editor-kind" class="asset-kind-label">角色</span>
+                  <h2 id="asset-editor-title">资料字段</h2>
+                  <code id="asset-editor-path"></code>
+                </div>
+                <div class="segmented" role="group" aria-label="编辑模式">
+                  <button class="segment active" type="button" data-asset-mode="structured">字段</button>
+                  <button class="segment" type="button" data-asset-mode="raw">原文</button>
+                </div>
+              </div>
+              <div id="asset-structured-fields" class="asset-fields"></div>
+              <label id="asset-raw-field" class="asset-raw-field" hidden for="asset-raw-text">
+                原文
+                <textarea id="asset-raw-text" rows="24" spellcheck="false"></textarea>
+              </label>
+              <div class="asset-form-actions">
+                <p id="asset-form-status" class="form-status" role="status"></p>
+                <button id="asset-save" class="primary-button" type="submit">保存资料</button>
+              </div>
+            </form>
+          </div>
+          <div id="document-editor-pane" class="editor-canvas">
+            <div id="document-editor" class="document-editor" aria-label="Markdown 文档正文"></div>
           </div>
         </section>
 
@@ -286,7 +331,7 @@
           <div class="outline-header">
             <div>
               <p class="eyebrow">STRUCTURED OUTLINE</p>
-              <h1 id="outline-title">卷 · 幕 · 节 · 章</h1>
+              <h1 id="outline-title">大纲结构</h1>
               <p class="section-description">从 <code>src/outline.md</code> 实时生成，不维护第二份大纲。</p>
             </div>
             <div class="outline-header-actions">
@@ -330,7 +375,7 @@
             <div>
               <p class="eyebrow">FIND &amp; CONTEXT</p>
               <h1 id="search-title">项目搜索</h1>
-              <p class="section-description">搜索真源、人物、世界设定与正文；结果保留文件、标题和行号，可直接打开原文。</p>
+              <p class="section-description">搜索作品核心、角色、设定、连续性与正文；结果保留资料分类、文件和行号。</p>
             </div>
           </div>
           <form id="search-form" class="search-form">
@@ -338,75 +383,16 @@
             <select id="search-scope" aria-label="搜索范围">
               <option value="all">全部资产</option>
               <option value="outline">大纲</option>
-              <option value="story">故事</option>
-              <option value="characters">人物</option>
-              <option value="world">世界</option>
+              <option value="core">作品核心</option>
+              <option value="characters">角色</option>
+              <option value="settings">设定</option>
+              <option value="continuity">连续性</option>
               <option value="chapters">正文</option>
             </select>
             <button class="primary-button" type="submit">搜索</button>
           </form>
           <p id="search-status" class="form-status" role="status">输入关键词开始搜索</p>
           <div id="search-results" class="search-results"></div>
-        </section>
-
-        <section id="assets-view" class="workspace-view asset-view" hidden aria-labelledby="assets-title">
-          <div class="library-tabs library-tabs-page" role="tablist" aria-label="资料库分类">
-            <button type="button" role="tab" data-library-view="story" data-view="story">故事</button>
-            <button type="button" role="tab" data-library-view="characters" data-view="characters">人物</button>
-            <button type="button" role="tab" data-library-view="world" data-view="world">世界</button>
-            <button class="active" type="button" role="tab" aria-selected="true" data-library-view="assets" data-view="assets">结构化资产</button>
-          </div>
-          <div class="section-title-row workspace-view-header">
-            <div>
-              <p class="eyebrow">CANONICAL ASSETS</p>
-              <h1 id="assets-title">结构化资产</h1>
-              <p class="section-description">字段化编辑人物、组织与成长体系；保存结果仍是可读的 Markdown 或 YAML 真源。</p>
-            </div>
-            <div class="asset-header-actions">
-              <button id="asset-package-import-open" class="quiet-button" type="button">导入资产包</button>
-              <button id="asset-package-export" class="quiet-button" type="button">导出所选</button>
-              <button id="asset-create" class="primary-button" type="button">新建资产</button>
-            </div>
-          </div>
-          <div class="asset-workspace">
-            <aside class="asset-browser" aria-label="资产列表">
-              <div class="segmented asset-kind-tabs" role="group" aria-label="资产类型">
-                <button class="segment active" type="button" data-asset-kind="character">人物</button>
-                <button class="segment" type="button" data-asset-kind="world">世界与组织</button>
-                <button class="segment" type="button" data-asset-kind="progression">成长体系</button>
-              </div>
-              <p id="asset-list-status" class="form-status" role="status">正在读取资产…</p>
-              <div id="asset-list" class="asset-list" role="listbox" aria-label="选择资产"></div>
-            </aside>
-            <section class="asset-editor-panel" aria-labelledby="asset-editor-title">
-              <div id="asset-empty" class="asset-empty-state">
-                <strong>选择一个资产开始编辑</strong>
-                <span>也可以新建当前类型的资产，或导入 `.owasset.zip`。</span>
-              </div>
-              <form id="asset-form" class="asset-form" hidden>
-                <div class="asset-editor-heading">
-                  <div>
-                    <span id="asset-editor-kind" class="asset-kind-label">人物</span>
-                    <h2 id="asset-editor-title">新建资产</h2>
-                    <code id="asset-editor-path"></code>
-                  </div>
-                  <div class="segmented" role="group" aria-label="编辑模式">
-                    <button class="segment active" type="button" data-asset-mode="structured">字段</button>
-                    <button class="segment" type="button" data-asset-mode="raw">原文</button>
-                  </div>
-                </div>
-                <div id="asset-structured-fields" class="asset-fields"></div>
-                <label id="asset-raw-field" class="asset-raw-field" hidden for="asset-raw-text">
-                  原文
-                  <textarea id="asset-raw-text" rows="24" spellcheck="false"></textarea>
-                </label>
-                <div class="asset-form-actions">
-                  <p id="asset-form-status" class="form-status" role="status"></p>
-                  <button id="asset-save" class="primary-button" type="submit">保存资产</button>
-                </div>
-              </form>
-            </section>
-          </div>
         </section>
 
         <section id="agents-view" class="workspace-view" hidden aria-labelledby="agents-title">
@@ -1210,6 +1196,8 @@
     </aside>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script id="openwrite-vditor-icons" src="/vendor/vditor/dist/js/icons/ant.js"></script>
+  <script src="/vendor/vditor/dist/index.min.js"></script>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

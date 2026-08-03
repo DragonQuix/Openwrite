@@ -80,6 +80,22 @@ def test_studio_structured_assets_support_fields_and_validated_raw_mode(tmp_path
             app._task_runner.shutdown(wait=True)
 
 
+def test_studio_structured_assets_preserve_legacy_markdown_titles(tmp_path: Path):
+    init_project(tmp_path, "demo")
+    path = tmp_path / "data" / "novels" / "demo" / "src" / "characters" / "lin_zhou.md"
+    path.write_text("# 林舟\n\n## 性格\n\n沉默谨慎。\n", encoding="utf-8")
+    app = StudioApplication(tmp_path)
+    try:
+        asset = app.read_asset("character", "lin_zhou")
+
+        assert asset["name"] == "林舟"
+        assert asset["data"]["name"] == "林舟"
+        assert app.asset_surface("character")["assets"][0]["name"] == "林舟"
+    finally:
+        if app._task_runner is not None:
+            app._task_runner.shutdown(wait=True)
+
+
 def test_studio_asset_package_preview_requires_explicit_conflict_resolution(tmp_path: Path):
     source_root = tmp_path / "source"
     target_root = tmp_path / "target"

@@ -30,9 +30,10 @@ EXIT_COMMANDS = {"退出", "quit", "exit", "q"}
 GOETHE_TOOL_DESCRIPTIONS: dict[str, str] = {
     "get_status": "读取当前书籍状态与运行信息。",
     "get_context": "读取章节上下文与近期材料。",
+    "query_library": "按作品核心、角色和设定浏览资料目录。",
     "list_chapters": "列出已存在章节。",
     "get_truth_files": "读取运行态真相文件。",
-    "query_world": "查询世界观、角色或实体资料。",
+    "query_world": "查询设定实体；保留该名称用于兼容现有工作流。",
     "get_world_relations": "查询世界关系与关联。",
     "edit_world_relation": "预览或确认一个带 revision 校验的增量关系修改。",
     "get_outline_structure": "读取卷、幕、节、章树和下一章建议，不修改文件。",

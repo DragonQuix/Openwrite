@@ -236,11 +236,14 @@ def _packet_payload(packet: Any) -> dict[str, Any]:
             for key in (
                 "author_intent",
                 "creative_focus",
+                "core_documents",
                 "story_background",
                 "previous_chapter_content",
                 "style_documents",
                 "character_documents",
+                "setting_documents",
                 "concept_documents",
+                "continuity_documents",
                 "prompt_sections",
                 "foundation",
                 "target_words",
@@ -312,12 +315,19 @@ def build_writer_payload(
     }
     if packet:
         sections = packet.get("prompt_sections", {})
-        concepts = packet.get("concept_documents", {})
+        legacy_concepts = packet.get("concept_documents", {})
+        settings = packet.get("setting_documents") or legacy_concepts
+        continuity = packet.get("continuity_documents") or legacy_concepts
+        core_documents = packet.get("core_documents", {})
         styles = packet.get("style_documents", {})
         if not isinstance(sections, dict):
             sections = {}
-        if not isinstance(concepts, dict):
-            concepts = {}
+        if not isinstance(settings, dict):
+            settings = {}
+        if not isinstance(continuity, dict):
+            continuity = {}
+        if not isinstance(core_documents, dict):
+            core_documents = {}
         payload["author_intent"] = str(
             packet.get("author_intent")
             or sections.get("作者意图")
@@ -341,16 +351,22 @@ def build_writer_payload(
         if active:
             payload["active_characters"] = active
         for key in ("current_state", "ledger", "relationships"):
-            payload[key] = str(concepts.get(key) or payload.get(key) or "")
+            payload[key] = str(continuity.get(key) or payload.get(key) or "")
         payload["foreshadowing_summary"] = str(
-            concepts.get("pending_hooks") or payload["foreshadowing_summary"]
+            continuity.get("pending_hooks") or payload["foreshadowing_summary"]
         )
         payload["recent_chapters"] = str(packet.get("previous_chapter_content") or "")
         extra = []
         for label, value in (
-            ("故事背景", packet.get("story_background")),
-            ("基础设定", packet.get("foundation")),
-            ("世界规则", concepts.get("world_rules")),
+            (
+                "故事背景",
+                core_documents.get("background") or packet.get("story_background"),
+            ),
+            (
+                "基础设定",
+                core_documents.get("foundation") or packet.get("foundation"),
+            ),
+            ("设定规则", settings.get("world.rules") or settings.get("world_rules")),
             ("额外要求", guidance),
         ):
             text = str(value or "").strip()
@@ -367,10 +383,10 @@ def build_writer_payload(
 
 
 def build_review_payload(packet: dict[str, Any]) -> dict[str, Any]:
-    concepts = packet.get("concept_documents", {})
+    continuity = packet.get("continuity_documents") or packet.get("concept_documents", {})
     sections = packet.get("prompt_sections", {})
-    if not isinstance(concepts, dict):
-        concepts = {}
+    if not isinstance(continuity, dict):
+        continuity = {}
     if not isinstance(sections, dict):
         sections = {}
     characters = packet.get("character_documents", {})
@@ -398,10 +414,10 @@ def build_review_payload(packet: dict[str, Any]) -> dict[str, Any]:
         "target_words": int(packet.get("target_words") or 0),
         "character_profiles": character_text[:4000],
         "current_state": str(
-            concepts.get("current_state") or packet.get("current_state") or ""
+            continuity.get("current_state") or packet.get("current_state") or ""
         ),
         "relationships": str(
-            concepts.get("relationships") or packet.get("relationships") or ""
+            continuity.get("relationships") or packet.get("relationships") or ""
         ),
         "author_intent": str(
             packet.get("author_intent") or sections.get("作者意图") or ""

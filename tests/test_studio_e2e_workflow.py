@@ -250,4 +250,6 @@ def test_studio_end_to_end_novel_crud_lifecycle(tmp_path: Path, monkeypatch: pyt
     assert mime == "text/markdown; charset=utf-8"
     assert "地下星图" in markdown.decode("utf-8")
     assert "第五章：后期回响" in markdown.decode("utf-8")
-    assert world["path"] in {item["path"] for item in app.workspace()["documents"]["world"]}
+    assert world["path"] in {
+        item["path"] for item in app.workspace()["documents"]["settings"]
+    }

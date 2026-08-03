@@ -29,6 +29,12 @@ import yaml
 from tools.asset_package import AssetPackageError, AssetPackageService
 from tools.context_manifest import build_context_manifest
 from tools.git_checkpoint import GitCheckpointManager
+from tools.library_catalog import (
+    CATEGORY_ORDER,
+    LIBRARY_SCOPES,
+    describe_document,
+    iter_library_paths,
+)
 from tools.model_profiles import (
     ModelProfileError,
     ModelProfileStore,
@@ -471,9 +477,9 @@ class StudioApplication:
                 },
                 "documents": {
                     "outline": [],
-                    "story": [],
+                    "core": [],
                     "characters": [],
-                    "world": [],
+                    "settings": [],
                     "chapters": [],
                 },
                 "model": self._model_payload(),
@@ -986,13 +992,17 @@ class StudioApplication:
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             )
         content = path.read_text(encoding="utf-8")
-        return {
+        result = {
             "path": self._relative(path),
             "title": self._document_title(path),
             "content": content,
             "version": str(path.stat().st_mtime_ns),
             "revision": RevisionService.fingerprint(content),
         }
+        descriptor = describe_document(result["path"], content)
+        if descriptor.scope in LIBRARY_SCOPES:
+            result.update(descriptor.to_dict())
+        return result
 
     def write_document(
         self,
@@ -1051,10 +1061,12 @@ class StudioApplication:
         relative = self._relative(path)
         if relative == "src/outline.md":
             prefix = "outline"
+        elif relative.startswith("src/story/"):
+            prefix = "core"
         elif relative.startswith("src/characters/"):
             prefix = "character"
-        elif relative.startswith("src/world/"):
-            prefix = "world"
+        elif relative.startswith(("src/world/", "src/progression/")):
+            prefix = "setting"
         elif relative.startswith("data/manuscript/"):
             prefix = "chapter"
         else:
@@ -2986,11 +2998,27 @@ class StudioApplication:
         src = self.novel_root / "src"
         groups = {
             "outline": [],
-            "story": self._collect_documents(src / "story", recursive=False),
-            "characters": self._collect_documents(src / "characters", recursive=False),
-            "world": self._collect_documents(src / "world", recursive=True),
+            "core": [],
+            "characters": [],
+            "settings": [],
             "chapters": [self._chapter_summary(item) for item in chapters],
         }
+        for path in iter_library_paths(self.novel_root):
+            try:
+                content = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            summary = self._library_document_summary(path, content)
+            scope = str(summary.get("scope") or "")
+            if scope in LIBRARY_SCOPES:
+                groups[scope].append(summary)
+        for scope in LIBRARY_SCOPES:
+            groups[scope].sort(
+                key=lambda item: (
+                    CATEGORY_ORDER.get(str(item.get("category") or ""), 999),
+                    str(item.get("title") or "").casefold(),
+                )
+            )
         outline = src / "outline.md"
         if outline.exists():
             groups["outline"].append(self._document_summary(outline))
@@ -3047,13 +3075,32 @@ class StudioApplication:
             "subtitle": str(path.relative_to(self.novel_root).parent),
         }
 
+    def _library_document_summary(self, path: Path, content: str) -> dict[str, Any]:
+        relative = self._relative(path)
+        descriptor = describe_document(relative, content)
+        return {
+            "path": relative,
+            "title": self._document_title(path),
+            "subtitle": descriptor.category_label,
+            **descriptor.to_dict(),
+        }
+
     def _document_title(self, path: Path) -> str:
         try:
             head = path.read_text(encoding="utf-8")[:2000]
         except OSError:
             return path.stem
         match = re.search(r"^#\s+(.+?)\s*$", head, re.MULTILINE)
-        return match.group(1).strip() if match else path.stem.replace("_", " ")
+        if match:
+            return match.group(1).strip()
+        if path.suffix.lower() in {".yaml", ".yml"}:
+            try:
+                payload = yaml.safe_load(head) or {}
+            except yaml.YAMLError:
+                payload = {}
+            if isinstance(payload, dict) and str(payload.get("name") or "").strip():
+                return str(payload["name"]).strip()
+        return path.stem.replace("_", " ")
 
     def _resolve_document(self, relative_path: str, *, write: bool) -> Path:
         if not isinstance(relative_path, str) or not relative_path.strip():

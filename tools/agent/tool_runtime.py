@@ -116,6 +116,17 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
                     scope=str(args.get("scope") or "all"),
                     limit=int(args.get("limit") or 20),
                 )
+            if operation == "query_library":
+                from tools.library_catalog import query_library
+
+                novel_root = project_root / "data" / "novels" / novel_id
+                return query_library(
+                    novel_root,
+                    scope=str(args.get("scope") or "all"),
+                    category=str(args.get("category") or ""),
+                    query=str(args.get("query") or ""),
+                    limit=int(args.get("limit") or 80),
+                )
             if operation == "read_project_document":
                 return _read_project_document(project_root, novel_id, args)
             if operation == "edit_project_document":
@@ -867,6 +878,7 @@ def build_tool_executors(project_root: Path) -> dict[str, ToolExecutor]:
         "get_status",
         "get_context",
         "search_project",
+        "query_library",
         "read_project_document",
         "edit_project_document",
         "list_chapters",

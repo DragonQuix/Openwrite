@@ -194,10 +194,11 @@ class AgentContextInspector:
                 packet,
                 required=("author_intent", "creative_focus", "outline"),
                 recommended=(
+                    "core_documents",
                     "previous_chapter_content",
-                    "current_state",
                     "character_documents",
-                    "concept_documents",
+                    "setting_documents",
+                    "continuity_documents",
                     "style_documents",
                 ),
             ),
@@ -516,9 +517,17 @@ class AgentContextInspector:
         if isinstance(value, str):
             return value
         if isinstance(value, dict):
-            return json.dumps(value, ensure_ascii=False, default=str)
+            return "\n".join(
+                f"{key}: {rendered}"
+                for key, item in value.items()
+                if (rendered := AgentContextInspector._render_value(item)).strip()
+            )
         if isinstance(value, (list, tuple)):
-            return "\n".join(AgentContextInspector._render_value(item) for item in value)
+            return "\n".join(
+                rendered
+                for item in value
+                if (rendered := AgentContextInspector._render_value(item)).strip()
+            )
         return str(value or "")
 
     @staticmethod

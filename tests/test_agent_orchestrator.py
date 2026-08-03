@@ -1189,6 +1189,15 @@ def test_build_chapter_packet_persists_context_snapshot(tmp_path: Path):
     snapshot_path = snapshot_dir / "ch_001.yaml"
 
     assert packet["story_background"]
+    assert packet["core_documents"]
+    assert "world_rules" in packet["setting_documents"]
+    assert {"current_state", "ledger", "relationships"} <= set(
+        packet["continuity_documents"]
+    )
+    assert packet["concept_documents"] == {
+        **packet["setting_documents"],
+        **packet["continuity_documents"],
+    }
     assert packet["style_documents"]
     assert packet["prompt_sections"]
     assert snapshot_path.exists()

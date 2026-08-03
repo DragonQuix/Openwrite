@@ -83,12 +83,25 @@ class OpenWriteOrchestrator:
         builder = ContextBuilder(self.project_root, self.novel_id)
         context = builder.build_generation_context(chapter_id)
         prompt_sections = context.to_prompt_sections()
+        core_documents = dict(getattr(context, "core_documents", {}) or {})
+        setting_documents = {
+            "world_rules": prompt_sections.get("设定")
+            or prompt_sections.get("世界观", "")
+        }
+        continuity_documents = {
+            "current_state": getattr(context, "current_state", ""),
+            "pending_hooks": getattr(context, "pending_hooks", ""),
+            "ledger": getattr(context, "ledger", ""),
+            "relationships": getattr(context, "relationships", ""),
+            "chapter_summaries": getattr(context, "chapter_summaries", ""),
+        }
 
         packet = {
             "novel_id": self.novel_id,
             "chapter_id": chapter_id,
             "author_intent": getattr(context, "author_intent", ""),
             "creative_focus": getattr(context, "creative_focus", ""),
+            "core_documents": core_documents,
             "story_background": self.story_planning_store.read_story_document(
                 "background", max_chars=2000
             ),
@@ -98,7 +111,9 @@ class OpenWriteOrchestrator:
             "previous_chapter_content": self._read_previous_chapter_content(chapter_id),
             "style_documents": self._build_style_documents(context, prompt_sections),
             "character_documents": self._build_character_documents(context),
-            "concept_documents": self._build_concept_documents(context, prompt_sections),
+            "setting_documents": setting_documents,
+            "continuity_documents": continuity_documents,
+            "concept_documents": {**setting_documents, **continuity_documents},
             "prompt_sections": prompt_sections,
             "compression": dict(getattr(context, "compression", {}) or {}),
         }
@@ -1009,7 +1024,8 @@ class OpenWriteOrchestrator:
         self, context: Any, prompt_sections: dict[str, str]
     ) -> dict[str, str]:
         return {
-            "world_rules": prompt_sections.get("世界观", ""),
+            "world_rules": prompt_sections.get("设定")
+            or prompt_sections.get("世界观", ""),
             "chapter_goals": prompt_sections.get("本章目标", ""),
             "current_state": getattr(context, "current_state", ""),
             "pending_hooks": getattr(context, "pending_hooks", ""),

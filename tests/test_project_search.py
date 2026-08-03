@@ -7,6 +7,7 @@ from tools.project_search import (
     IndexedDocument,
     LightRAGConfiguration,
     LightRAGSearchBackend,
+    MANIFEST_VERSION,
     ProjectSearchIndex,
     RetrievedChunk,
     SearchConfigurationError,
@@ -24,10 +25,12 @@ def test_project_search_maps_lightrag_chunks_back_to_scoped_source_lines(tmp_pat
         encoding="utf-8",
     )
     world.write_text("# 旧钟楼\n\n钟楼会吞掉寄出的信。\n", encoding="utf-8")
+    captured = {}
 
     class FakeBackend:
         def search(self, documents, query, *, limit):
-            del query, limit
+            captured["query"] = query
+            del limit
             by_path = {document.path: document for document in documents}
             return BackendSearchResult(
                 chunks=[
@@ -38,7 +41,9 @@ def test_project_search_maps_lightrag_chunks_back_to_scoped_source_lines(tmp_pat
                     ),
                     RetrievedChunk(
                         by_path["src/characters/lin_cen.md"].source_key,
-                        "## 未解目标\n\n她在雨夜寻找失踪的旧信。",
+                        LightRAGSearchBackend._rag_document_body(
+                            by_path["src/characters/lin_cen.md"]
+                        ),
                         2,
                     ),
                 ],
@@ -59,6 +64,10 @@ def test_project_search_maps_lightrag_chunks_back_to_scoped_source_lines(tmp_pat
     assert payload["results"][0]["path"] == "src/characters/lin_cen.md"
     assert payload["results"][0]["line"] == 5
     assert payload["results"][0]["heading"] == "未解目标"
+    assert payload["results"][0]["scope"] == "characters"
+    assert payload["results"][0]["category_label"] == "配角"
+    assert captured["query"].startswith("OpenWrite 资料范围：角色\n")
+    assert "OpenWrite 资料范围" not in payload["results"][0]["snippet"]
 
 
 def test_project_search_uses_explicit_literal_fallback_when_lightrag_is_unconfigured(
@@ -79,8 +88,33 @@ def test_project_search_uses_explicit_literal_fallback_when_lightrag_is_unconfig
     )
 
     assert payload["engine"] == "literal-fallback"
+    assert payload["scope"] == "core"
     assert payload["warning_code"] == "LIGHTRAG_NOT_CONFIGURED"
     assert payload["results"][0]["line"] == 3
+
+
+def test_literal_fallback_matches_taxonomy_and_uses_yaml_display_name(tmp_path: Path):
+    novel_root = tmp_path / "novel"
+    progression = novel_root / "src" / "progression" / "clock_sense.yaml"
+    progression.parent.mkdir(parents=True)
+    progression.write_text(
+        "id: clock_sense\nname: 时感\nkind: ability\nsummary: 感知丢失的时间\n",
+        encoding="utf-8",
+    )
+
+    def unavailable(root):
+        del root
+        raise SearchConfigurationError("缺少 embedding")
+
+    payload = ProjectSearchIndex(novel_root, backend_factory=unavailable).search(
+        "规则与体系",
+        scope="settings",
+    )
+
+    assert payload["engine"] == "literal-fallback"
+    assert payload["results"][0]["title"] == "时感"
+    assert payload["results"][0]["category"] == "setting_systems"
+    assert payload["results"][0]["snippet"] == "规则与体系"
 
 
 def test_lightrag_manifest_tracks_incremental_insert_update_and_delete(tmp_path: Path):
@@ -115,7 +149,9 @@ def test_lightrag_manifest_tracks_incremental_insert_update_and_delete(tmp_path:
         path="src/story/background.md",
         title="背景",
         body="第一版背景",
-        scope="story",
+        scope="core",
+        category="core_premise",
+        category_label="故事基础",
         revision="rev-1",
         doc_id="doc-1",
         source_key="source-1.md",
@@ -124,7 +160,9 @@ def test_lightrag_manifest_tracks_incremental_insert_update_and_delete(tmp_path:
         path="src/world/rules.md",
         title="规则",
         body="世界规则",
-        scope="world",
+        scope="settings",
+        category="setting_systems",
+        category_label="规则与体系",
         revision="rev-2",
         doc_id="doc-2",
         source_key="source-2.md",
@@ -148,6 +186,9 @@ def test_lightrag_manifest_tracks_incremental_insert_update_and_delete(tmp_path:
     assert changed == {"inserted": 0, "updated": 1, "deleted": 1}
     assert rag.deleted == ["doc-2", "doc-1"]
     assert [item[0] for item in rag.inserted] == ["doc-1", "doc-2", "doc-3"]
+    assert "OpenWrite 资料范围：作品核心" in rag.inserted[0][2]
+    assert "OpenWrite 子分类：故事基础" in rag.inserted[0][2]
     manifest = backend._load_manifest()
+    assert manifest["version"] == MANIFEST_VERSION
     assert list(manifest["documents"]) == ["src/story/background.md"]
     assert manifest["documents"]["src/story/background.md"]["doc_id"] == "doc-3"

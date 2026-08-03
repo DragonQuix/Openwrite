@@ -363,6 +363,7 @@ class TestToolsRegistry:
             "get_status",
             "get_context",
             "search_project",
+            "query_library",
             "read_project_document",
             "edit_project_document",
             "list_chapters",

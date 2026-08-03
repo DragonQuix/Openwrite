@@ -188,6 +188,7 @@ class ContextBuilder:
             chapter_id=chapter_id,
             author_intent=self._load_story_control("author_intent.md", max_chars=3000),
             creative_focus=self._load_story_control("current_focus.md", max_chars=2400),
+            core_documents=self._load_core_documents(),
             outline_window=outline_window,
             current_chapter=current_chapter,
             active_characters=active_characters,
@@ -221,6 +222,18 @@ class ContextBuilder:
         except OSError:
             return ""
         return text[:max_chars]
+
+    def _load_core_documents(self) -> Dict[str, str]:
+        """Load canonical premise documents under their creator-facing scope."""
+        documents: Dict[str, str] = {}
+        for key, max_chars in (("background", 2000), ("foundation", 2000)):
+            path = self.src_dir / "story" / f"{key}.md"
+            if not path.is_file():
+                continue
+            text = self._load_text(path).strip()
+            if text:
+                documents[key] = text[:max_chars]
+        return documents
 
     def _load_outline_hierarchy(self) -> OutlineHierarchy:
         """加载大纲层级结构"""
@@ -947,6 +960,11 @@ class ContextBuilder:
             ("foreshadowing_summary", 400),
         ):
             setattr(compressed, field, self._fit_text(getattr(compressed, field), target))
+        compressed.core_documents = {
+            key: self._fit_text(value, 700)
+            for key, value in compressed.core_documents.items()
+            if value
+        }
         actions.append("L4: 应用最小工作集硬适配")
         self._force_fit(compressed, actions)
         return self._finish_compression(compressed, 4, original_tokens, actions)
@@ -1181,6 +1199,16 @@ class ContextBuilder:
                 context.foreshadowing = ForeshadowingState()
                 continue
 
+            if context.core_documents:
+                key = max(context.core_documents, key=lambda item: len(context.core_documents[item]))
+                value = context.core_documents[key]
+                target = max(0, int(len(value) * 0.65) - 1)
+                if target:
+                    context.core_documents[key] = self._fit_text(value, target)
+                else:
+                    context.core_documents.pop(key, None)
+                continue
+
             # Core controls are shortened only when the configured budget is
             # too small to hold even the minimum working set.
             core_candidates = [
@@ -1222,6 +1250,7 @@ class ContextBuilder:
             context.style_profile = None
             context.world_rules = WorldRules()
             context.foreshadowing = ForeshadowingState()
+            context.core_documents = {}
             context.author_intent = ""
             context.creative_focus = ""
             context.chapter_goals = []

@@ -56,7 +56,7 @@ def test_studio_assets_load_shared_core_as_an_es_module():
     assert "enqueueTask" in tasks
     assert "/api/tasks" in tasks
     assert 'from "/js/assets.js"' in application
-    assert "refreshAssets" in structured_assets
+    assert "openStructuredAsset" in structured_assets
     assert "/api/assets/package/preview" in structured_assets
     assert "data-package-action" in structured_assets
     assert "\\`" not in application
@@ -85,6 +85,7 @@ def test_studio_writer_workspace_keeps_primary_navigation_and_contextual_tools()
     assert 'id="source-promotion-preview"' in html
     assert 'id="source-promotion-apply"' in html
     assert "function scheduleAutoSave()" in application
+    assert "if (!state.workspace) return;" in application
     assert "toggleMobileNavigation(false, false)" in application
     assert "toggleInspector(false, false)" in application
     assert 'action: "analyze_v2"' in application
@@ -111,15 +112,17 @@ def test_studio_structured_asset_ui_keeps_raw_mode_and_explicit_import_decisions
     javascript = _studio_javascript(assets)
     styles = (assets / "styles.css").read_text(encoding="utf-8")
 
-    assert 'data-view="assets"' in html
-    assert 'data-asset-kind="character"' in html
-    assert 'data-asset-kind="world"' in html
-    assert 'data-asset-kind="progression"' in html
+    assert 'id="library-navigation"' in html
+    assert 'data-library-view="characters"' in html
+    assert 'data-library-view="settings"' in html
+    assert '<option value="character">角色</option>' in html
+    assert '<option value="world">设定</option>' in html
+    assert '<option value="progression">成长体系</option>' in html
     assert 'data-asset-mode="raw"' in html
     assert 'id="asset-package-dialog"' in html
     assert "ASSET_CONFLICT" in javascript
     assert "replace" in javascript and "rename" in javascript and "skip" in javascript
-    assert ".asset-workspace" in styles
+    assert ".asset-editor-pane" in styles
     assert ".asset-stage-row" in styles
     assert ".asset-field {\n  display: grid;\n  align-self: start;" in styles
 
@@ -281,6 +284,52 @@ def test_outline_tree_ui_supports_direct_text_editing():
     assert ".outline-summary-editor" in styles
 
 
+def test_outline_tree_prioritizes_progressive_disclosure_and_title_width():
+    assets = Path(__file__).parent.parent / "tools" / "studio_assets"
+    html = (assets / "index.html").read_text(encoding="utf-8")
+    javascript = _studio_javascript(assets)
+    styles = (assets / "styles.css").read_text(encoding="utf-8")
+
+    assert '<h1 id="outline-title">大纲结构</h1>' in html
+    assert "outlineExpandedIds: new Set()" in javascript
+    assert "initializeOutlineExpansion" in javascript
+    assert "revealOutlineNode" in javascript
+    assert "state.workspace?.snapshot?.current_chapter" in javascript
+    assert 'outlineIcon("icon-chevron-right")' in javascript
+    assert "outlineInspectorAutoCollapsed" in javascript
+    assert 'toggleInspectorCollapsed(true, { persist: false })' in javascript
+    assert "grid-template-columns: minmax(380px, .95fr)" in styles
+    assert "@media (max-width: 1080px)" in styles
+    assert "position: absolute" in styles
+
+
+def test_studio_uses_local_vditor_for_markdown_editing_surfaces():
+    assets = Path(__file__).parent.parent / "tools" / "studio_assets"
+    html = (assets / "index.html").read_text(encoding="utf-8")
+    application = (assets / "js" / "application.js").read_text(encoding="utf-8")
+    structured_assets = (assets / "js" / "assets.js").read_text(encoding="utf-8")
+    editor_adapter = (assets / "js" / "markdown-editor.js").read_text(encoding="utf-8")
+    styles = (assets / "styles.css").read_text(encoding="utf-8")
+
+    assert 'href="/vendor/vditor/dist/index.css"' in html
+    assert 'src="/vendor/vditor/dist/js/icons/ant.js"' in html
+    assert 'src="/vendor/vditor/dist/index.min.js"' in html
+    assert '<div id="document-editor" class="document-editor"' in html
+    assert '<textarea id="document-editor"' not in html
+    assert (assets / "vendor" / "vditor" / "dist" / "index.min.js").is_file()
+    assert (assets / "vendor" / "vditor" / "dist" / "js" / "icons" / "ant.js").is_file()
+    assert (assets / "vendor" / "vditor" / "dist" / "js" / "lute" / "lute.min.js").is_file()
+    assert 'icon: ""' in editor_adapter
+    assert 'mode: "ir"' in editor_adapter
+    assert 'cdn: VDITOR_CDN' in editor_adapter
+    assert 'body > svg[version="1.1"]:not(.icon-sprite)' in styles
+    assert "initializePrimaryMarkdownEditor" in application
+    assert "mountMarkdownEditor(editorHost" in application
+    assert 'key === "body_markdown"' in structured_assets
+    assert "mountMarkdownEditor(input" in structured_assets
+    assert "onInput: markAssetDirty" in structured_assets
+
+
 def test_agent_chat_ui_supports_sessions_and_collapsible_inspector():
     assets = Path(__file__).parent.parent / "tools" / "studio_assets"
     html = (assets / "index.html").read_text(encoding="utf-8")
@@ -429,9 +478,9 @@ def test_studio_workspace_exposes_novel_only_documents(tmp_path: Path):
     assert payload["documents"]["chapters"][0]["path"].endswith("ch_001.md")
     assert set(payload["documents"]) == {
         "outline",
-        "story",
+        "core",
         "characters",
-        "world",
+        "settings",
         "chapters",
     }
 

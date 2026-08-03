@@ -1,12 +1,42 @@
 import { $, $$, api, showToast, state } from "/js/core.js";
+import {
+  destroyMarkdownEditorsWithin, markdownEditorFor, mountMarkdownEditor,
+} from "/js/markdown-editor.js";
 
 let refreshWorkspace = async () => {};
+let activateAssetEditor = () => {};
 
 const kindLabels = {
-  character: "人物",
-  world: "世界与组织",
+  character: "角色",
+  world: "设定",
   progression: "成长体系",
 };
+
+const kindScopes = {
+  character: "characters",
+  world: "settings",
+  progression: "settings",
+};
+
+const worldKindChoices = [
+  ["organization", "组织"],
+  ["faction", "势力"],
+  ["place", "地点"],
+  ["concept", "概念"],
+  ["object", "物品"],
+  ["event", "事件"],
+  ["custom", "其他"],
+];
+
+const progressionKindChoices = [
+  ["ability", "能力"],
+  ["rank", "等级"],
+  ["cultivation", "修行"],
+  ["career", "职业"],
+  ["reputation", "声望"],
+  ["curse", "诅咒"],
+  ["custom", "其他"],
+];
 
 const characterFields = [
   ["name", "姓名", "input"],
@@ -31,7 +61,7 @@ const characterFields = [
 
 const worldFields = [
   ["name", "名称", "input"],
-  ["kind", "实体类型", "select", ["organization", "faction", "place", "concept", "object", "event", "custom"]],
+  ["kind", "设定类型", "select", worldKindChoices],
   ["status", "状态", "input"],
   ["summary", "概要", "textarea"],
   ["tags", "标签", "textarea", "每行一个"],
@@ -41,7 +71,8 @@ const worldFields = [
 
 export function bindAssetUI(callbacks = {}) {
   refreshWorkspace = callbacks.refreshWorkspace || refreshWorkspace;
-  $("#asset-create").addEventListener("click", () => newAsset(state.assets.kind));
+  activateAssetEditor = callbacks.activateAssetEditor || activateAssetEditor;
+  $("#asset-create").addEventListener("click", () => newAsset($("#library-create-kind").value));
   $("#asset-package-import-open").addEventListener("click", openPackageDialog);
   $("#asset-package-export").addEventListener("click", exportSelected);
   $("#asset-package-close").addEventListener("click", closePackageDialog);
@@ -50,99 +81,44 @@ export function bindAssetUI(callbacks = {}) {
   $("#asset-package-preview").addEventListener("click", previewPackage);
   $("#asset-package-apply").addEventListener("click", applyPackage);
   $("#asset-form").addEventListener("submit", saveAsset);
-  $$("[data-asset-kind]").forEach((button) => {
-    button.addEventListener("click", () => selectKind(button.dataset.assetKind));
-  });
+  $("#asset-form").addEventListener("input", markAssetDirty);
   $$("[data-asset-mode]").forEach((button) => {
     button.addEventListener("click", () => setMode(button.dataset.assetMode));
   });
 }
 
-export async function refreshAssets(kind = state.assets.kind) {
-  if (!state.workspace?.initialized) return;
-  state.assets.kind = kind;
-  const result = await api(`/api/assets?kind=${encodeURIComponent(kind)}`);
-  const data = result.data || result;
-  state.assets.items = data.assets || [];
-  renderAssetTabs();
-  renderAssetList();
-  if (state.assets.selected && state.assets.selected.kind === kind) {
-    await loadAsset(state.assets.selected.id, false);
-  } else {
-    clearAssetEditor();
+export async function openStructuredAsset(summary, pushHistory = false) {
+  const kind = String(summary?.asset_kind || summary?.kind || "");
+  const id = String(summary?.asset_id || summary?.id || "");
+  if (!kindScopes[kind] || !id) {
+    showToast("这份资料不支持字段编辑", true);
+    return;
   }
-}
-
-function renderAssetTabs() {
-  $$("[data-asset-kind]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.assetKind === state.assets.kind);
-  });
-}
-
-function renderAssetList() {
-  const root = $("#asset-list");
-  root.replaceChildren();
-  const items = state.assets.items;
-  $("#asset-list-status").textContent = items.length
-    ? `${items.length} 个${kindLabels[state.assets.kind]}，选择一项编辑`
-    : `暂无${kindLabels[state.assets.kind]}，可以新建一个。`;
-  items.forEach((item) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "asset-list-item";
-    button.classList.toggle(
-      "active",
-      state.assets.selected?.kind === item.kind && state.assets.selected?.id === item.id,
-    );
-    button.setAttribute("role", "option");
-    button.setAttribute("aria-selected", String(button.classList.contains("active")));
-    const checkbox = document.createElement("input");
-    checkbox.type = "checkbox";
-    checkbox.checked = state.assets.selectedForExport.has(`${item.kind}:${item.id}`);
-    checkbox.setAttribute(
-      "aria-label",
-      `选择导出 ${item.name || item.id} (${item.id})`,
-    );
-    checkbox.addEventListener("click", (event) => {
-      event.stopPropagation();
-      const key = `${item.kind}:${item.id}`;
-      if (checkbox.checked) state.assets.selectedForExport.add(key);
-      else state.assets.selectedForExport.delete(key);
-    });
-    const text = document.createElement("span");
-    const name = document.createElement("strong");
-    name.textContent = item.name || item.id;
-    const summary = document.createElement("span");
-    summary.textContent = item.summary ? `${item.id} · ${item.summary}` : item.id;
-    text.append(name, summary);
-    button.append(checkbox, text);
-    button.addEventListener("click", () => loadAsset(item.id, true));
-    root.append(button);
-  });
-}
-
-function selectKind(kind) {
-  if (!kind || kind === state.assets.kind) return;
-  state.assets.selected = null;
-  state.assets.selectedForExport = new Set();
-  refreshAssets(kind).catch((error) => showToast(error.message, true));
-}
-
-async function loadAsset(id, pushState) {
+  if (state.dirty && !window.confirm("当前文档尚未保存，仍要离开吗？")) return;
+  if (state.assets.dirty && !window.confirm("当前资料尚未保存，仍要离开吗？")) return;
+  state.dirty = false;
   try {
-    const result = await api(`/api/assets/${encodeURIComponent(state.assets.kind)}/${encodeURIComponent(id)}`);
-    state.assets.selected = { kind: state.assets.kind, id };
+    const result = await api(`/api/assets/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`);
+    state.assets.kind = kind;
+    state.assets.selected = { kind, id, path: summary.path || "" };
     state.assets.draft = { ...(result.data || result), isNew: false };
     state.assets.mode = "structured";
-    renderAssetList();
+    state.assets.dirty = false;
     renderAssetEditor();
-    if (pushState) history.replaceState({}, "", "#assets");
+    activateAssetEditor(state.assets.draft, {
+      scope: summary.scope || kindScopes[kind],
+      category: summary.category || "",
+      pushHistory,
+    });
+    syncExportButton();
   } catch (error) {
     showToast(error.message, true);
   }
 }
 
 function newAsset(kind) {
+  if (!kindScopes[kind]) return;
+  if (state.assets.dirty && !window.confirm("当前资料尚未保存，仍要新建吗？")) return;
   state.assets.kind = kind;
   state.assets.selected = null;
   state.assets.draft = {
@@ -158,10 +134,11 @@ function newAsset(kind) {
     isNew: true,
   };
   state.assets.mode = "structured";
+  state.assets.dirty = false;
   $("#asset-form-status").textContent = "";
-  renderAssetTabs();
-  renderAssetList();
   renderAssetEditor();
+  activateAssetEditor(state.assets.draft, { scope: kindScopes[kind], pushHistory: true });
+  syncExportButton();
 }
 
 function clearAssetEditor() {
@@ -176,7 +153,7 @@ function renderAssetEditor() {
   $("#asset-empty").hidden = true;
   $("#asset-form").hidden = false;
   $("#asset-editor-kind").textContent = kindLabels[draft.kind] || draft.kind;
-  $("#asset-editor-title").textContent = draft.isNew ? "新建资产" : (draft.name || draft.id);
+  $("#asset-editor-title").textContent = draft.isNew ? `新建${kindLabels[draft.kind]}` : (draft.name || draft.id);
   $("#asset-editor-path").textContent = draft.path || "尚未保存";
   $$("[data-asset-mode]").forEach((button) => button.classList.toggle("active", button.dataset.assetMode === state.assets.mode));
   $("#asset-structured-fields").hidden = state.assets.mode !== "structured";
@@ -187,13 +164,14 @@ function renderAssetEditor() {
 
 function renderStructuredFields(draft) {
   const root = $("#asset-structured-fields");
+  destroyMarkdownEditorsWithin(root);
   root.replaceChildren();
-  const id = addField(root, "id", "资产 ID", draft.id, "input", "只能使用字母、数字、下划线、点或短横线");
+  const id = addField(root, "id", "资料 ID", draft.id, "input", "只能使用字母、数字、下划线、点或短横线");
   id.input.readOnly = !draft.isNew;
   id.wrapper.classList.add("full-span");
   if (draft.kind === "progression") {
     addField(root, "name", "体系名称", draft.data?.name || "", "input");
-    addChoiceField(root, "kind", "体系类型", draft.data?.kind || "ability", ["ability", "rank", "cultivation", "career", "reputation", "curse", "custom"]);
+    addChoiceField(root, "kind", "体系类型", draft.data?.kind || "ability", progressionKindChoices);
     addField(root, "summary", "概要", draft.data?.summary || "", "textarea", "", true);
     renderStages(root, draft.data?.stages || []);
     addField(root, "body_markdown", "说明（可选 Markdown）", draft.body_markdown || "", "textarea", "", true);
@@ -216,10 +194,23 @@ function addField(root, key, label, value, type = "input", hint = "", fullSpan =
   wrapper.className = `asset-field${fullSpan ? " full-span" : ""}`;
   const title = document.createElement("span");
   title.textContent = label;
-  const input = document.createElement(type === "textarea" ? "textarea" : "input");
+  const markdown = key === "body_markdown";
+  const input = document.createElement(markdown ? "div" : (type === "textarea" ? "textarea" : "input"));
   input.dataset.assetField = key;
-  input.value = value || "";
-  if (type === "textarea") input.rows = key === "body_markdown" ? 10 : 3;
+  if (markdown) {
+    input.className = "asset-markdown-editor";
+    input.setAttribute("aria-label", label);
+    mountMarkdownEditor(input, {
+      value: value || "",
+      compact: true,
+      minHeight: 240,
+      placeholder: "补充可自由排版的 Markdown 详情…",
+      onInput: markAssetDirty,
+    });
+  } else {
+    input.value = value || "";
+    if (type === "textarea") input.rows = 3;
+  }
   wrapper.append(title, input);
   if (hint) {
     const help = document.createElement("small");
@@ -230,6 +221,11 @@ function addField(root, key, label, value, type = "input", hint = "", fullSpan =
   return { wrapper, input };
 }
 
+function markAssetDirty() {
+  state.assets.dirty = true;
+  $("#asset-form-status").textContent = "有未保存更改";
+}
+
 function addChoiceField(root, key, label, value, choices) {
   const wrapper = document.createElement("label");
   wrapper.className = "asset-field";
@@ -238,10 +234,11 @@ function addChoiceField(root, key, label, value, choices) {
   const select = document.createElement("select");
   select.dataset.assetField = key;
   choices.forEach((choice) => {
+    const [choiceValue, choiceLabel] = Array.isArray(choice) ? choice : [choice, choice];
     const option = document.createElement("option");
-    option.value = choice;
-    option.textContent = choice;
-    option.selected = choice === value;
+    option.value = choiceValue;
+    option.textContent = choiceLabel;
+    option.selected = choiceValue === value;
     select.append(option);
   });
   wrapper.append(title, select);
@@ -300,7 +297,7 @@ function stageRow(stage) {
 
 function setMode(mode) {
   if (mode === "raw" && state.assets.draft?.isNew) {
-    showToast("请先用字段模式创建资产，再切换原文", true);
+    showToast("请先用字段模式创建资料，再切换原文", true);
     return;
   }
   state.assets.mode = mode === "raw" ? "raw" : "structured";
@@ -331,15 +328,18 @@ async function saveAsset(event) {
       body: JSON.stringify(payload),
     });
     const saved = result.data?.asset || result.asset;
-    state.assets.selected = { kind: saved.kind, id: saved.id };
+    state.assets.selected = { kind: saved.kind, id: saved.id, path: saved.path };
     state.assets.draft = { ...saved, isNew: false };
+    state.assets.dirty = false;
     $("#asset-form-status").textContent = "已保存并同步运行态";
-    showToast("资产已保存");
-    await refreshAssets(draft.kind);
+    showToast("资料已保存");
     await refreshWorkspace();
+    activateAssetEditor(state.assets.draft, { scope: kindScopes[saved.kind], pushHistory: false });
+    renderAssetEditor();
+    syncExportButton();
   } catch (error) {
     $("#asset-form-status").textContent = error.code === "ASSET_CONFLICT"
-      ? "资产已变化，请重新载入后再保存"
+      ? "资料已变化，请重新载入后再保存"
       : error.message;
     showToast(error.message, true);
   } finally {
@@ -377,7 +377,8 @@ function collectData(kind) {
 }
 
 function collectField(key) {
-  return $("[data-asset-field=\"" + key + "\"]")?.value || "";
+  const field = $("[data-asset-field=\"" + key + "\"]");
+  return markdownEditorFor(field)?.getValue() || field?.value || "";
 }
 
 function serializeField(key, value) {
@@ -515,9 +516,8 @@ async function applyPackage() {
       }),
     });
     closePackageDialog();
-    await refreshAssets(state.assets.kind);
     await refreshWorkspace();
-    showToast("资产包已导入");
+    showToast("资料包已导入");
   } catch (error) {
     $("#asset-package-status").textContent = error.message;
     button.disabled = false;
@@ -525,7 +525,12 @@ async function applyPackage() {
 }
 
 function exportSelected() {
-  const selected = Array.from(state.assets.selectedForExport);
-  const query = selected.map((value) => `select=${encodeURIComponent(value)}`).join("&");
-  window.location.href = `/api/assets/package/export${query ? `?${query}` : ""}`;
+  const selected = state.assets.selected;
+  if (!selected?.kind || !selected?.id) return;
+  const value = `${selected.kind}:${selected.id}`;
+  window.location.href = `/api/assets/package/export?select=${encodeURIComponent(value)}`;
+}
+
+function syncExportButton() {
+  $("#asset-package-export").disabled = !state.assets.selected?.id;
 }

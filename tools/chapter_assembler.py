@@ -82,6 +82,7 @@ class ChapterAssemblyPacket:
     system_prompts: Dict[str, str] = field(default_factory=dict)
     author_intent: str = ""
     creative_focus: str = ""
+    core_documents: Dict[str, str] = field(default_factory=dict)
     story_background: str = ""
     historical_arc_summaries: List[ArcSummary] = field(default_factory=list)
     current_arc_sections: List[SectionSummary] = field(default_factory=list)
@@ -92,7 +93,9 @@ class ChapterAssemblyPacket:
     relationships: str = ""
     character_documents: Dict[str, str] = field(default_factory=dict)
     style_documents: Dict[str, str] = field(default_factory=dict)
+    setting_documents: Dict[str, str] = field(default_factory=dict)
     concept_documents: Dict[str, str] = field(default_factory=dict)
+    continuity_documents: Dict[str, str] = field(default_factory=dict)
     agent_specs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     redundant_agents: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     compression: Dict[str, Any] = field(default_factory=dict)
@@ -110,8 +113,13 @@ class ChapterAssemblyPacket:
         parts.append("## 创作罗盘（当前最高优先级）")
         parts.append(self.creative_focus or "（暂无）")
 
-        parts.append("## 故事背景")
-        parts.append(self.story_background or "（暂无）")
+        parts.append("## 作品核心")
+        if self.core_documents:
+            labels = {"background": "故事背景", "foundation": "基础设定"}
+            for key, content in self.core_documents.items():
+                parts.append(f"### {labels.get(key, key)}\n{content}")
+        else:
+            parts.append(self.story_background or "（暂无）")
 
         parts.append("## 历史篇梗概")
         if self.historical_arc_summaries:
@@ -141,9 +149,14 @@ class ChapterAssemblyPacket:
         parts.append(self.protagonist_state or "（暂无）")
 
         parts.append("## 运行态真相文件")
-        parts.append(f"### current_state.md\n{self.current_state or '（暂无）'}")
-        parts.append(f"### ledger.md\n{self.ledger or '（暂无）'}")
-        parts.append(f"### relationships.md\n{self.relationships or '（暂无）'}")
+        continuity = self.continuity_documents or {
+            "current_state": self.current_state,
+            "ledger": self.ledger,
+            "relationships": self.relationships,
+        }
+        parts.append(f"### current_state.md\n{continuity.get('current_state') or '（暂无）'}")
+        parts.append(f"### ledger.md\n{continuity.get('ledger') or '（暂无）'}")
+        parts.append(f"### relationships.md\n{continuity.get('relationships') or '（暂无）'}")
 
         parts.append("## 人物文档")
         if self.character_documents:
@@ -159,9 +172,10 @@ class ChapterAssemblyPacket:
         else:
             parts.append("（暂无）")
 
-        parts.append("## 概念文档")
-        if self.concept_documents:
-            for key, content in self.concept_documents.items():
+        parts.append("## 设定文档")
+        setting_documents = self.setting_documents or self.concept_documents
+        if setting_documents:
+            for key, content in setting_documents.items():
                 parts.append(f"### {key}\n{content}")
         else:
             parts.append("（暂无）")
@@ -221,9 +235,15 @@ class ChapterAssemblerV2:
             system_prompts=dict(ROLE_SYSTEM_PROMPTS),
             author_intent=self._load_story_control("author_intent.md", max_chars=3000),
             creative_focus=self._load_story_control("current_focus.md", max_chars=2400),
+            core_documents=self._load_core_documents(),
             current_state=truth.current_state,
             ledger=truth.ledger,
             relationships=truth.relationships,
+            continuity_documents={
+                "current_state": truth.current_state,
+                "ledger": truth.ledger,
+                "relationships": truth.relationships,
+            },
         )
 
         packet.agent_specs = {
@@ -265,7 +285,8 @@ class ChapterAssemblerV2:
             chars = self._collect_relevant_characters(hierarchy, chapter_id)
             concepts = self._collect_relevant_concepts(hierarchy, chapter_id)
             packet.character_documents = self._load_character_documents(chars)
-            packet.concept_documents = self._load_concept_documents(concepts)
+            packet.setting_documents = self._load_setting_documents(concepts)
+            packet.concept_documents = dict(packet.setting_documents)
         else:
             packet.historical_arc_summaries = self._build_historical_arc_summaries(hierarchy, current_arc_id="")
 
@@ -281,23 +302,39 @@ class ChapterAssemblerV2:
 
         packet.author_intent = packet.author_intent[:3000]
         packet.creative_focus = packet.creative_focus[:2400]
+        packet.core_documents, core_truncated, core_dropped = self._limit_document_map(
+            packet.core_documents,
+            total_chars=4000,
+            per_document=2200,
+            preferred_prefixes=("background", "foundation"),
+        )
+        truncated_documents.extend(f"core:{name}" for name in core_truncated)
+        dropped_documents.extend(f"core:{name}" for name in core_dropped)
         packet.story_background = packet.story_background[:1800]
         packet.previous_chapter_content = packet.previous_chapter_content[-6000:]
         packet.protagonist_state = packet.protagonist_state[:1600]
         packet.current_state = packet.current_state[:2400]
         packet.ledger = packet.ledger[:1800]
         packet.relationships = packet.relationships[:2400]
+        packet.continuity_documents = {
+            "current_state": packet.current_state,
+            "ledger": packet.ledger,
+            "relationships": packet.relationships,
+        }
 
         packet.character_documents, truncated, dropped = self._limit_document_map(
             packet.character_documents, total_chars=7000, per_document=2200
         )
         truncated_documents.extend(f"character:{name}" for name in truncated)
         dropped_documents.extend(f"character:{name}" for name in dropped)
-        packet.concept_documents, truncated, dropped = self._limit_document_map(
-            packet.concept_documents, total_chars=6500, per_document=1800
+        packet.setting_documents, truncated, dropped = self._limit_document_map(
+            packet.setting_documents or packet.concept_documents,
+            total_chars=6500,
+            per_document=1800,
         )
-        truncated_documents.extend(f"concept:{name}" for name in truncated)
-        dropped_documents.extend(f"concept:{name}" for name in dropped)
+        packet.concept_documents = dict(packet.setting_documents)
+        truncated_documents.extend(f"setting:{name}" for name in truncated)
+        dropped_documents.extend(f"setting:{name}" for name in dropped)
         packet.style_documents, truncated, dropped = self._limit_document_map(
             packet.style_documents,
             total_chars=6500,
@@ -316,7 +353,7 @@ class ChapterAssemblerV2:
             "budgets": {
                 "exact_previous_chapter": 6000,
                 "characters": 7000,
-                "concepts": 6500,
+                "settings": 6500,
                 "style": 6500,
             },
         }
@@ -358,17 +395,28 @@ class ChapterAssemblerV2:
 
     @staticmethod
     def _packet_character_count(packet: ChapterAssemblyPacket) -> int:
+        core_values = (
+            list(packet.core_documents.values())
+            if packet.core_documents
+            else [packet.story_background]
+        )
+        setting_values = list(
+            (packet.setting_documents or packet.concept_documents).values()
+        )
+        continuity_values = (
+            list(packet.continuity_documents.values())
+            if packet.continuity_documents
+            else [packet.current_state, packet.ledger, packet.relationships]
+        )
         values: List[str] = [
             packet.author_intent,
             packet.creative_focus,
-            packet.story_background,
+            *core_values,
             packet.previous_chapter_content,
             packet.protagonist_state,
-            packet.current_state,
-            packet.ledger,
-            packet.relationships,
             *packet.character_documents.values(),
-            *packet.concept_documents.values(),
+            *setting_values,
+            *continuity_values,
             *packet.style_documents.values(),
         ]
         values.extend(item.summary for item in packet.historical_arc_summaries)
@@ -379,6 +427,15 @@ class ChapterAssemblerV2:
         path = self.src_root / "story" / filename
         text = self._load_text(path).strip() if path.exists() else ""
         return text[:max_chars]
+
+    def _load_core_documents(self) -> Dict[str, str]:
+        documents: Dict[str, str] = {}
+        for key, max_chars in (("background", 2000), ("foundation", 2000)):
+            path = self.src_root / "story" / f"{key}.md"
+            text = self._load_text(path).strip() if path.exists() else ""
+            if text:
+                documents[key] = text[:max_chars]
+        return documents
 
     def _load_protagonist_state(self, hierarchy: OutlineHierarchy, chapter_id: str) -> str:
         truth = self.truth_manager.load_truth_files()
@@ -695,7 +752,7 @@ class ChapterAssemblerV2:
 
         return docs
 
-    def _load_concept_documents(self, concept_names: List[str]) -> Dict[str, str]:
+    def _load_setting_documents(self, concept_names: List[str]) -> Dict[str, str]:
         docs: Dict[str, str] = {}
 
         world_root = self.src_root / "world"
@@ -731,7 +788,7 @@ class ChapterAssemblerV2:
         entities = world_root / "entities"
         if entities.exists():
             concept_set = {c.lower() for c in concept_names}
-            for p in sorted(entities.glob("*.md")):
+            for p in sorted(entities.rglob("*.md")):
                 text = self._load_text(p)
                 if not concept_set:
                     continue
@@ -747,6 +804,10 @@ class ChapterAssemblerV2:
                     )
 
         return docs
+
+    def _load_concept_documents(self, concept_names: List[str]) -> Dict[str, str]:
+        """Compatibility alias for callers that still use the legacy term."""
+        return self._load_setting_documents(concept_names)
 
     def _collect_chapter_summaries(self, hierarchy: OutlineHierarchy, chapter_ids: List[str]) -> str:
         lines: List[str] = []

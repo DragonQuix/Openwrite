@@ -23,6 +23,7 @@ DEBUG_LOGGER_NAMES = (
 AGENT_TOOL_LABELS = {
     "get_status": "读取作品状态",
     "get_context": "组装章节上下文",
+    "query_library": "浏览资料目录",
     "search_project": "搜索作品资料",
     "read_project_document": "读取项目文档",
     "edit_project_document": "预览或写入文档修改",

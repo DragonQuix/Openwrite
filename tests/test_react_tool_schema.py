@@ -55,6 +55,29 @@ def test_project_document_tools_require_revisioned_preview_contract():
     assert "默认 false" in properties["confirm"]["description"]
 
 
+def test_library_and_search_tools_use_creator_facing_scopes():
+    catalog = next(t for t in OPENWRITE_TOOLS if t.name == "query_library")
+    search = next(t for t in OPENWRITE_TOOLS if t.name == "search_project")
+
+    assert catalog.parameters["properties"]["scope"]["enum"] == [
+        "all",
+        "core",
+        "characters",
+        "settings",
+    ]
+    assert search.parameters["properties"]["scope"]["enum"] == [
+        "all",
+        "outline",
+        "core",
+        "characters",
+        "settings",
+        "continuity",
+        "chapters",
+    ]
+    assert "story/world/assets" in search.parameters["properties"]["scope"]["description"]
+    assert "管理作品核心、角色、设定与连续性资料" in OPENWRITE_SYSTEM_PROMPT
+
+
 def test_batch_relation_tools_support_search_and_confirmed_writes():
     search_tool = next(t for t in OPENWRITE_TOOLS if t.name == "search_relation_targets")
     batch_tool = next(t for t in OPENWRITE_TOOLS if t.name == "edit_world_relations")

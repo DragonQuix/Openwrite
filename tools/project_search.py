@@ -18,9 +18,9 @@ from types import TracebackType
 from typing import Any, Protocol, TypeVar
 
 from tools.library_catalog import (
-    SEARCH_SCOPES,
     SCOPE_LABELS,
     describe_document,
+    document_title,
     normalize_search_scope,
     scope_for_path,
 )
@@ -28,7 +28,9 @@ from tools.library_catalog import (
 MAX_INDEXED_BYTES = 2 * 1024 * 1024
 MAX_QUERY_CHARS = 200
 LIGHTRAG_MODES = {"local", "global", "hybrid", "naive", "mix"}
-MANIFEST_VERSION = 2
+# Bump whenever the indexed representation changes. The version participates
+# in the LightRAG workspace key, forcing a clean rebuild for existing projects.
+MANIFEST_VERSION = 3
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -410,7 +412,7 @@ class LightRAGSearchBackend:
                 inserted += 1
 
             await rag.ainsert(
-                document.body,
+                self._rag_document_body(document),
                 ids=document.doc_id,
                 file_paths=document.source_key,
             )
@@ -426,6 +428,16 @@ class LightRAGSearchBackend:
             self._write_manifest(manifest)
 
         return {"inserted": inserted, "updated": updated, "deleted": deleted}
+
+    @staticmethod
+    def _rag_document_body(document: IndexedDocument) -> str:
+        """Make logical scope and subtype available to graph/vector retrieval."""
+        return (
+            f"OpenWrite 资料范围：{SCOPE_LABELS.get(document.scope, document.scope)}\n"
+            f"OpenWrite 子分类：{document.category_label}\n"
+            f"OpenWrite 来源：{document.path}\n\n"
+            f"{document.body}"
+        )
 
     async def _delete_document(self, rag: Any, doc_id: str) -> None:
         if not doc_id:
@@ -534,7 +546,11 @@ class ProjectSearchIndex:
 
         try:
             backend = self._backend_factory(self.novel_root)
-            backend_result = backend.search(documents, clean_query, limit=limit)
+            backend_result = backend.search(
+                documents,
+                self._semantic_query(clean_query, normalized_scope),
+                limit=limit,
+            )
         except SearchConfigurationError as exc:
             backend_result = BackendSearchResult(chunks=[])
             warning = f"{exc}；已使用精确文本搜索"
@@ -592,11 +608,11 @@ class ProjectSearchIndex:
                 continue
             relative = self._relative(path)
             descriptor = describe_document(relative, body)
-            revision = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            revision = self._revision(body, descriptor)
             documents.append(
                 IndexedDocument(
                     path=relative,
-                    title=self._title(path, body),
+                    title=document_title(path, body),
                     body=body,
                     scope=descriptor.scope,
                     category=descriptor.category,
@@ -648,9 +664,22 @@ class ProjectSearchIndex:
         return f"openwrite-{digest}{suffix}"
 
     @staticmethod
-    def _title(path: Path, body: str) -> str:
-        match = re.search(r"^#\s+(.+?)\s*$", body, re.MULTILINE)
-        return match.group(1).strip() if match else path.stem.replace("_", " ")
+    def _revision(body: str, descriptor: Any) -> str:
+        taxonomy = "\0".join(
+            (
+                str(descriptor.scope),
+                str(descriptor.scope_label),
+                str(descriptor.category),
+                str(descriptor.category_label),
+            )
+        )
+        return hashlib.sha256(f"{taxonomy}\0{body}".encode()).hexdigest()
+
+    @staticmethod
+    def _semantic_query(query: str, scope: str) -> str:
+        if scope == "all":
+            return query
+        return f"OpenWrite 资料范围：{SCOPE_LABELS[scope]}\n{query}"
 
     @staticmethod
     def _scope(relative: str) -> str:
@@ -687,6 +716,8 @@ class ProjectSearchIndex:
                     heading=heading,
                     snippet=snippet,
                     scope=document.scope,
+                    category=document.category,
+                    category_label=document.category_label,
                     score=1000.0 - chunk.rank + literal_hits,
                 )
             )
@@ -734,7 +765,7 @@ class ProjectSearchIndex:
         chunk: str,
         terms: list[str],
     ) -> tuple[int, str, str, float]:
-        chunk_text = chunk.strip()
+        chunk_text = cls._strip_rag_metadata(chunk)
         offset = body.find(chunk_text) if chunk_text else -1
         if offset < 0 and chunk_text:
             probe = next(
@@ -762,6 +793,20 @@ class ProjectSearchIndex:
         return line, heading, snippet, literal_hits
 
     @staticmethod
+    def _strip_rag_metadata(chunk: str) -> str:
+        prefixes = (
+            "OpenWrite 资料范围：",
+            "OpenWrite 子分类：",
+            "OpenWrite 来源：",
+        )
+        lines = str(chunk or "").strip().splitlines()
+        while lines and any(lines[0].startswith(prefix) for prefix in prefixes):
+            lines.pop(0)
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        return "\n".join(lines).strip()
+
+    @staticmethod
     def _heading_for_line(body: str, target_line: int) -> str:
         heading = ""
         for number, line in enumerate(body.splitlines(), 1):
@@ -780,6 +825,18 @@ class ProjectSearchIndex:
         title_folded = document.title.casefold()
         heading = ""
         best: tuple[float, int, str, str] | None = None
+        taxonomy_text = (
+            f"{document.title}\n{SCOPE_LABELS.get(document.scope, document.scope)}\n"
+            f"{document.category_label}"
+        ).casefold()
+        taxonomy_hits = sum(term in taxonomy_text for term in terms)
+        if taxonomy_hits:
+            best = (
+                float(taxonomy_hits + (4 if taxonomy_hits == len(terms) else 0)),
+                1,
+                document.title,
+                document.category_label,
+            )
         for number, line in enumerate(document.body.splitlines(), 1):
             heading_match = re.match(r"^#{1,6}\s+(.+?)\s*$", line)
             if heading_match:
@@ -806,6 +863,8 @@ class ProjectSearchIndex:
             matched_heading,
             snippet,
             document.scope,
+            document.category,
+            document.category_label,
             score,
         )
 

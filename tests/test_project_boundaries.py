@@ -152,6 +152,36 @@ def test_context_manifest_records_layers_sources_and_revision(tmp_path: Path):
     assert focus["sources"][0]["path"] == "src/story/current_focus.md"
 
 
+def test_context_manifest_prefers_canonical_library_groups_without_double_counting(
+    tmp_path: Path,
+):
+    init_project(tmp_path, "demo")
+    novel_root = tmp_path / "data" / "novels" / "demo"
+    packet = {
+        "core_documents": {"background": "核心背景"},
+        "story_background": "核心背景",
+        "setting_documents": {"world.rules": "设定规则"},
+        "concept_documents": {"world.rules": "设定规则"},
+        "continuity_documents": {"current_state": "当前状态"},
+        "current_state": "当前状态",
+    }
+
+    manifest = build_context_manifest(novel_root, packet)
+    sections = {item["section"] for item in manifest["items"]}
+
+    assert manifest["schema_version"] == 2
+    assert {"core_documents", "setting_documents", "continuity_documents"} <= sections
+    assert {"story_background", "concept_documents", "current_state"}.isdisjoint(
+        sections
+    )
+
+    empty_manifest = build_context_manifest(
+        novel_root,
+        {"setting_documents": {"world.rules": ""}},
+    )
+    assert empty_manifest["items"] == []
+
+
 def test_git_checkpoint_requires_private_standalone_content_repository(tmp_path: Path):
     project = tmp_path / "novel"
     project.mkdir()
