@@ -413,11 +413,11 @@ pytest
 ## Star History
 
 <a href="https://www.star-history.com/?repos=LiPu-jpg%2FOpenwrite&type=date&legend=top-left">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=LiPu-jpg/Openwrite&type=Date&theme=dark">
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=LiPu-jpg/Openwrite&type=Date">
-    <img alt="OpenWrite Star History Chart" src="https://api.star-history.com/svg?repos=LiPu-jpg/Openwrite&type=Date">
-  </picture>
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=LiPu-jpg/Openwrite&type=date&theme=dark&legend=top-left&sealed_token=vZdhG7v61Eao3XAEYJgdiUHyXI-8yBimzmBl9bOkwlmrysCbV6EMlTGd1O4cGzDfONuyymBDIZ7l2-GcyoSY60O55NDQmiQf_23sZPTRgBfPLHzmu8JWSg" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=LiPu-jpg/Openwrite&type=date&legend=top-left&sealed_token=vZdhG7v61Eao3XAEYJgdiUHyXI-8yBimzmBl9bOkwlmrysCbV6EMlTGd1O4cGzDfONuyymBDIZ7l2-GcyoSY60O55NDQmiQf_23sZPTRgBfPLHzmu8JWSg" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=LiPu-jpg/Openwrite&type=date&legend=top-left&sealed_token=vZdhG7v61Eao3XAEYJgdiUHyXI-8yBimzmBl9bOkwlmrysCbV6EMlTGd1O4cGzDfONuyymBDIZ7l2-GcyoSY60O55NDQmiQf_23sZPTRgBfPLHzmu8JWSg" />
+ </picture>
 </a>
 
 ## 致谢
