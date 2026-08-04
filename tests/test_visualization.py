@@ -372,6 +372,7 @@ class TestToolsRegistry:
             "edit_outline_structure",
             "create_character",
             "get_truth_files",
+            "get_character_state",
             "update_truth_file",
             "create_foreshadowing",
             "list_foreshadowing",

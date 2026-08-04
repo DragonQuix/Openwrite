@@ -94,6 +94,29 @@ def test_progression_system_requires_unique_readable_stages(tmp_path: Path):
         )
 
 
+def test_nested_assets_require_unique_ids_within_the_same_kind(tmp_path: Path):
+    init_project(tmp_path, "demo")
+    root = tmp_path / "data" / "novels" / "demo" / "src" / "world" / "entities"
+    first = root / "domains" / "shared.md"
+    second = root / "threats" / "other_name.md"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    content = '+++\nid = "shared"\nname = "重复设定"\nkind = "concept"\n+++\n'
+    first.write_text(content, encoding="utf-8")
+    second.write_text(content, encoding="utf-8")
+    service = StructuredAssetService(tmp_path, "demo")
+
+    with pytest.raises(StructuredAssetError) as read_error:
+        service.read("world", "shared")
+    with pytest.raises(StructuredAssetError) as list_error:
+        service.list("world")
+
+    assert read_error.value.code == "ASSET_CONFLICT"
+    assert "domains/shared.md" in str(read_error.value)
+    assert "threats/other_name.md" in str(read_error.value)
+    assert list_error.value.code == "ASSET_CONFLICT"
+
+
 def _source_assets(root: Path) -> StructuredAssetService:
     init_project(root, "source")
     service = StructuredAssetService(root, "source")
@@ -173,6 +196,59 @@ def test_asset_package_previews_conflicts_and_atomically_imports_with_remap(
     organization = target_assets.read("world", "org_clockkeepers")
     assert organization["data"]["related"][0]["target"] == "char_linzhou_imported"
     assert (target_root / "data" / "novels" / "target" / result["receipt_path"]).is_file()
+
+
+def test_asset_package_replace_preserves_an_existing_nested_location(tmp_path: Path):
+    source_root = tmp_path / "source_project"
+    target_root = tmp_path / "target_project"
+    init_project(source_root, "source")
+    source_assets = StructuredAssetService(source_root, "source")
+    source_assets.create(
+        "world",
+        {
+            "id": "chaos_beast",
+            "data": {
+                "name": "新乱律者",
+                "kind": "concept",
+                "summary": "新版本",
+            },
+        },
+    )
+    package_path = tmp_path / "nested_replace.owasset.zip"
+    AssetPackageService(source_root, "source").export(package_path)
+
+    init_project(target_root, "target")
+    nested = (
+        target_root
+        / "data"
+        / "novels"
+        / "target"
+        / "src"
+        / "world"
+        / "entities"
+        / "antagonists"
+        / "chaos_beast.md"
+    )
+    nested.parent.mkdir(parents=True)
+    nested.write_text(
+        '+++\nid = "chaos_beast"\nname = "旧乱律者"\nkind = "concept"\n'
+        'summary = "旧版本"\n+++\n',
+        encoding="utf-8",
+    )
+    package = AssetPackageService(target_root, "target")
+    preview = package.preview_import(package_path)
+
+    result = package.import_package(
+        package_path,
+        expected_sha256=preview["package_sha256"],
+        resolutions={"chaos_beast": {"action": "replace"}},
+    )
+
+    assert result["imported"][0]["path"].endswith(
+        "world/entities/antagonists/chaos_beast.md"
+    )
+    assert "新乱律者" in nested.read_text(encoding="utf-8")
+    assert not (nested.parent.parent / "chaos_beast.md").exists()
 
 
 def test_asset_package_blocks_missing_dependencies_and_changed_source(tmp_path: Path):

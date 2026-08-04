@@ -14,46 +14,53 @@
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List
-import re
 
 import yaml
 
+from models.context_package import estimate_text_tokens
 from models.outline import OutlineHierarchy
 from tools.agent_policy import get_default_agent_specs, get_redundant_agent_specs
+from tools.character_state_index import strip_character_state_annotations
 from tools.frontmatter import parse_toml_front_matter
+from tools.llm.context import ContextBudgetPlan, ContextBudgetPolicy
 from tools.outline_cache import deserialize_outline_hierarchy
 from tools.outline_parser import OutlineMdParser
 from tools.resources import resolve_craft_dir
-from tools.shared_documents import render_indexed_document, resolve_shared_document_path
+from tools.shared_documents import (
+    resolve_shared_document_path,
+    shared_document_lookup_keys,
+)
 from tools.source_sync import ensure_runtime_fresh
-from tools.style_synthesizer import render_style_manifest_summary
 from tools.story_planning import StoryPlanningStore
+from tools.style_synthesizer import render_style_manifest_summary
 from tools.truth_manager import TruthFilesManager
-
 
 ROLE_SYSTEM_PROMPTS: Dict[str, str] = {
     "director": (
-        "你是写作总导演 Agent。职责：分解目标、分配子任务、检查章节是否符合篇/节弧线，"
-        "并对最终文本做一致性裁决。"
+        "你是写作总导演 Agent。只以 parser-backed 当前章的戏剧位置、内容焦点、目标、节拍、"
+        "悬念、情感弧线和目标字数分配任务；不得用整节摘要替代本章大纲。"
     ),
     "context_engineer": (
         "你是上下文工程 Agent。职责：仅基于项目文档组装事实，不虚构设定；"
+        "角色只来自本章 involved_characters 或本章文本明确提名，禁止借用整节角色并集；"
         "优先保证人物状态、概念定义、前后章节衔接准确。"
     ),
     "writer": (
-        "你是创作 Agent。职责：在既定设定内完成章节初稿；遵守戏剧位置与内容焦点，"
-        "不越权改动世界规则，不提前泄露未来篇关键真相。"
+        "你是创作 Agent。按当前章的目标、节拍、悬念、情感弧线和目标字数完成正文；"
+        "遵守角色与世界正典，不越权修改设定，不提前泄露未来篇关键真相。"
     ),
     "continuity_reviewer": (
-        "你是连续性审查 Agent。职责：检查人物动机、时间线、力量体系、关系演化、伏笔回收，"
-        "输出具体问题与修复建议。"
+        "你是连续性审查 Agent。以完整正文和当前章上下文检查人物、时间线、力量体系、关系、"
+        "伏笔与大纲偏离；每个问题输出 dimension、severity、category、description、suggestion、evidence。"
     ),
     "state_settler": (
-        "你是状态结算 Agent。职责：从本章提取客观事实并更新状态文件，"
-        "禁止新增未发生事件。"
+        "你是状态结算 Agent。只从本章提取客观事实，输出 runtime-delta-v1 和追加式 state_updates 回退；"
+        "未知实体写入 proposed_entities，禁止覆盖整份真相文件或直接创建正典资产。"
     ),
 }
 
@@ -212,6 +219,8 @@ class ChapterAssemblyPacket:
 class ChapterAssemblerV2:
     """章节组装器 V2。"""
 
+    COMPRESSION_STRATEGY = "staircase-proportional-v3"
+
     def __init__(self, project_root: Path, novel_id: str, style_id: str = ""):
         self.project_root = project_root.resolve()
         self.novel_id = novel_id
@@ -222,6 +231,22 @@ class ChapterAssemblerV2:
         self.runtime_root = self.novel_root / "data"
         self.story_planning_store = StoryPlanningStore(self.project_root, self.novel_id)
         self.truth_manager = TruthFilesManager(self.project_root, self.novel_id)
+        try:
+            from tools.model_profiles import active_model_profile
+
+            profile = active_model_profile() or {}
+            context_tokens = int(
+                profile.get("context_tokens")
+                or os.getenv("OPENWRITE_CONTEXT_TOKENS", "64000")
+            )
+            output_tokens = int(
+                profile.get("max_output_tokens")
+                or os.getenv("LLM_MAX_TOKENS", "24000")
+            )
+        except (TypeError, ValueError):
+            context_tokens = 64000
+            output_tokens = 24000
+        self._context_policy = ContextBudgetPolicy(context_tokens, output_tokens)
 
     def assemble(self, chapter_id: str) -> ChapterAssemblyPacket:
         ensure_runtime_fresh(self.project_root, self.novel_id)
@@ -290,73 +315,250 @@ class ChapterAssemblerV2:
         else:
             packet.historical_arc_summaries = self._build_historical_arc_summaries(hierarchy, current_arc_id="")
 
-        packet.style_documents = self._load_all_style_documents()
+        current_arc = hierarchy.get_parent_arc(chapter_id) if chapter is not None else None
+        packet.style_documents = self._load_all_style_documents(
+            chapter_id=chapter_id,
+            arc_id=current_arc.node_id if current_arc else "",
+        )
         self._enforce_context_budget(packet)
         return packet
 
     def _enforce_context_budget(self, packet: ChapterAssemblyPacket) -> None:
-        """Apply deterministic per-layer budgets while retaining provenance keys."""
+        """Compress only under pressure, using shared tiers and proportional shares."""
         original_characters = self._packet_character_count(packet)
+        original_tokens = self._packet_token_count(packet)
+        plan = self._context_policy.plan(original_tokens)
         truncated_documents: List[str] = []
         dropped_documents: List[str] = []
 
-        packet.author_intent = packet.author_intent[:3000]
-        packet.creative_focus = packet.creative_focus[:2400]
-        packet.core_documents, core_truncated, core_dropped = self._limit_document_map(
-            packet.core_documents,
-            total_chars=4000,
-            per_document=2200,
-            preferred_prefixes=("background", "foundation"),
+        if not plan.requires_compression:
+            packet.compression = self._compression_report(
+                plan,
+                applied=False,
+                original_characters=original_characters,
+                final_characters=original_characters,
+                original_tokens=original_tokens,
+                final_tokens=original_tokens,
+                truncated_documents=[],
+                dropped_documents=[],
+                budgets={},
+            )
+            return
+
+        target_characters = min(
+            original_characters,
+            max(256, int(plan.target_tokens / 1.5)),
         )
-        truncated_documents.extend(f"core:{name}" for name in core_truncated)
-        dropped_documents.extend(f"core:{name}" for name in core_dropped)
-        packet.story_background = packet.story_background[:1800]
-        packet.previous_chapter_content = packet.previous_chapter_content[-6000:]
-        packet.protagonist_state = packet.protagonist_state[:1600]
-        packet.current_state = packet.current_state[:2400]
-        packet.ledger = packet.ledger[:1800]
-        packet.relationships = packet.relationships[:2400]
-        packet.continuity_documents = {
-            "current_state": packet.current_state,
-            "ledger": packet.ledger,
-            "relationships": packet.relationships,
+        shares = {
+            "controls": 0.11,
+            "core": 0.09,
+            "historical_outline": 0.08,
+            "current_outline": 0.08,
+            "previous_chapter": 0.18,
+            "protagonist_state": 0.04,
+            "continuity": 0.14,
+            "characters": 0.13,
+            "settings": 0.08,
+            "style": 0.07,
+        }
+        budgets = {
+            name: max(1, int(target_characters * share))
+            for name, share in shares.items()
         }
 
-        packet.character_documents, truncated, dropped = self._limit_document_map(
-            packet.character_documents, total_chars=7000, per_document=2200
+        controls, truncated, dropped = self._limit_document_map(
+            {
+                "author_intent": packet.author_intent,
+                "creative_focus": packet.creative_focus,
+            },
+            total_chars=budgets["controls"],
+            per_document=budgets["controls"],
+            preferred_prefixes=("author_intent", "creative_focus"),
         )
-        truncated_documents.extend(f"character:{name}" for name in truncated)
-        dropped_documents.extend(f"character:{name}" for name in dropped)
-        packet.setting_documents, truncated, dropped = self._limit_document_map(
-            packet.setting_documents or packet.concept_documents,
-            total_chars=6500,
-            per_document=1800,
-        )
-        packet.concept_documents = dict(packet.setting_documents)
-        truncated_documents.extend(f"setting:{name}" for name in truncated)
-        dropped_documents.extend(f"setting:{name}" for name in dropped)
-        packet.style_documents, truncated, dropped = self._limit_document_map(
-            packet.style_documents,
-            total_chars=6500,
-            per_document=1800,
-            preferred_prefixes=("work.composed", "work.manifest", "work.fingerprint", "craft."),
-        )
-        truncated_documents.extend(f"style:{name}" for name in truncated)
-        dropped_documents.extend(f"style:{name}" for name in dropped)
+        packet.author_intent = controls.get("author_intent", "")
+        packet.creative_focus = controls.get("creative_focus", "")
+        truncated_documents.extend(f"control:{name}" for name in truncated)
+        dropped_documents.extend(f"control:{name}" for name in dropped)
 
-        packet.compression = {
-            "strategy": "hierarchical-budget-v1",
+        if packet.core_documents:
+            packet.core_documents, truncated, dropped = self._limit_document_map(
+                packet.core_documents,
+                total_chars=budgets["core"],
+                per_document=budgets["core"],
+                preferred_prefixes=("background", "foundation"),
+            )
+            truncated_documents.extend(f"core:{name}" for name in truncated)
+            dropped_documents.extend(f"core:{name}" for name in dropped)
+        else:
+            packet.story_background = self._limit_scalar(
+                packet.story_background,
+                budgets["core"],
+                "core:story_background",
+                truncated_documents,
+            )
+
+        self._limit_summary_items(
+            packet.historical_arc_summaries,
+            budgets["historical_outline"],
+            "outline:arc",
+            truncated_documents,
+        )
+        self._limit_summary_items(
+            packet.current_arc_sections,
+            budgets["current_outline"],
+            "outline:section",
+            truncated_documents,
+        )
+        packet.previous_chapter_content = self._limit_scalar(
+            packet.previous_chapter_content,
+            budgets["previous_chapter"],
+            "recent:previous_chapter",
+            truncated_documents,
+            prefer_tail=True,
+        )
+        packet.protagonist_state = self._limit_scalar(
+            packet.protagonist_state,
+            budgets["protagonist_state"],
+            "continuity:protagonist_state",
+            truncated_documents,
+        )
+
+        continuity, truncated, dropped = self._limit_document_map(
+            packet.continuity_documents
+            or {
+                "current_state": packet.current_state,
+                "ledger": packet.ledger,
+                "relationships": packet.relationships,
+            },
+            total_chars=budgets["continuity"],
+            per_document=budgets["continuity"],
+            preferred_prefixes=("current_state", "relationships", "ledger"),
+        )
+        packet.continuity_documents = continuity
+        packet.current_state = continuity.get("current_state", "")
+        packet.ledger = continuity.get("ledger", "")
+        packet.relationships = continuity.get("relationships", "")
+        truncated_documents.extend(f"continuity:{name}" for name in truncated)
+        dropped_documents.extend(f"continuity:{name}" for name in dropped)
+
+        for attribute, label, preferred in (
+            ("character_documents", "character", ()),
+            ("setting_documents", "setting", ()),
+            (
+                "style_documents",
+                "style",
+                ("work.composed", "work.manifest", "work.fingerprint", "craft."),
+            ),
+        ):
+            source = getattr(packet, attribute)
+            if attribute == "setting_documents":
+                source = source or packet.concept_documents
+            limited, truncated, dropped = self._limit_document_map(
+                source,
+                total_chars=budgets[
+                    {
+                        "character_documents": "characters",
+                        "setting_documents": "settings",
+                        "style_documents": "style",
+                    }[attribute]
+                ],
+                per_document=budgets[
+                    {
+                        "character_documents": "characters",
+                        "setting_documents": "settings",
+                        "style_documents": "style",
+                    }[attribute]
+                ],
+                preferred_prefixes=preferred,
+            )
+            setattr(packet, attribute, limited)
+            truncated_documents.extend(f"{label}:{name}" for name in truncated)
+            dropped_documents.extend(f"{label}:{name}" for name in dropped)
+        packet.concept_documents = dict(packet.setting_documents)
+
+        final_tokens = self._packet_token_count(packet)
+        final_characters = self._packet_character_count(packet)
+        packet.compression = self._compression_report(
+            plan,
+            applied=True,
+            original_characters=original_characters,
+            final_characters=final_characters,
+            original_tokens=original_tokens,
+            final_tokens=final_tokens,
+            truncated_documents=truncated_documents,
+            dropped_documents=dropped_documents,
+            budgets=budgets,
+        )
+
+    def _compression_report(
+        self,
+        plan: ContextBudgetPlan,
+        *,
+        applied: bool,
+        original_characters: int,
+        final_characters: int,
+        original_tokens: int,
+        final_tokens: int,
+        truncated_documents: List[str],
+        dropped_documents: List[str],
+        budgets: Dict[str, int],
+    ) -> Dict[str, Any]:
+        return {
+            "strategy": self.COMPRESSION_STRATEGY,
+            "applied": applied,
+            "level": plan.level,
+            "planned_level": plan.level,
+            "context_window_tokens": plan.context_window_tokens,
+            "reserved_output_tokens": plan.reserved_output_tokens,
+            "safety_tokens": plan.safety_tokens,
+            "budget_tokens": plan.input_budget_tokens,
+            "target_tokens": plan.target_tokens,
+            "target_ratio": plan.target_ratio,
+            "usage_ratio": round(plan.usage_ratio, 4),
             "original_characters": original_characters,
-            "final_characters": self._packet_character_count(packet),
+            "final_characters": final_characters,
+            "original_estimated_tokens": original_tokens,
+            "final_estimated_tokens": final_tokens,
+            "within_budget": final_tokens <= plan.input_budget_tokens,
             "truncated_documents": truncated_documents,
             "dropped_documents": dropped_documents,
-            "budgets": {
-                "exact_previous_chapter": 6000,
-                "characters": 7000,
-                "settings": 6500,
-                "style": 6500,
-            },
+            "budgets": budgets,
         }
+
+    @staticmethod
+    def _limit_scalar(
+        text: str,
+        max_chars: int,
+        label: str,
+        truncated: List[str],
+        *,
+        prefer_tail: bool = False,
+    ) -> str:
+        if len(text) <= max_chars:
+            return text
+        truncated.append(label)
+        return text[-max_chars:] if prefer_tail else text[:max_chars]
+
+    @classmethod
+    def _limit_summary_items(
+        cls,
+        items: List[Any],
+        total_chars: int,
+        label: str,
+        truncated_documents: List[str],
+    ) -> None:
+        documents = {
+            str(index): str(getattr(item, "summary", "") or "")
+            for index, item in enumerate(items)
+        }
+        limited, truncated, _dropped = cls._limit_document_map(
+            documents,
+            total_chars=total_chars,
+            per_document=total_chars,
+        )
+        for index, item in enumerate(items):
+            item.summary = limited.get(str(index), "")
+        truncated_documents.extend(f"{label}:{index}" for index in truncated)
 
     @staticmethod
     def _limit_document_map(
@@ -374,27 +576,58 @@ class ChapterAssemblerV2:
             )
             return rank, name
 
+        ordered = [
+            (name, content)
+            for name, content in sorted(documents.items(), key=priority)
+            if content
+        ]
         kept: Dict[str, str] = {}
         truncated: List[str] = []
         dropped: List[str] = []
+        if not ordered or total_chars <= 0:
+            return kept, truncated, [name for name, _ in ordered]
+
+        # Give every relevant document a fair base allocation before assigning
+        # spare capacity by priority. Filename order must never erase a whole
+        # character merely because earlier profiles filled the bucket first.
+        base_cap = min(per_document, max(1, total_chars // len(ordered)))
         used = 0
-        for name, content in sorted(documents.items(), key=priority):
-            remaining = total_chars - used
-            if remaining <= 0:
-                dropped.append(name)
-                continue
-            fitted = content[: min(per_document, remaining)]
+        for name, content in ordered:
+            fitted = content[:base_cap]
             if fitted:
                 kept[name] = fitted
                 used += len(fitted)
-            if fitted and len(fitted) < len(content):
-                truncated.append(name)
-            elif not fitted and content:
+            else:
                 dropped.append(name)
+
+        remaining = max(0, total_chars - used)
+        for name, content in ordered:
+            if remaining <= 0 or name not in kept:
+                break
+            current = kept[name]
+            extra = min(per_document - len(current), len(content) - len(current), remaining)
+            if extra > 0:
+                kept[name] = content[: len(current) + extra]
+                remaining -= extra
+
+        for name, content in ordered:
+            if name in kept and len(kept[name]) < len(content):
+                truncated.append(name)
         return kept, truncated, dropped
 
     @staticmethod
     def _packet_character_count(packet: ChapterAssemblyPacket) -> int:
+        return sum(len(item) for item in ChapterAssemblerV2._packet_text_values(packet))
+
+    @staticmethod
+    def _packet_token_count(packet: ChapterAssemblyPacket) -> int:
+        return sum(
+            estimate_text_tokens(item)
+            for item in ChapterAssemblerV2._packet_text_values(packet)
+        )
+
+    @staticmethod
+    def _packet_text_values(packet: ChapterAssemblyPacket) -> List[str]:
         core_values = (
             list(packet.core_documents.values())
             if packet.core_documents
@@ -421,20 +654,20 @@ class ChapterAssemblerV2:
         ]
         values.extend(item.summary for item in packet.historical_arc_summaries)
         values.extend(item.summary for item in packet.current_arc_sections)
-        return sum(len(item) for item in values)
+        return values
 
     def _load_story_control(self, filename: str, *, max_chars: int) -> str:
         path = self.src_root / "story" / filename
         text = self._load_text(path).strip() if path.exists() else ""
-        return text[:max_chars]
+        return text
 
     def _load_core_documents(self) -> Dict[str, str]:
         documents: Dict[str, str] = {}
-        for key, max_chars in (("background", 2000), ("foundation", 2000)):
+        for key in ("background", "foundation"):
             path = self.src_root / "story" / f"{key}.md"
             text = self._load_text(path).strip() if path.exists() else ""
             if text:
-                documents[key] = text[:max_chars]
+                documents[key] = text
         return documents
 
     def _load_protagonist_state(self, hierarchy: OutlineHierarchy, chapter_id: str) -> str:
@@ -466,18 +699,24 @@ class ChapterAssemblerV2:
         return current_state[:1200]
 
     def _detect_protagonist_name(self, hierarchy: OutlineHierarchy, chapter_id: str) -> str:
-        section = hierarchy.get_parent_section(chapter_id)
-        candidates: List[str] = []
-        if section:
-            for ch_id in section.children_ids:
-                node = hierarchy.get_node(ch_id)
-                if node:
-                    candidates.extend(node.involved_characters)
-        candidates = self._dedupe(candidates)
+        candidates = self._collect_relevant_characters(hierarchy, chapter_id)
         for cid in candidates:
             doc = self._load_character_documents([cid]).get(cid, "")
             if "主角" in doc:
                 return cid
+        for path in sorted((self.src_root / "characters").glob("*.md")):
+            text = self._load_text(path)
+            meta, body = parse_toml_front_matter(text)
+            if str(meta.get("tier") or meta.get("role") or "").strip() == "主角":
+                heading = next(
+                    (
+                        line[2:].strip()
+                        for line in body.splitlines()
+                        if line.startswith("# ")
+                    ),
+                    "",
+                )
+                return str(meta.get("name") or heading or path.stem)
         return candidates[0] if candidates else ""
 
     def _load_hierarchy(self) -> OutlineHierarchy:
@@ -594,30 +833,6 @@ class ChapterAssemblerV2:
         if chapter is None:
             return []
 
-        section = hierarchy.get_parent_section(chapter_id)
-        if section is None:
-            return list(chapter.involved_characters)
-
-        all_ids = [ch_id for ch_id in section.children_ids]
-        current_idx = all_ids.index(chapter_id) if chapter_id in all_ids else len(all_ids)
-
-        appeared: List[str] = []
-        future: List[str] = []
-        for idx, ch_id in enumerate(all_ids):
-            node = hierarchy.get_node(ch_id)
-            if not node:
-                continue
-            if idx <= current_idx:
-                appeared.extend(node.involved_characters)
-            else:
-                future.extend(node.involved_characters)
-
-        main = chapter.involved_characters
-        merged = main + appeared + future
-        merged = self._dedupe(merged)
-        if merged:
-            return merged
-
         chapter_text = "\n".join(
             [
                 chapter.title,
@@ -626,31 +841,35 @@ class ChapterAssemblerV2:
                 *chapter.goals,
                 *chapter.beats,
                 *chapter.hooks,
+                self._load_current_chapter_content(chapter_id),
             ]
         )
         character_root = self.src_root / "characters"
-        inferred: List[str] = []
+        inferred: list[tuple[int, str]] = []
         for path in sorted(character_root.glob("*.md")):
-            meta, body = parse_toml_front_matter(self._load_text(path))
+            text = self._load_text(path)
+            meta, body = parse_toml_front_matter(text)
             heading = ""
             for line in body.splitlines():
                 if line.startswith("# "):
                     heading = line[2:].strip()
                     break
-            identifiers = {
-                path.stem,
-                str(meta.get("id") or "").strip(),
-                str(meta.get("name") or "").strip(),
-                heading,
-            }
-            if any(
-                identifier and identifier in chapter_text
-                for identifier in identifiers
-            ):
+            positions = [
+                chapter_text.find(identifier)
+                for identifier in shared_document_lookup_keys(path, content=text)
+                if identifier and identifier in chapter_text
+            ]
+            if positions:
                 inferred.append(
-                    str(meta.get("name") or heading or path.stem).strip()
+                    (
+                        min(positions),
+                        str(meta.get("name") or heading or path.stem).strip(),
+                    )
                 )
-        return self._dedupe(inferred)
+        return self._dedupe(
+            list(chapter.involved_characters)
+            + [name for _, name in sorted(inferred)]
+        )
 
     def _collect_relevant_concepts(self, hierarchy: OutlineHierarchy, chapter_id: str) -> List[str]:
         chapter = hierarchy.get_node(chapter_id)
@@ -678,7 +897,17 @@ class ChapterAssemblerV2:
         for path in sorted(manuscript_root.glob("arc_*/" + prev + "*.md")):
             text = self._load_text(path)
             if text:
-                return text
+                return strip_character_state_annotations(text)
+        return ""
+
+    def _load_current_chapter_content(self, chapter_id: str) -> str:
+        manuscript_root = self.runtime_root / "manuscript"
+        for pattern in (f"{chapter_id}.md", f"{chapter_id}_*.md"):
+            matches = sorted(manuscript_root.rglob(pattern))
+            if matches:
+                return strip_character_state_annotations(
+                    self._load_text(matches[0])
+                )
         return ""
 
     def _load_character_documents(self, character_ids: List[str]) -> Dict[str, str]:
@@ -689,30 +918,12 @@ class ChapterAssemblerV2:
                 character_root / f"{char_id}.md"
             )
             if src_path.exists():
-                docs[char_id] = self._fit_text(
-                    render_indexed_document(
-                        self._load_text(src_path),
-                        default_meta={"name": char_id},
-                        max_chars=2200,
-                        max_sections=5,
-                    ),
-                    min_chars=500,
-                    max_chars=2200,
-                )
+                docs[char_id] = self._load_text(src_path).strip()
                 continue
 
             profile_path = self.runtime_root / "characters" / "profiles" / f"{char_id}.md"
             if profile_path.exists():
-                docs[char_id] = self._fit_text(
-                    render_indexed_document(
-                        self._load_text(profile_path),
-                        default_meta={"name": char_id},
-                        max_chars=2200,
-                        max_sections=5,
-                    ),
-                    min_chars=500,
-                    max_chars=2200,
-                )
+                docs[char_id] = self._load_text(profile_path).strip()
                 continue
 
             card_path = self.runtime_root / "characters" / "cards" / f"{char_id}.yaml"
@@ -722,7 +933,12 @@ class ChapterAssemblerV2:
 
         return docs
 
-    def _load_all_style_documents(self) -> Dict[str, str]:
+    def _load_all_style_documents(
+        self,
+        *,
+        chapter_id: str = "",
+        arc_id: str = "",
+    ) -> Dict[str, str]:
         docs: Dict[str, str] = {}
 
         composed = self.runtime_root / "style" / "composed.md"
@@ -737,6 +953,10 @@ class ChapterAssemblerV2:
         if fingerprint.exists():
             docs["work.fingerprint"] = self._load_text(fingerprint)
 
+        scoped = self._load_scoped_style_rules(chapter_id=chapter_id, arc_id=arc_id)
+        if scoped:
+            docs["work.scoped"] = scoped
+
         craft_dir = resolve_craft_dir(self.project_root)
         if craft_dir.exists():
             for p in sorted(craft_dir.glob("*")):
@@ -745,12 +965,55 @@ class ChapterAssemblerV2:
 
         style_name = self.style_id or self.novel_id
         source_dir = self.runtime_root / "sources" / style_name / "style"
-        if source_dir.exists():
+        if not composed.exists() and source_dir.exists():
             for p in sorted(source_dir.glob("*")):
                 if p.suffix in {".md", ".yaml", ".yml"}:
                     docs[f"source.{p.stem}"] = self._load_text(p)
 
         return docs
+
+    def _load_scoped_style_rules(self, *, chapter_id: str, arc_id: str) -> str:
+        path = self.runtime_root / "style" / "recipe.yaml"
+        if not path.is_file():
+            return ""
+        data = self._load_yaml(path)
+        selections = data.get("selections") if isinstance(data, dict) else []
+        if not isinstance(selections, list):
+            return ""
+        sections: dict[str, list[str]] = {
+            "当前范围主风格": [],
+            "当前范围辅助技法": [],
+            "当前范围禁止": [],
+        }
+        for item in selections:
+            if not isinstance(item, dict):
+                continue
+            scope = str(item.get("scope") or "project")
+            scope_id = str(item.get("scope_id") or "")
+            if scope == "project":
+                continue
+            if scope == "arc" and scope_id != arc_id:
+                continue
+            if scope == "chapter" and scope_id != chapter_id:
+                continue
+            role = str(item.get("role") or "auxiliary")
+            if role == "validation_only":
+                continue
+            claim = str(item.get("claim") or "").strip()
+            if not claim:
+                continue
+            if role == "avoid":
+                sections["当前范围禁止"].append(claim)
+            elif role == "primary":
+                sections["当前范围主风格"].append(claim)
+            else:
+                sections["当前范围辅助技法"].append(claim)
+        parts = [
+            f"## {title}\n" + "\n".join(f"- {item}" for item in items)
+            for title, items in sections.items()
+            if items
+        ]
+        return "\n\n".join(parts)
 
     def _load_setting_documents(self, concept_names: List[str]) -> Dict[str, str]:
         docs: Dict[str, str] = {}
@@ -759,31 +1022,10 @@ class ChapterAssemblerV2:
         if not world_root.exists():
             return docs
 
-        world_defaults = {
-            "rules.md": {
-                "name": "世界规则",
-                "summary": "作品的底层规则、限制与未知项。",
-                "detail_refs": ["力量体系", "社会规则", "物理法则", "禁忌与未知"],
-            },
-            "terminology.md": {
-                "name": "术语表",
-                "summary": "作品内高频术语与概念定义。",
-                "detail_refs": ["术语表"],
-            },
-            "timeline.md": {
-                "name": "时间线",
-                "summary": "作品当前已知的重要事件顺序。",
-                "detail_refs": [],
-            },
-        }
         for base_name in ["rules.md", "terminology.md", "timeline.md"]:
             p = world_root / base_name
             if p.exists():
-                docs[f"world.{p.stem}"] = render_indexed_document(
-                    self._load_text(p),
-                    default_meta=world_defaults.get(base_name, {"name": p.stem}),
-                    max_chars=1800,
-                )
+                docs[f"world.{p.stem}"] = self._load_text(p).strip()
 
         entities = world_root / "entities"
         if entities.exists():
@@ -794,14 +1036,7 @@ class ChapterAssemblerV2:
                     continue
                 stem = p.stem.lower()
                 if stem in concept_set or any(c in text.lower() for c in concept_set):
-                    docs[f"entity.{p.stem}"] = render_indexed_document(
-                        text,
-                        default_meta={
-                            "name": p.stem,
-                            "detail_refs": ["规则", "特征", "关联"],
-                        },
-                        max_chars=1800,
-                    )
+                    docs[f"entity.{p.stem}"] = text.strip()
 
         return docs
 

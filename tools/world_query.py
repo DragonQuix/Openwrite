@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import json
 import os
 import re
 import sys
@@ -677,9 +678,19 @@ def edit_world_relation(
     source = _find_relation_document(root, novel_id, source_id)
     target = _find_relation_document(root, novel_id, target_id)
     if source is None:
-        return {"ok": False, "error": f"关系源实体不存在: {source_id}"}
+        return {
+            "ok": False,
+            "error": _missing_relation_entity_error(
+                root, novel_id, source_id, label="关系源实体不存在"
+            ),
+        }
     if target is None:
-        return {"ok": False, "error": f"关系目标实体不存在: {target_id}"}
+        return {
+            "ok": False,
+            "error": _missing_relation_entity_error(
+                root, novel_id, target_id, label="关系目标实体不存在"
+            ),
+        }
     if source.resolve() == target.resolve():
         return {"ok": False, "error": "关系源和目标不能相同"}
     if action not in {"upsert", "remove"}:
@@ -772,21 +783,61 @@ def edit_world_relation(
 
 def edit_world_relations(
     novel_id: str,
-    relations: List[Dict[str, Any]],
+    relations: Optional[List[Dict[str, Any]]] = None,
     *,
     project_root: Optional[Path] = None,
     confirm: bool = False,
     base_revisions: Optional[Dict[str, str]] = None,
+    preview_token: str = "",
+    preview_tokens: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Preview or apply multiple canonical ``[[related]]`` edits in one request."""
     root = (project_root or Path(__file__).parent.parent).resolve()
+    stored_preview_paths: List[Path] = []
+    requested_tokens = [
+        str(token).strip()
+        for token in (preview_tokens or [])
+        if str(token or "").strip()
+    ]
+    if str(preview_token or "").strip():
+        requested_tokens.append(str(preview_token).strip())
+    requested_tokens = list(dict.fromkeys(requested_tokens))
+    if confirm and requested_tokens:
+        stored_relations: List[Dict[str, Any]] = []
+        stored_revisions: Dict[str, str] = {}
+        for token in requested_tokens:
+            stored_preview, stored_path, preview_error = _load_relation_preview(
+                root,
+                novel_id,
+                token,
+            )
+            if preview_error:
+                return {"ok": False, "error": preview_error}
+            for key, revision in stored_preview["source_revisions"].items():
+                existing = stored_revisions.get(str(key))
+                if existing is not None and existing != str(revision):
+                    return {
+                        "ok": False,
+                        "error": "多份关系预览的源文件基线不一致，请重新合并预览",
+                    }
+                stored_revisions[str(key)] = str(revision)
+            stored_relations.extend(stored_preview["relations"])
+            if stored_path is not None:
+                stored_preview_paths.append(stored_path)
+        relations = stored_relations
+        base_revisions = stored_revisions
+
     if not isinstance(relations, list) or not relations:
-        return {"ok": False, "error": "relations 不能为空"}
+        return {
+            "ok": False,
+            "error": "relations 不能为空；确认已有预览时可改传 preview_token",
+        }
     if len(relations) > 50:
         return {"ok": False, "error": "单次最多编辑 50 条关系"}
 
     grouped: Dict[Path, Dict[str, Any]] = {}
     changes: List[Dict[str, Any]] = []
+    canonical_relations: List[Dict[str, Any]] = []
     provided_revisions = base_revisions if isinstance(base_revisions, dict) else {}
     for index, relation in enumerate(relations):
         if not isinstance(relation, dict):
@@ -802,12 +853,22 @@ def edit_world_relations(
         if source is None:
             return {
                 "ok": False,
-                "error": f"第 {index + 1} 条关系源实体不存在: {source_id}",
+                "error": _missing_relation_entity_error(
+                    root,
+                    novel_id,
+                    source_id,
+                    label=f"第 {index + 1} 条关系源实体不存在",
+                ),
             }
         if target is None:
             return {
                 "ok": False,
-                "error": f"第 {index + 1} 条关系目标实体不存在: {target_id}",
+                "error": _missing_relation_entity_error(
+                    root,
+                    novel_id,
+                    target_id,
+                    label=f"第 {index + 1} 条关系目标实体不存在",
+                ),
             }
         if source.resolve() == target.resolve():
             return {"ok": False, "error": f"第 {index + 1} 条关系源和目标不能相同"}
@@ -841,6 +902,14 @@ def edit_world_relations(
             target.read_text(encoding="utf-8")
         )
         canonical_target = str(target_metadata.get("id") or target.stem).strip()
+        canonical_relations.append(
+            {
+                "source_id": str(group["metadata"].get("id") or source.stem),
+                "target_id": canonical_target,
+                "description": description,
+                "action": action,
+            }
+        )
         existing_index = next(
             (
                 rel_index
@@ -916,11 +985,20 @@ def edit_world_relations(
         "changes": changes,
         "source_revisions": source_revisions,
         "diff": "".join(diffs),
-        "next_action": (
-            "确认后使用相同 relations，并传入 source_revisions、confirm=true"
-        ),
+        "next_action": "用户确认后仅传 preview_token，并设置 confirm=true",
     }
-    if not confirm or changed_sources == 0:
+    if not confirm:
+        if changed_sources > 0:
+            payload["preview_token"] = _save_relation_preview(
+                root,
+                novel_id,
+                canonical_relations,
+                source_revisions,
+            )
+        return payload
+    if changed_sources == 0:
+        for stored_path in stored_preview_paths:
+            stored_path.unlink(missing_ok=True)
         return payload
 
     for source, group in grouped.items():
@@ -952,7 +1030,94 @@ def edit_world_relations(
         os.replace(temp_path, source)
         relative = source.resolve().relative_to(root).as_posix()
         revisions[relative] = hashlib.sha256(updated.encode("utf-8")).hexdigest()[:16]
+    for stored_path in stored_preview_paths:
+        stored_path.unlink(missing_ok=True)
     return {**payload, "applied": True, "revisions": revisions}
+
+
+def _relation_preview_root(root: Path, novel_id: str) -> Path:
+    return root / "data" / "novels" / novel_id / "data" / "workflows" / "relation_previews"
+
+
+def _relation_preview_record(
+    novel_id: str,
+    relations: List[Dict[str, Any]],
+    source_revisions: Dict[str, str],
+) -> Dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "novel_id": novel_id,
+        "relations": relations,
+        "source_revisions": source_revisions,
+    }
+
+
+def _relation_preview_token(record: Dict[str, Any]) -> str:
+    serialized = json.dumps(
+        record,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
+
+
+def _save_relation_preview(
+    root: Path,
+    novel_id: str,
+    relations: List[Dict[str, Any]],
+    source_revisions: Dict[str, str],
+) -> str:
+    record = _relation_preview_record(novel_id, relations, source_revisions)
+    token = _relation_preview_token(record)
+    preview_root = _relation_preview_root(root, novel_id)
+    preview_root.mkdir(parents=True, exist_ok=True)
+    target = preview_root / f"{token}.json"
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=preview_root,
+        prefix=f".{token}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        json.dump(record, handle, ensure_ascii=False, sort_keys=True, indent=2)
+        handle.write("\n")
+        temp_path = Path(handle.name)
+    os.replace(temp_path, target)
+    return token
+
+
+def _load_relation_preview(
+    root: Path,
+    novel_id: str,
+    preview_token: str,
+) -> tuple[Dict[str, Any], Optional[Path], str]:
+    if not re.fullmatch(r"[a-f0-9]{24}", preview_token):
+        return {}, None, "关系预览凭据格式无效，请重新预览"
+    preview_root = _relation_preview_root(root, novel_id).resolve()
+    path = (preview_root / f"{preview_token}.json").resolve()
+    if preview_root not in path.parents or not path.is_file():
+        return {}, None, "关系预览凭据不存在或已使用，请重新预览"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}, None, "关系预览凭据损坏，请重新预览"
+    if not isinstance(raw, dict):
+        return {}, None, "关系预览凭据损坏，请重新预览"
+    relations = raw.get("relations")
+    source_revisions = raw.get("source_revisions")
+    if (
+        raw.get("schema_version") != 1
+        or raw.get("novel_id") != novel_id
+        or not isinstance(relations, list)
+        or not isinstance(source_revisions, dict)
+    ):
+        return {}, None, "关系预览凭据与当前作品不匹配，请重新预览"
+    record = _relation_preview_record(novel_id, relations, source_revisions)
+    if _relation_preview_token(record) != preview_token:
+        return {}, None, "关系预览凭据校验失败，请重新预览"
+    return record, path, ""
 
 
 def _relation_document_summaries(root: Path, novel_id: str) -> List[Dict[str, Any]]:
@@ -1032,15 +1197,62 @@ def _find_relation_document(root: Path, novel_id: str, entity_id: str) -> Option
     requested = str(entity_id or "").strip()
     for path in candidates:
         metadata, body = parse_toml_front_matter(path.read_text(encoding="utf-8"))
+        aliases = metadata.get("alias", [])
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        elif not isinstance(aliases, list):
+            aliases = []
         identifiers = {
             path.stem,
             str(metadata.get("id") or "").strip(),
             str(metadata.get("name") or "").strip(),
             _markdown_title(body),
+            *(str(alias).strip() for alias in aliases),
         }
         if requested in identifiers:
             return path
     return None
+
+
+def _missing_relation_entity_error(
+    root: Path,
+    novel_id: str,
+    entity_id: str,
+    *,
+    label: str,
+) -> str:
+    requested = str(entity_id or "").strip()
+    novel_root = root / "data" / "novels" / novel_id / "src"
+    candidates = [
+        *sorted((novel_root / "characters").glob("*.md")),
+        *sorted((novel_root / "world" / "entities").rglob("*.md")),
+    ]
+    identifiers: Dict[str, tuple[str, str]] = {}
+    for path in candidates:
+        metadata, body = parse_toml_front_matter(path.read_text(encoding="utf-8"))
+        canonical_id = str(metadata.get("id") or path.stem).strip()
+        canonical_name = str(metadata.get("name") or _markdown_title(body) or path.stem).strip()
+        values = [path.stem, canonical_id, canonical_name, _markdown_title(body)]
+        aliases = metadata.get("alias", [])
+        if isinstance(aliases, str):
+            values.append(aliases)
+        elif isinstance(aliases, list):
+            values.extend(str(alias) for alias in aliases)
+        for value in values:
+            clean = str(value or "").strip()
+            if clean:
+                identifiers[clean] = (canonical_name, canonical_id)
+    matches = difflib.get_close_matches(requested, identifiers, n=3, cutoff=0.55)
+    suggestions: List[str] = []
+    seen: set[tuple[str, str]] = set()
+    for match in matches:
+        candidate = identifiers[match]
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        suggestions.append(f"{candidate[0]}（ID: {candidate[1]}）")
+    suffix = f"；可能是: {', '.join(suggestions)}" if suggestions else ""
+    return f"{label}: {requested}{suffix}"
 
 
 def _markdown_title(body: str) -> str:

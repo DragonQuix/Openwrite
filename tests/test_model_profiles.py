@@ -67,12 +67,14 @@ def test_three_named_profiles_route_independently_and_keep_credentials_private(t
             "dante": "prose",
             "chapter_write": "prose",
             "review": "critic",
+            "research": "balanced",
         }
     )
 
     assert store.resolve("goethe")["model"] == "planner"
     assert store.resolve("chapter_write")["api_key"] == "write-secret"
     assert store.resolve("review")["model"] == "reviewer"
+    assert store.resolve("research")["model"] == "planner"
     surface_text = json.dumps(store.surface(), ensure_ascii=False)
     assert "plan-secret" not in surface_text
     assert "write-secret" not in surface_text
@@ -103,6 +105,49 @@ def test_search_profile_keeps_embedding_credentials_private(tmp_path: Path):
     assert resolved["embedding_dimension"] == 3072
     assert "llm-secret" not in surface_text
     assert "embedding-secret" not in surface_text
+
+
+def test_local_embedding_profile_is_ready_without_embedding_credentials(tmp_path: Path):
+    store = ModelProfileStore(tmp_path)
+    local_profile = {
+        **profile("local-search", "graph-extractor"),
+        "embedding_provider": "local",
+        "embedding_model": "BAAI/bge-small-zh-v1.5",
+        "embedding_dimension": 512,
+        "embedding_max_tokens": 512,
+    }
+    store.save_profile(local_profile, api_key="llm-secret")
+
+    surface = store.surface()["profiles"][0]
+    candidate = store.test_embedding_candidate(local_profile)
+
+    assert surface["embedding_configured"] is True
+    assert surface["embedding_key_configured"] is False
+    assert candidate["embedding_provider"] == "local"
+    assert candidate["embedding_api_key"] == ""
+
+
+def test_vector_search_profile_resolves_without_chat_credentials(tmp_path: Path):
+    store = ModelProfileStore(tmp_path)
+    local_profile = {
+        **profile("local-search", "unused-in-vector-mode"),
+        "embedding_provider": "local",
+        "embedding_model": "BAAI/bge-small-zh-v1.5",
+        "embedding_dimension": 512,
+        "embedding_max_tokens": 512,
+        "search_mode": "vector",
+    }
+    store.save_profile(local_profile)
+    store.save_routes({"search": "local-search"})
+
+    resolved = store.resolve("search")
+
+    assert resolved["api_key"] == ""
+    assert resolved["embedding_provider"] == "local"
+    store.save_profile({**local_profile, "search_mode": "graph"})
+    with pytest.raises(ModelProfileError) as error:
+        store.resolve("search")
+    assert error.value.code == "MODEL_CREDENTIAL_MISSING"
 
 
 def test_session_only_credential_is_not_written_to_disk(
@@ -163,7 +208,59 @@ def test_active_profile_drives_llm_config_and_context_budget(tmp_path: Path):
     assert config.api_key == "active-secret"
     assert config.temperature == 0
     assert config.max_tokens == 4096
-    assert builder.MAX_TOKENS == 128000
+    assert config.context_tokens == 128000
+    assert builder.CONTEXT_WINDOW_TOKENS == 128000
+    assert builder.MAX_OUTPUT_TOKENS == 4096
+    assert builder.MAX_TOKENS == 120064
+
+
+@pytest.mark.parametrize(
+    ("context_tokens", "max_output_tokens"),
+    (
+        (1_050_000, 128_000),
+        (2_000_000, 131_072),
+        (10_000_000, 32_768),
+        (1_000_000, 384_000),
+    ),
+)
+def test_long_context_profiles_are_valid_and_drive_context_budget(
+    tmp_path: Path,
+    context_tokens: int,
+    max_output_tokens: int,
+):
+    store = ModelProfileStore(tmp_path)
+    saved = store.save_profile(
+        {
+            **profile("long-context", "long-context-model"),
+            "context_tokens": context_tokens,
+            "max_output_tokens": max_output_tokens,
+        },
+        api_key="long-context-secret",
+    )
+
+    with activate_model_profile(saved):
+        builder = ContextBuilder(tmp_path, "demo")
+
+    assert saved["context_tokens"] == context_tokens
+    assert saved["max_output_tokens"] == max_output_tokens
+    assert builder.CONTEXT_WINDOW_TOKENS == context_tokens
+    assert builder.MAX_OUTPUT_TOKENS == max_output_tokens
+    assert builder.MAX_TOKENS < context_tokens
+    assert builder.MAX_TOKENS > context_tokens // 2
+
+
+def test_model_profile_surface_exposes_presets_without_credentials(tmp_path: Path):
+    store = ModelProfileStore(tmp_path)
+    store.save_profile(profile("prose", "writer"), api_key="private-secret")
+
+    surface = store.surface()
+    serialized = json.dumps(surface, ensure_ascii=False)
+
+    assert len(surface["presets"]) >= 20
+    assert "openai-gpt-5.6-sol" in {preset["id"] for preset in surface["presets"]}
+    assert "xiaomi-mimo-v2.5-pro" in {preset["id"] for preset in surface["presets"]}
+    assert "private-secret" not in serialized
+    assert all("api_key" not in preset for preset in surface["presets"])
 
 
 def test_unknown_route_and_last_profile_deletion_are_rejected(

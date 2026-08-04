@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
+
+from .outline_contract import OUTLINE_JSON_FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,12 @@ class ChapterOutline:
     dramatic_position: str  # 起/承/转/合/过渡
     content_focus: str
     goals: list[str] = field(default_factory=list)
+    estimated_words: int = 0
+    involved_characters: list[str] = field(default_factory=list)
+    involved_settings: list[str] = field(default_factory=list)
+    emotional_arc: str = ""
+    beats: list[str] = field(default_factory=list)
+    hooks: list[str] = field(default_factory=list)
 
 
 class ArchitectAgent:
@@ -150,7 +158,10 @@ class ArchitectAgent:
         """
         from tools.llm import Message
 
-        system_prompt = """你是一个专业的小说大纲师。根据世界观设定，设计章节大纲。
+        system_prompt = (
+            "你是一个专业的小说大纲师。根据世界观设定，设计章节大纲。\n\n"
+            + OUTLINE_JSON_FIELDS
+            + """
 
 输出 JSON 格式：
 ```json
@@ -161,13 +172,20 @@ class ArchitectAgent:
     "summary": "章节内容概要（100字内）",
     "dramatic_position": "起/承/转/合/过渡",
     "content_focus": "本章核心内容",
-    "goals": ["目标1", "目标2"]
+    "goals": ["目标1", "目标2"],
+    "estimated_words": 3000,
+    "involved_characters": ["规范角色名"],
+    "involved_settings": ["规范设定名"],
+    "emotional_arc": "戒备 -> 动摇 -> 决意",
+    "beats": ["场景切入", "冲突升级", "关键选择", "章末钩子"],
+    "hooks": ["下一章承接的问题"]
   }
 ]
 ```
 
 每5章为一个"节"，节内有起承转合。确保剧情有起伏。
 只返回 JSON。"""
+        )
 
         user_prompt = f"""书名：{title}
 题材：{genre}
@@ -213,18 +231,21 @@ class ArchitectAgent:
         """
         from tools.llm import Message
 
-        system_prompt = """你是一个专业的小说角色设计师。根据给定信息，设计角色设定。
+        system_prompt = """你是 OpenWrite 的专业小说角色设计师。根据给定信息，设计可直接进入角色资产库的完整角色正文。
 
-输出 Markdown 格式的角色卡，包含：
-- 基础信息（名字、年龄、身份等）
-- 外貌特征
-- 性格特点
-- 背景故事
-- 与主角的关系
-- 说话风格
-- 特殊能力（如果有）
+只输出 Markdown 正文，不要代码围栏或 TOML front matter。必须使用以下结构：
+# 角色名
+## 基本信息
+## 背景
+## 外貌
+## 性格
+## 与主角关系
+## 说话风格
+## 当前戏剧用途
+## 特殊能力
 
-保持角色真实立体，有优点也有缺点。"""
+每个章节都要填写可执行的具体内容；未知项明确写“无”或“待作者确认”，不要省略标题。
+保持角色真实立体，有优点也有缺点，并与已提供的世界观一致。"""
 
         user_prompt = f"""角色名：{name}
 角色定位：{role}
@@ -308,12 +329,13 @@ class ArchitectAgent:
 示例结构：
 ```
 ## 第一篇：入门（1-20章）
-- 核心冲突：主角拜师考验
-- 转折点：第10章通过考验
-- 结局：正式入门
+> 篇弧线: 拜师考验 -> 通过考验 -> 正式入门
+> 篇情感: 期待 -> 受挫 -> 坚定
 
 ### 第一节（1-5章）
-- 结构：起(1) → 承(2-3) → 转(4) → 合(5)
+> 节结构: 起(ch_001) -> 承(ch_002-ch_003) -> 转(ch_004) -> 合(ch_005)
+> 节情感: 好奇 -> 受挫 -> 决意
+> 节张力: low -> rising -> peak -> falling
 ```
 
 用 Markdown 输出。"""
@@ -418,12 +440,25 @@ class ArchitectAgent:
 
 根据大纲，识别并列出**主要伏笔**。
 
-格式：
-| hook_id | 伏笔内容 | 埋设章节 | 预期回收 | 类型 |
-|---------|----------|----------|----------|------|
-| H01 | xxx | 第3章 | 第15章 | 悬念 |
+只输出可被 OpenWrite 伏笔 DAG 直接解析的 YAML，不要 Markdown 表格、标题或代码围栏：
+nodes:
+  f001:
+    id: f001
+    content: 伏笔的客观内容
+    weight: 8
+    layer: 主线
+    status: 埋伏
+    created_at: ch_003
+    target_arc: arc_001
+    target_section: sec_003
+    target_chapter: ch_015
+    tags: [悬念]
+edges: []
+status:
+  f001: 埋伏
 
-识别 5-10 个核心伏笔即可。
+识别 5-10 个核心伏笔即可。每个 nodes 键必须等于节点 id；weight 为 1-10；
+status 使用“埋伏/待收/已收/废弃”；章节 ID 使用 ch_001 格式。没有边时输出空数组。
 伏笔应该在合适时机回收，不要埋太多。"""
 
         user_prompt = f"""大纲：
@@ -440,7 +475,7 @@ class ArchitectAgent:
             max_tokens=2048,
         )
 
-        return f"# 伏笔列表\n\n{response.content}"
+        return response.content.strip()
 
     def _generate_pending_hooks(self, title: str, volume_outline: str) -> str:
         """兼容旧方法名。"""
@@ -465,6 +500,12 @@ class ArchitectAgent:
                             dramatic_position=item.get("dramatic_position", "起"),
                             content_focus=item.get("content_focus", ""),
                             goals=item.get("goals", []),
+                            estimated_words=item.get("estimated_words", 0),
+                            involved_characters=item.get("involved_characters", []),
+                            involved_settings=item.get("involved_settings", []),
+                            emotional_arc=item.get("emotional_arc", ""),
+                            beats=item.get("beats", []),
+                            hooks=item.get("hooks", []),
                         )
                     )
                 return outlines

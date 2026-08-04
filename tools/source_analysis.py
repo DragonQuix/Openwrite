@@ -29,14 +29,21 @@ from models.source_analysis import (
     SourceReportV2,
 )
 
-PROMPT_VERSION = "source-analysis-v2.1"
+PROMPT_VERSION = "source-analysis-v2.7"
 DEFAULT_INPUT_BUDGET = 12000
 FOCUS_VALUES = {
     "promise",
     "structure",
     "character",
+    "world",
+    "relationship",
+    "progression",
+    "timeline",
     "conflict",
     "hook",
+    "thread",
+    "arc_summary",
+    "chapter_summary",
     "pacing",
     "voice",
     "reader_drive",
@@ -57,8 +64,15 @@ FindingCategory = Literal[
     "promise",
     "structure",
     "character",
+    "world",
+    "relationship",
+    "progression",
+    "timeline",
     "conflict",
     "hook",
+    "thread",
+    "arc_summary",
+    "chapter_summary",
     "pacing",
     "voice",
     "reader_drive",
@@ -77,11 +91,21 @@ class SourceAnalysisError(RuntimeError):
 class SourceAnalysisService:
     """Own V2 source manifests, evidence reports, profiles and proposals."""
 
-    def __init__(self, project_root: Path, novel_id: str):
+    def __init__(
+        self,
+        project_root: Path,
+        novel_id: str,
+        *,
+        sources_root: Path | None = None,
+    ):
         self.project_root = Path(project_root).resolve()
         self.novel_id = str(novel_id)
         self.novel_root = self.project_root / "data" / "novels" / self.novel_id
-        self.sources_root = self.novel_root / "data" / "sources"
+        self.sources_root = (
+            Path(sources_root).resolve()
+            if sources_root is not None
+            else self.novel_root / "data" / "sources"
+        )
         self.profiles_root = self.sources_root / "_profiles"
 
     def prepare(
@@ -311,7 +335,13 @@ class SourceAnalysisService:
             "report": report.model_dump(mode="json") if report else None,
         }
 
-    def synthesize(self, source_ids: Iterable[str]) -> ReferenceProfileV1:
+    def synthesize(
+        self,
+        source_ids: Iterable[str],
+        *,
+        include_source_bound_from: Iterable[str] | None = None,
+        source_intents: dict[str, str] | None = None,
+    ) -> ReferenceProfileV1:
         clean_ids = list(dict.fromkeys(self._source_id(item) for item in source_ids))
         if not clean_ids:
             raise SourceAnalysisError("至少选择一个来源", code="INVALID_INPUT")
@@ -325,6 +355,13 @@ class SourceAnalysisService:
                 )
             reports.append(report)
 
+        allowed_bound = {
+            self._source_id(item) for item in (include_source_bound_from or [])
+        }
+        intents = {
+            source_id: str((source_intents or {}).get(source_id) or "reference")
+            for source_id in clean_ids
+        }
         grouped: dict[str, list[tuple[str, SourceFindingV2]]] = defaultdict(list)
         category_claims: dict[str, dict[str, list[tuple[str, SourceFindingV2]]]] = defaultdict(
             lambda: defaultdict(list)
@@ -332,15 +369,17 @@ class SourceAnalysisService:
         excluded: list[str] = []
         for report in reports:
             for finding in report.findings:
-                if (
+                authorized_bound = report.source_id in allowed_bound and finding.source_bound
+                if not authorized_bound and (
                     finding.source_bound
                     or not finding.reusable
                     or not self._claim_is_safe(finding, report.source_bound_terms)
                 ):
                     excluded.append(f"{report.source_id}: {finding.claim}")
                     continue
-                key = self._normalize_claim(finding.claim)
-                grouped[key].append((report.source_id, finding))
+                claims = category_claims[finding.category]
+                key = self._semantic_claim_key(finding.claim, claims)
+                grouped[f"{finding.category}\0{key}"].append((report.source_id, finding))
                 category_claims[finding.category][key].append((report.source_id, finding))
 
         common: list[ProfileItemV1] = []
@@ -350,11 +389,15 @@ class SourceAnalysisService:
             sources = list(dict.fromkeys(source_id for source_id, _ in entries))
             finding = entries[0][1]
             item = ProfileItemV1(
+                item_id=f"item_{self._sha256(finding.category + ':' + finding.claim)[:16]}",
+                category=finding.category,
                 claim=finding.claim,
                 source_ids=sources,
                 evidence=self._dedupe_evidence(
                     evidence for _, candidate in entries for evidence in candidate.evidence
                 ),
+                reusable=all(candidate.reusable for _, candidate in entries),
+                source_bound=any(candidate.source_bound for _, candidate in entries),
             )
             if len(sources) >= 2:
                 common.append(item)
@@ -379,12 +422,21 @@ class SourceAnalysisService:
                 conflicts.append(f"{category}: {summary}")
 
         revisions = {report.source_id: report.source_sha256 for report in reports}
-        identity = json.dumps(revisions, ensure_ascii=False, sort_keys=True)
+        identity = json.dumps(
+            {
+                "revisions": revisions,
+                "include_source_bound_from": sorted(allowed_bound),
+                "source_intents": intents,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         profile_id = f"profile_{self._sha256(identity)[:16]}"
         profile = ReferenceProfileV1(
             profile_id=profile_id,
             source_ids=clean_ids,
             source_revisions=revisions,
+            source_intents=intents,
             common_methods=common,
             differences=differences,
             optional_variants=variants,
@@ -580,7 +632,7 @@ class SourceAnalysisService:
         try:
             first_payload = self._llm_analyze(text, context)
             report = self._coerce_report(first_payload, text, context, chunk)
-            self._validate_generated_report_quality(report)
+            self._validate_generated_report_quality(report, chunk_chars=len(text))
             return report
         except Exception as first_error:
             if str(getattr(first_error, "code", "")) in {
@@ -598,7 +650,7 @@ class SourceAnalysisService:
                 },
             )
             report = self._coerce_report(repaired, text, context, chunk)
-            self._validate_generated_report_quality(report)
+            self._validate_generated_report_quality(report, chunk_chars=len(text))
             return report
 
     def _llm_analyze(
@@ -646,7 +698,13 @@ class SourceAnalysisService:
             "所有 evidence start/end 都是当前片段内的 0-based [start,end) 字符偏移，"
             "quote 必须逐字等于该范围；每个结论至少一个证据。"
             "区分可复用方法与来源绑定内容，后者 source_bound=true 且 reusable=false。"
-            "输出 4 到 8 条 findings，最多 8 条；summary 不超过 180 字，claim 不超过 120 字；"
+            "人物、世界设定、关系、成长体系、时间线和具体伏笔应提取为来源绑定事实；"
+            "若同时能归纳出不含专名和独特表达的创作方法，另写一条 reusable=true 的方法结论。"
+            "arc_summary 只概括当前片段可证实的故事弧进展，chapter_summary 只概括章节事件；"
+            "thread 表示尚未回收或正在发展的叙事线索，hook 表示推动继续阅读的局部钩子。"
+            "输出 4 到 8 条 findings，最多 8 条；只提取当前片段能由引文直接证明的类别，"
+            "严禁为了覆盖分析重点而硬凑结论。优先选择信息量高且类别不重复的结论。"
+            "summary 不超过 180 字，claim 不超过 120 字；"
             "每条 finding 只保留 1 到 2 个最强证据，每段 quote 不超过 120 字；"
             "不同结论优先使用不同证据，同一引文最多支持两条结论；证据必须直接支持 claim，"
             "不要只引用标题、称呼或与结论无关的句子；长片段应从开头、中段、后段取证，"
@@ -713,28 +771,29 @@ class SourceAnalysisService:
                 local_start = int(evidence.get("start", -1))
                 local_end = int(evidence.get("end", -1))
                 supplied = str(evidence.get("quote") or "")
+                if not supplied:
+                    continue
                 valid_range = (
                     local_start >= 0
                     and local_end > local_start
                     and local_end <= len(chunk_text)
                 )
                 quote = chunk_text[local_start:local_end] if valid_range else ""
-                if not supplied:
-                    raise SourceAnalysisError("证据摘录不能为空", code="INVALID_EVIDENCE")
                 if supplied != quote:
-                    matches: list[int] = []
+                    matches: list[tuple[int, int]] = []
                     cursor = chunk_text.find(supplied)
                     while cursor >= 0:
-                        matches.append(cursor)
+                        matches.append((cursor, cursor + len(supplied)))
                         cursor = chunk_text.find(supplied, cursor + 1)
                     if not matches:
-                        raise SourceAnalysisError(
-                            "证据摘录与偏移不一致", code="INVALID_EVIDENCE"
-                        )
+                        matches = self._equivalent_evidence_spans(chunk_text, supplied)
+                    if not matches:
+                        continue
                     preferred = max(0, local_start)
-                    local_start = min(matches, key=lambda position: abs(position - preferred))
-                    local_end = local_start + len(supplied)
-                    quote = supplied
+                    local_start, local_end = min(
+                        matches, key=lambda span: abs(span[0] - preferred)
+                    )
+                    quote = chunk_text[local_start:local_end]
                 absolute_start = chunk.start + local_start
                 absolute_end = chunk.start + local_end
                 evidence_refs.append(
@@ -752,6 +811,10 @@ class SourceAnalysisService:
                         quote=quote,
                         sha256=self._sha256(quote),
                     )
+                )
+            if not evidence_refs:
+                raise SourceAnalysisError(
+                    "finding 没有可逐字验证的证据", code="INVALID_EVIDENCE"
                 )
             category = str(raw.get("category") or "method")
             claim = str(raw.get("claim") or "").strip()
@@ -778,7 +841,20 @@ class SourceAnalysisService:
         )
 
     @staticmethod
-    def _validate_generated_report_quality(report: SourceChunkReportV2) -> None:
+    def _validate_generated_report_quality(
+        report: SourceChunkReportV2, *, chunk_chars: int
+    ) -> None:
+        if len(report.findings) > 8:
+            raise SourceAnalysisError(
+                "生成报告超过每块 8 条结论上限",
+                code="INVALID_MODEL_OUTPUT",
+            )
+        minimum = 0 if chunk_chars <= 200 else 1 if chunk_chars <= 500 else 3
+        if len(report.findings) < minimum:
+            raise SourceAnalysisError(
+                f"生成报告覆盖不足，当前片段至少需要 {minimum} 条有效结论",
+                code="INVALID_MODEL_OUTPUT",
+            )
         if len(report.findings) < 3:
             return
         primary_spans = [
@@ -976,8 +1052,69 @@ class SourceAnalysisService:
         return text.count("\n", 0, max(0, offset)) + 1
 
     @staticmethod
+    def _equivalent_evidence_spans(text: str, supplied: str) -> list[tuple[int, int]]:
+        translation = str.maketrans(
+            {
+                "“": '"',
+                "”": '"',
+                "「": '"',
+                "」": '"',
+                "『": '"',
+                "』": '"',
+                "‘": "'",
+                "’": "'",
+            }
+        )
+        normalized_text = text.translate(translation)
+        normalized_quote = supplied.translate(translation)
+        if not normalized_quote or len(normalized_quote) != len(supplied):
+            return []
+        spans: list[tuple[int, int]] = []
+        cursor = normalized_text.find(normalized_quote)
+        while cursor >= 0:
+            spans.append((cursor, cursor + len(supplied)))
+            cursor = normalized_text.find(normalized_quote, cursor + 1)
+        return spans
+
+    @staticmethod
     def _normalize_claim(claim: str) -> str:
         return re.sub(r"[\W_]+", "", claim, flags=re.UNICODE).lower()
+
+    @classmethod
+    def _semantic_claim_key(
+        cls,
+        claim: str,
+        existing: dict[str, list[tuple[str, SourceFindingV2]]],
+    ) -> str:
+        normalized = cls._normalize_claim(claim)
+        if normalized in existing:
+            return normalized
+        best_key = ""
+        best_score = 0.0
+        for key, entries in existing.items():
+            if not entries or cls._negation_signature(claim) != cls._negation_signature(
+                entries[0][1].claim
+            ):
+                continue
+            score = cls._claim_similarity(normalized, key)
+            if score > best_score:
+                best_key = key
+                best_score = score
+        return best_key if best_score >= 0.72 else normalized
+
+    @staticmethod
+    def _claim_similarity(left: str, right: str) -> float:
+        if not left or not right:
+            return 0.0
+        sequence = difflib.SequenceMatcher(None, left, right).ratio()
+        left_pairs = {left[index : index + 2] for index in range(max(1, len(left) - 1))}
+        right_pairs = {right[index : index + 2] for index in range(max(1, len(right) - 1))}
+        overlap = len(left_pairs & right_pairs) / max(1, min(len(left_pairs), len(right_pairs)))
+        return max(sequence, overlap)
+
+    @staticmethod
+    def _negation_signature(claim: str) -> bool:
+        return bool(re.search(r"(?:不|别|勿|避免|禁止|减少|弱化|省略|克制)", claim))
 
     @classmethod
     def _claim_is_safe(cls, finding: SourceFindingV2, bound_terms: list[str]) -> bool:

@@ -7,6 +7,7 @@ instructions, but never grant permissions beyond the caller's baseline.
 from .resolver import (
     RuleCompiler,
     RuntimeSkillResolver,
+    extract_explicit_skill_mentions,
     render_runtime_context,
     resolve_runtime,
 )
@@ -14,6 +15,7 @@ from .resolver import (
 __all__ = [
     "RuleCompiler",
     "RuntimeSkillResolver",
+    "extract_explicit_skill_mentions",
     "render_runtime_context",
     "resolve_runtime",
 ]

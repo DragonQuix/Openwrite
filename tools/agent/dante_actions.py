@@ -84,8 +84,15 @@ class DanteActionAdapter:
         chapter_id: str,
         *,
         guidance: str = "",
+        strict: bool = False,
+        dimensions: list[int] | None = None,
     ) -> dict[str, Any]:
-        result = self.orchestrator.review_chapter(chapter_id, guidance=guidance)
+        result = self.orchestrator.review_chapter(
+            chapter_id,
+            guidance=guidance,
+            strict=strict,
+            dimensions=dimensions,
+        )
         payload = self._wrap("delegate_chapter_review", result)
         payload.update(result if isinstance(result, dict) else {})
         return payload

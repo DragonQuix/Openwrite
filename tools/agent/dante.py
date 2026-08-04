@@ -11,9 +11,17 @@ from typing import Any
 
 from ..goethe import build_prompt_session, is_exit_command
 from ..llm import LLMClient, LLMConfig, Message
-from ..runtime_skills import RuleCompiler, render_runtime_context
+from ..outline_contract import OUTLINE_MARKDOWN_CONTRACT
+from ..runtime_skills import (
+    RuleCompiler,
+    RuntimeSkillResolver,
+    extract_explicit_skill_mentions,
+    render_runtime_context,
+)
+from ..shared_documents import CHARACTER_MARKDOWN_CONTRACT
 from .book_state import BookState, BookStateStore
-from .confirmation import guard_confirmable_executors
+from .confirmation import guard_confirmable_executors, remember_relation_previews
+from .manuscript_safety import manual_chapter_delete_guidance
 from .react import OPENWRITE_TOOLS, ReActAgent, ToolDefinition
 from .session_state import DanteSessionState, SessionStateStore, SessionTurn
 from .tool_layers import build_dante_tool_layers
@@ -28,7 +36,8 @@ DEFAULT_DANTE_SYSTEM_PROMPT = (
     "优先保持对话连续性，并让一切回修都为正文推进服务。"
     "修改人物或世界关系时，先用 search_relation_targets/get_world_relations 定位，"
     "再用 edit_world_relation 或 edit_world_relations 且 confirm=false 预览 diff；"
-    "只有用户明确确认后，才能携带预览返回的 base_revision/source_revisions "
+    "relations 必须优先使用查询返回的正式实体 ID；单条关系确认时携带 base_revision；"
+    "批量关系确认时只携带 preview_token/preview_tokens，不得重新生成 relations，"
     "并设置 confirm=true 写入。"
     "普通讨论、分析和未确认建议不得写入关系。"
     "修改已有角色、故事资料、世界设定或正文时，先 read_project_document 读取 revision，"
@@ -42,7 +51,11 @@ DEFAULT_DANTE_SYSTEM_PROMPT = (
     "再用 edit_outline_structure(confirm=false) 预览；"
     "只有用户明确确认后才用相同 revision 和 confirm=true 写入；"
     "不要用 create_outline 重写整份大纲。"
-)
+    "用户要求删除已写正文、现有章节或全部章节时，不得调用大纲编辑或文档编辑工具绕过，"
+    "也不得声称重写 src/outline.md 可以删除正文；应说明为避免 AI 误删，"
+    "必须由用户在 Studio 正文页打开最新章节并点击“删除正文”，按章节 ID 手动确认，"
+    "如需清空则从最新章依次向前删除。"
+) + "\n\n" + OUTLINE_MARKDOWN_CONTRACT + "\n\n" + CHARACTER_MARKDOWN_CONTRACT
 
 _DANTE_ACTION_TOOL_DEFINITIONS = [
     ToolDefinition(
@@ -62,7 +75,7 @@ _DANTE_ACTION_TOOL_DEFINITIONS = [
     ),
     ToolDefinition(
         name="generate_outline_draft",
-        description="基于共识摘要生成大纲草案。",
+        description="基于共识摘要并按系统提示中的大纲写入契约生成大纲草案。",
         parameters={
             "type": "object",
             "properties": {
@@ -111,6 +124,12 @@ _DANTE_ACTION_TOOL_DEFINITIONS = [
             "properties": {
                 "chapter_id": {"type": "string", "description": "章节 ID"},
                 "guidance": {"type": "string", "description": "额外审查要求"},
+                "strict": {"type": "boolean", "description": "warning 也视为不通过"},
+                "dimensions": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 1, "maximum": 37},
+                    "description": "只审查指定维度；省略时审查全部维度",
+                },
             },
             "required": ["chapter_id"],
         },
@@ -324,12 +343,16 @@ class DanteChatAgent:
             state = self._require_session_state()
             state.last_action = "chat"
             self.session_store.save(state)
-            try:
-                response_text = self._run_react_agent(react_agent, user_input)
-            except Exception:
-                state.last_action = "react_error"
-                self.session_store.save(state)
-                raise
+            response_text = manual_chapter_delete_guidance(user_input)
+            if response_text:
+                state.last_action = "manual_chapter_delete_guidance"
+            else:
+                try:
+                    response_text = self._run_react_agent(react_agent, user_input)
+                except Exception:
+                    state.last_action = "react_error"
+                    self.session_store.save(state)
+                    raise
             if response_text:
                 self._append_assistant_turn(response_text)
                 print(f"\n🤖 Dante: {response_text}")
@@ -343,16 +366,22 @@ class DanteChatAgent:
             raise ValueError("消息不能为空")
         if self.session_state is None or self.book_state is None:
             self.startup()
+        self._active_user_instruction = text
         self._append_user_turn(text)
         state = self._require_session_state()
         state.last_action = "chat"
         self.session_store.save(state)
-        try:
-            response_text = self._run_react_agent(self._get_react_agent(), text)
-        except Exception:
-            state.last_action = "react_error"
-            self.session_store.save(state)
-            raise
+        response_text = manual_chapter_delete_guidance(text)
+        if response_text:
+            state.last_action = "manual_chapter_delete_guidance"
+            self._active_user_instruction = ""
+        else:
+            try:
+                response_text = self._run_react_agent(self._get_react_agent(), text)
+            except Exception:
+                state.last_action = "react_error"
+                self.session_store.save(state)
+                raise
         if response_text:
             self._append_assistant_turn(response_text)
         self.session_store.save(self._require_session_state())
@@ -385,30 +414,35 @@ class DanteChatAgent:
     def _ensure_react_agent_surface(self, react_agent: Any) -> None:
         if react_agent is None:
             return
-        allowed_tools, _ = self._runtime_surface()
+        allowed_tools, runtime_prompt = self._runtime_surface()
         combined_tools = _build_dante_tool_definitions(allowed_tools)
         canonical_tools = {tool.name: tool for tool in combined_tools}
         if hasattr(react_agent, "tools"):
-            existing_tools = list(getattr(react_agent, "tools", []) or [])
-            merged_tools = []
-            seen: set[str] = set()
-            for tool in existing_tools:
-                tool_name = getattr(tool, "name", "")
-                if not tool_name:
-                    merged_tools.append(tool)
-                    continue
-                canonical_tool = canonical_tools.get(tool_name)
-                if canonical_tool is not None:
-                    merged_tools.append(canonical_tool)
-                    seen.add(tool_name)
-                else:
-                    merged_tools.append(tool)
-            for tool_name, canonical_tool in canonical_tools.items():
-                if tool_name not in seen and all(
-                    getattr(tool, "name", "") != tool_name for tool in merged_tools
-                ):
-                    merged_tools.append(canonical_tool)
-            react_agent.tools = merged_tools
+            if self._react_agent_factory is not None:
+                react_agent.tools = combined_tools
+            else:
+                existing_tools = list(getattr(react_agent, "tools", []) or [])
+                merged_tools = []
+                seen: set[str] = set()
+                for tool in existing_tools:
+                    tool_name = getattr(tool, "name", "")
+                    if not tool_name:
+                        merged_tools.append(tool)
+                        continue
+                    canonical_tool = canonical_tools.get(tool_name)
+                    if canonical_tool is not None:
+                        merged_tools.append(canonical_tool)
+                        seen.add(tool_name)
+                    else:
+                        merged_tools.append(tool)
+                for tool_name, canonical_tool in canonical_tools.items():
+                    if tool_name not in seen and all(
+                        getattr(tool, "name", "") != tool_name for tool in merged_tools
+                    ):
+                        merged_tools.append(canonical_tool)
+                react_agent.tools = merged_tools
+        if self._react_agent_factory is not None and hasattr(react_agent, "system_prompt"):
+            react_agent.system_prompt = f"{DEFAULT_DANTE_SYSTEM_PROMPT}\n\n{runtime_prompt}"
         if self._combined_tool_executors() and hasattr(react_agent, "_register_tool_executors"):
             react_agent._register_tool_executors(self._combined_tool_executors())
         if hasattr(react_agent, "activity_callback"):
@@ -417,6 +451,7 @@ class DanteChatAgent:
     def _run_react_agent(self, react_agent: Any, instruction: str) -> str:
         self._active_user_instruction = instruction
         try:
+            self._ensure_react_agent_surface(react_agent)
             result = react_agent.run(
                 instruction,
                 context_messages=self._build_context_messages(include_recent_turns=False),
@@ -504,6 +539,18 @@ class DanteChatAgent:
                 combined.update(actions)
         combined.update(self.tool_executors)
         combined.update(self.action_executors)
+        combined = remember_relation_previews(
+            combined,
+            working_memory=lambda: (
+                self.session_state.working_memory if self.session_state is not None else {}
+            ),
+            persist=lambda: (
+                self.session_store.save(self.session_state)
+                if self.session_state is not None
+                else None
+            ),
+            instruction=lambda: self._active_user_instruction,
+        )
         return guard_confirmable_executors(
             combined,
             instruction=lambda: self._active_user_instruction,
@@ -517,6 +564,25 @@ class DanteChatAgent:
     def _runtime_surface(self) -> tuple[set[str], str]:
         layers = self._load_tool_layers()
         resolution = layers.get("runtime_resolution")
+        resolver = RuntimeSkillResolver(self.project_root)
+        available = set(resolver.discover()[0])
+        explicit = tuple(
+            skill_id
+            for skill_id in extract_explicit_skill_mentions(
+                self._active_user_instruction
+            )
+            if skill_id in available
+        )
+        if explicit:
+            baseline = set(DANTE_DIRECT_TOOLKIT) | {
+                item.name for item in _DANTE_ACTION_TOOL_DEFINITIONS
+            }
+            resolution = resolver.resolve(
+                agent="dante",
+                task="chapter.write",
+                base_tools=baseline,
+                explicit_skills=explicit,
+            )
         if resolution is None:
             return (
                 set(DANTE_DIRECT_TOOLKIT)

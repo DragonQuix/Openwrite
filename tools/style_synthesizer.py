@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,17 @@ from .llm.client import LLMClient, LLMConfig, Message
 from .shared_documents import render_indexed_document
 from .toml_compat import tomllib
 
+REQUIRED_STYLE_HEADINGS = (
+    "合成摘要",
+    "优先风格信号",
+    "叙述声音",
+    "对话规则",
+    "节奏规则",
+    "作品约束",
+    "通用技法",
+    "禁止",
+)
+
 
 def build_style_manifest(project_root: Path, novel_id: str, style_id: str) -> dict[str, Any]:
     """收集当前作品的风格来源，并写出 ``manifest.toml``。"""
@@ -32,13 +44,17 @@ def build_style_manifest(project_root: Path, novel_id: str, style_id: str) -> di
     style_dir = root / "data" / "novels" / novel_id / "data" / "style"
     style_dir.mkdir(parents=True, exist_ok=True)
 
+    recipe = _collect_style_recipe(root, novel_id)
     manifest = {
         "novel_id": novel_id,
         "style_id": style_id,
         "created_at": datetime.now().isoformat(),
         "synthesis_strategy": "two_stage",
+        "recipe_revision": recipe["revision"],
+        "primary_signals": _dedupe_preserve(recipe["primary_signals"]),
         "reusable_signals": _dedupe_preserve(
-            _collect_summary_reusable(root, novel_id, style_id)
+            recipe["reusable_signals"]
+            + _collect_summary_reusable(root, novel_id, style_id)
             + _collect_candidate_signals(root, novel_id, style_id, "voice.md")
             + _collect_candidate_signals(root, novel_id, style_id, "language.md")
             + _collect_candidate_signals(root, novel_id, style_id, "rhythm.md")
@@ -49,29 +65,35 @@ def build_style_manifest(project_root: Path, novel_id: str, style_id: str) -> di
             + _collect_consistency_source_bound(root, novel_id, style_id)
         ),
         "negative_rules": _dedupe_preserve(
-            _collect_banned_phrases(root)
+            recipe["negative_rules"]
+            + _collect_banned_phrases(root)
             + _collect_consistency_forbidden(root, novel_id, style_id)
         ),
         "narration_rules": _dedupe_preserve(
-            _collect_fingerprint_rules(root, novel_id)
+            recipe["narration_rules"]
+            + _collect_fingerprint_rules(root, novel_id)
             + _collect_candidate_signals(root, novel_id, style_id, "voice.md")
         ),
         "dialogue_rules": _dedupe_preserve(
-            _collect_candidate_signals(root, novel_id, style_id, "dialogue.md")
+            recipe["dialogue_rules"]
+            + _collect_candidate_signals(root, novel_id, style_id, "dialogue.md")
             + _collect_craft_headings(root, "dialogue_craft.md")
         ),
         "rhythm_rules": _dedupe_preserve(
-            _collect_candidate_signals(root, novel_id, style_id, "rhythm.md")
+            recipe["rhythm_rules"]
+            + _collect_candidate_signals(root, novel_id, style_id, "rhythm.md")
             + _collect_craft_headings(root, "rhythm_craft.md")
         ),
         "craft_rules": _dedupe_preserve(
-            _collect_craft_headings(root, "dialogue_craft.md")
+            recipe["craft_rules"]
+            + _collect_craft_headings(root, "dialogue_craft.md")
             + _collect_craft_headings(root, "scene_craft.md")
             + _collect_craft_headings(root, "rhythm_craft.md")
         ),
         "work_constraints": _dedupe_preserve(_collect_work_constraints(root, novel_id)),
         "priority_order": [
             "work_constraints",
+            "primary_signals",
             "narration_rules",
             "dialogue_rules",
             "rhythm_rules",
@@ -91,6 +113,7 @@ def synthesize_style_document(
     style_id: str,
     *,
     llm_client: Any | None = None,
+    allow_llm: bool = True,
 ) -> dict[str, Any]:
     """执行二阶段风格合成，并写出 ``composed.md``。"""
     root = Path(project_root).resolve()
@@ -101,16 +124,17 @@ def synthesize_style_document(
     manifest = build_style_manifest(root, novel_id, style_id)
 
     mode = "fallback"
-    if llm_client is None:
+    if allow_llm and llm_client is None:
         llm_client = _build_optional_llm_client()
 
-    if llm_client is not None:
+    if allow_llm and llm_client is not None:
         try:
             llm_text = _synthesize_with_llm(llm_client, manifest)
             sanitized = _remove_source_bound_signals(
                 llm_text,
                 manifest.get("source_bound_signals", []),
             )
+            _validate_synthesized_headings(sanitized)
             content = _normalize_synthesized_document(
                 sanitized,
                 novel_id=novel_id,
@@ -143,6 +167,17 @@ def synthesize_style_document(
     }
 
 
+def _validate_synthesized_headings(text: str) -> None:
+    headings = {
+        line[3:].strip()
+        for line in str(text or "").splitlines()
+        if line.startswith("## ")
+    }
+    missing = [heading for heading in REQUIRED_STYLE_HEADINGS if heading not in headings]
+    if missing:
+        raise ValueError("风格合成结果缺少二级标题: " + "、".join(missing))
+
+
 def render_style_manifest_summary(manifest: dict[str, Any] | str, *, max_items: int = 6) -> str:
     """把 manifest 渲染成给 writer/reviewer 使用的安全摘要。
 
@@ -157,6 +192,7 @@ def render_style_manifest_summary(manifest: dict[str, Any] | str, *, max_items: 
         manifest_data = dict(manifest or {})
 
     sections = [
+        ("主风格信号", manifest_data.get("primary_signals", [])),
         ("可复用信号", manifest_data.get("reusable_signals", [])),
         ("叙述规则", manifest_data.get("narration_rules", [])),
         ("对话规则", manifest_data.get("dialogue_rules", [])),
@@ -220,7 +256,10 @@ def _build_fallback_style_document(
     style_id: str,
     note: str,
 ) -> str:
-    reusable = list(manifest.get("reusable_signals", []))[:8]
+    priority_signals = _dedupe_preserve(
+        list(manifest.get("primary_signals", []))
+        + list(manifest.get("reusable_signals", []))
+    )[:8]
     narration = list(manifest.get("narration_rules", []))[:8]
     dialogue = list(manifest.get("dialogue_rules", []))[:8]
     rhythm = list(manifest.get("rhythm_rules", []))[:8]
@@ -240,7 +279,7 @@ def _build_fallback_style_document(
         "",
         "## 优先风格信号",
         "",
-        _render_bullets(reusable, "（待补充）"),
+        _render_bullets(priority_signals, "（待补充）"),
         "",
         "## 叙述声音",
         "",
@@ -353,6 +392,8 @@ def _collect_fingerprint_rules(project_root: Path, novel_id: str) -> list[str]:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except Exception:
         return []
+    if isinstance(data, dict) and data.get("writer_injection") is False:
+        return []
 
     results = []
     voice = str(data.get("voice", "")).strip()
@@ -365,6 +406,68 @@ def _collect_fingerprint_rules(project_root: Path, novel_id: str) -> list[str]:
     if rhythm:
         results.append(rhythm)
     return results
+
+
+def _collect_style_recipe(project_root: Path, novel_id: str) -> dict[str, Any]:
+    path = (
+        Path(project_root)
+        / "data"
+        / "novels"
+        / novel_id
+        / "data"
+        / "style"
+        / "recipe.yaml"
+    )
+    empty = {
+        "revision": "",
+        "primary_signals": [],
+        "reusable_signals": [],
+        "negative_rules": [],
+        "narration_rules": [],
+        "dialogue_rules": [],
+        "rhythm_rules": [],
+        "craft_rules": [],
+    }
+    if not path.is_file():
+        return empty
+    try:
+        text = path.read_text(encoding="utf-8")
+        data = yaml.safe_load(text) or {}
+    except (OSError, yaml.YAMLError):
+        return empty
+    selections = data.get("selections") if isinstance(data, dict) else []
+    if not isinstance(selections, list):
+        return empty
+    result = {**empty, "revision": hashlib.sha256(text.encode("utf-8")).hexdigest()}
+    ordered = sorted(
+        (item for item in selections if isinstance(item, dict)),
+        key=lambda item: 0 if item.get("role") == "primary" else 1,
+    )
+    for item in ordered:
+        if str(item.get("scope") or "project") != "project":
+            continue
+        role = str(item.get("role") or "auxiliary")
+        if role == "validation_only":
+            continue
+        claim = str(item.get("claim") or "").strip()
+        if not claim:
+            continue
+        if role == "primary":
+            result["primary_signals"].append(claim)
+        dimension = str(item.get("dimension") or "craft")
+        if role == "avoid" or dimension == "avoid":
+            result["negative_rules"].append(claim)
+        elif dimension == "narration":
+            result["narration_rules"].append(claim)
+        elif dimension == "dialogue":
+            result["dialogue_rules"].append(claim)
+        elif dimension == "rhythm":
+            result["rhythm_rules"].append(claim)
+        elif dimension in {"language", "emotion"}:
+            result["reusable_signals"].append(claim)
+        else:
+            result["craft_rules"].append(claim)
+    return result
 
 
 def _collect_craft_headings(project_root: Path, filename: str) -> list[str]:

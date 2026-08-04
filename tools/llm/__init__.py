@@ -7,15 +7,16 @@
 - 人性化错误处理
 """
 
-from .client import LLMClient, LLMConfig, LLMResponse, ToolCallResponse, Message
+from .client import LLMClient, LLMConfig, LLMResponse, Message, ToolCallResponse
+from .context import ContextBudgetPlan, ContextBudgetPolicy
 from .errors import (
-    LLMWrappedError,
     APIError,
     AuthenticationError,
-    RateLimitError,
     InvalidRequestError,
-    NetworkError,
     LLMTimeoutError,
+    LLMWrappedError,
+    NetworkError,
+    RateLimitError,
 )
 
 __all__ = [
@@ -24,6 +25,8 @@ __all__ = [
     "LLMResponse",
     "ToolCallResponse",
     "Message",
+    "ContextBudgetPlan",
+    "ContextBudgetPolicy",
     "LLMWrappedError",
     "APIError",
     "AuthenticationError",

@@ -42,12 +42,19 @@ export const state = {
   revisionHunkSelection: new Set(),
   reviewChapterPath: "",
   tasks: [],
-  research: { status: null, selectedReportId: "" },
+  research: { status: null, selectedReportId: "", searchProviderInitialized: false },
   sourceAnalysis: {
     selectedSourceIds: new Set(),
     profile: null,
     promotionPreview: null,
     activeSourceId: "",
+  },
+  referenceLibrary: {
+    selectedSourceIds: new Set(),
+    activeSourceId: "",
+    pendingStructure: null,
+    profile: null,
+    adoptionPreview: null,
   },
   library: {
     query: "",
@@ -94,37 +101,21 @@ export const readinessLabels = {
 };
 
 export const modelPresets = {
-  "deepseek-pro": {
-    provider: "openai",
-    base_url: "https://api.deepseek.com",
-    model: "deepseek-v4-pro",
-    api_format: "chat",
-    context_tokens: 160000,
-    max_tokens: 24000,
-  },
-  "deepseek-flash": {
-    provider: "openai",
-    base_url: "https://api.deepseek.com",
-    model: "deepseek-v4-flash",
-    api_format: "chat",
-    context_tokens: 160000,
-    max_tokens: 24000,
-  },
   openai: {
     provider: "openai",
     base_url: "https://api.openai.com/v1",
-    model: "gpt-4o-mini",
+    model: "gpt-5.6-sol",
     api_format: "chat",
-    context_tokens: 64000,
-    max_tokens: 24000,
+    context_tokens: 1050000,
+    max_tokens: 128000,
   },
   anthropic: {
     provider: "anthropic",
     base_url: "https://api.anthropic.com",
-    model: "claude-sonnet-4-5",
+    model: "claude-sonnet-5",
     api_format: "chat",
-    context_tokens: 64000,
-    max_tokens: 24000,
+    context_tokens: 1000000,
+    max_tokens: 128000,
   },
   custom: {
     provider: "custom",

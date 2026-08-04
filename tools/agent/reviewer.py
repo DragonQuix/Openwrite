@@ -12,13 +12,13 @@
 
 from __future__ import annotations
 
-import re
+import json
 import logging
+import re
 from dataclasses import dataclass, field
-from typing import Optional
 
-from .base import BaseAgent, AgentContext
-from ..llm import Message, LLMResponse
+from ..llm import Message
+from .base import BaseAgent
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,8 @@ class ReviewIssue:
     category: str
     description: str
     suggestion: str
-    dimension: Optional[int] = None  # 维度编号
+    dimension: int | None = None  # 维度编号
+    evidence: str = ""
 
 
 @dataclass
@@ -109,7 +110,8 @@ class ReviewerAgent(BaseAgent):
         self,
         content: str,
         context: dict,
-        dimensions: Optional[list[int]] = None,
+        dimensions: list[int] | None = None,
+        strict: bool = False,
     ) -> ReviewResult:
         """审核章节内容
 
@@ -142,11 +144,19 @@ class ReviewerAgent(BaseAgent):
         sensitive_issues = self._check_sensitive_words(content)
         all_issues.extend(sensitive_issues)
 
+        if dimensions is not None:
+            selected = {
+                int(item)
+                for item in dimensions
+                if isinstance(item, int) and item in self.DIMENSION_MAP
+            }
+            all_issues = [issue for issue in all_issues if issue.dimension in selected]
+
         # 计算总分
         critical_count = sum(1 for i in all_issues if i.severity == "critical")
         warning_count = sum(1 for i in all_issues if i.severity == "warning")
 
-        passed = critical_count == 0
+        passed = critical_count == 0 and (not strict or warning_count == 0)
         score = max(0, 100 - critical_count * 20 - warning_count * 5)
 
         return ReviewResult(
@@ -327,75 +337,85 @@ class ReviewerAgent(BaseAgent):
         self,
         content: str,
         context: dict,
-        dimensions: Optional[list[int]] = None,
+        dimensions: list[int] | None = None,
     ) -> list[ReviewIssue]:
         """LLM 驱动的深度审计"""
-        issues = []
+        requested = [
+            item
+            for item in (dimensions or self.DIMENSION_MAP.keys())
+            if isinstance(item, int) and item in self.DIMENSION_MAP
+        ]
+        dimension_contract = "\n".join(
+            f"{number}. {self.DIMENSION_MAP[number]}" for number in requested
+        )
 
-        system_prompt = """你是一位专业的小说编辑，负责审核章节内容的质量。
+        system_prompt = f"""你是一位专业的小说编辑，负责审核章节内容的质量。
 
-核心审核维度：
-1. OOC检查 - 角色行为是否符合性格设定
-2. 时间线检查 - 事件顺序是否合理
-3. 设定冲突 - 是否与世界观设定矛盾
-4. 战力崩坏 - 角色能力是否忽强忽弱
-5. 伏笔检查 - 伏笔是否合理埋设/回收
-6. 节奏检查 - 节奏是否拖沓或过快
-7. 文风检查 - 文风是否一致
-8. 视角一致性 - 是否保持叙事视角统一
-9. 配角降智 - 配角是否被强行降智
-10. 台词失真 - 对话是否不符合角色性格
-11. 大纲偏离 - 是否完成本章目标与戏剧位置
-12. 作者意图 - 是否违背整本书的长期承诺
-13. 创作罗盘 - 是否违反当前阶段必须保留/必须避免项
-14. 关系连续性 - 人物关系变化是否有铺垫
-15. AI痕迹 - 是否存在过度总结、均匀段落或公式化转折
+只审核以下维度，不要返回范围之外的问题：
+{dimension_contract}
+
+严重度定义：
+- critical：明确的事实矛盾、连续性破坏、敏感内容或导致本章不可用的问题。
+- warning：有正文证据的实质质量问题，需要修改才能达到交付标准。
+- info：不影响正确性的可选优化建议。
 
 输出格式：
 ```json
 [
-  {
+  {{
+    "dimension": 1,
     "severity": "warning",
     "category": "维度名称",
     "description": "问题描述",
-    "suggestion": "修改建议"
-  }
+    "suggestion": "修改建议",
+    "evidence": "正文中的短引用或明确位置；无法引用时为空字符串"
+  }}
 ]
 ```
 
-如果没有问题，返回空数组 []。"""
+每个对象必须包含全部六个字段；severity 只能是 critical/warning/info；dimension 必须来自上述列表。
+如果没有问题，返回空数组 []。只输出 JSON 数组。"""
 
         user_prompt = f"""请审核以下章节：
 
 章节内容：
-{content[:4000]}
+{content}
 
 作者意图：
-{context.get("author_intent", "无")[:1200]}
+{context.get("author_intent", "无")}
 
 当前创作罗盘：
-{context.get("creative_focus", "无")[:1200]}
+{context.get("creative_focus", "无")}
 
 本章大纲与目标：
-{context.get("outline", "无")[:2500]}
+{context.get("outline", "无")}
 
 目标字数：
 {context.get("target_words", "未指定")}
 
 角色设定：
-{context.get("character_profiles", "无")[:2500]}
+{context.get("character_profiles", "无")}
 
 当前世界状态：
-{context.get("current_state", "无")[:500]}
+{context.get("current_state", "无")}
 
 当前人物关系：
-{context.get("relationships", "无")[:800]}
+{context.get("relationships", "无")}
+
+当前资源账本：
+{context.get("ledger", "无")}
+
+本章相关伏笔：
+{context.get("foreshadowing_summary", "无")}
+
+章内情感弧线：
+{context.get("emotion_arc", "无")}
 
 风格约束：
-{context.get("style_profile", "无")[:1000]}
+{context.get("style_profile", "无")}
 
 上一章衔接：
-{context.get("recent_chapters", "无")[:1000]}
+{context.get("recent_chapters", "无")}
 
 请进行审核："""
 
@@ -408,26 +428,72 @@ class ReviewerAgent(BaseAgent):
             max_tokens=4096,
         )
 
-        # 解析 JSON 输出
+        return self._parse_llm_issues(response.content, allowed_dimensions=set(requested))
+
+    @staticmethod
+    def _parse_llm_issues(
+        content: str,
+        *,
+        allowed_dimensions: set[int],
+    ) -> list[ReviewIssue]:
+        from ..llm.response import ProviderResponseError
+
+        match = re.search(r"\[.*\]", str(content or ""), re.DOTALL)
+        if match is None:
+            raise ProviderResponseError(
+                "MALFORMED_STRUCTURED_OUTPUT",
+                "审稿模型没有返回 JSON 数组",
+            )
         try:
-            json_match = re.search(r"\[.*\]", response.content, re.DOTALL)
-            if json_match:
-                import json
+            items = json.loads(match.group(0))
+        except json.JSONDecodeError as exc:
+            raise ProviderResponseError(
+                "MALFORMED_STRUCTURED_OUTPUT",
+                "审稿模型返回的 JSON 无法解析",
+            ) from exc
+        if not isinstance(items, list):
+            raise ProviderResponseError(
+                "MALFORMED_STRUCTURED_OUTPUT",
+                "审稿结果必须是 JSON 数组",
+            )
 
-                items = json.loads(json_match.group(0))
-                for item in items:
-                    issues.append(
-                        ReviewIssue(
-                            severity=item.get("severity", "warning"),
-                            category=item.get("category", "未知"),
-                            description=item.get("description", ""),
-                            suggestion=item.get("suggestion", ""),
-                            dimension=None,
-                        )
-                    )
-        except Exception as e:
-            logger.warning(f"Failed to parse LLM audit response: {e}")
-
+        issues: list[ReviewIssue] = []
+        required = {
+            "dimension",
+            "severity",
+            "category",
+            "description",
+            "suggestion",
+            "evidence",
+        }
+        for index, item in enumerate(items, start=1):
+            if not isinstance(item, dict) or not required.issubset(item):
+                raise ProviderResponseError(
+                    "MALFORMED_STRUCTURED_OUTPUT",
+                    f"第 {index} 个审稿问题缺少必需字段",
+                )
+            severity = str(item["severity"]).strip().lower()
+            dimension = item["dimension"]
+            if severity not in {"critical", "warning", "info"}:
+                raise ProviderResponseError(
+                    "MALFORMED_STRUCTURED_OUTPUT",
+                    f"第 {index} 个审稿问题 severity 无效",
+                )
+            if not isinstance(dimension, int) or dimension not in allowed_dimensions:
+                raise ProviderResponseError(
+                    "MALFORMED_STRUCTURED_OUTPUT",
+                    f"第 {index} 个审稿问题 dimension 不在请求范围内",
+                )
+            issues.append(
+                ReviewIssue(
+                    severity=severity,
+                    category=str(item["category"]).strip(),
+                    description=str(item["description"]).strip(),
+                    suggestion=str(item["suggestion"]).strip(),
+                    dimension=dimension,
+                    evidence=str(item["evidence"]).strip(),
+                )
+            )
         return issues
 
     def _check_sensitive_words(self, content: str) -> list[ReviewIssue]:

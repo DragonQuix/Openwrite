@@ -1,5 +1,4 @@
 import sys
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,9 +11,12 @@ from tools.agent.book_state import BookStage, BookStateStore
 from tools.agent.dante_actions import DanteActionAdapter
 from tools.agent.orchestrator import OpenWriteOrchestrator
 from tools.agent.toolkits import WRITING_TOOLKIT
+from tools.chapter_pipeline import build_writer_payload
+from tools.context_builder import ContextBuilder
 from tools.frontmatter import parse_toml_front_matter
 from tools.init_project import init_project
 from tools.story_planning import StoryPlanningStore
+from tools.truth_manager import TruthFilesManager
 from tools.workflow_scheduler import WorkflowScheduler
 
 
@@ -301,7 +303,16 @@ def test_summary_confirmation_and_outline_request_are_handled_in_one_message(
     monkeypatch.setattr(
         orchestrator,
         "_generate_outline_draft",
-        lambda text: "# 四卷大纲\n\n## 第一卷\n\n从雪藏危机重新出发。\n",
+        lambda text: (
+            "# 四卷大纲\n\n## 第一卷\n> 篇弧线: 低谷 -> 复出\n\n"
+            "### 第一节\n> 节结构: 起(ch_001) -> 合(ch_001)\n\n"
+            "#### 第一章：重新出发\n"
+            "> 戏剧位置: 起\n> 内容焦点: 主角决定重新争取舞台。\n"
+            "> 本章目标: 建立雪藏危机\n> 预估字数: 3000\n"
+            "> 出场角色: 主角\n> 涉及设定: 经纪公司\n"
+            "> 情感弧线: 低落 -> 决意\n> 节拍: 收到解约通知, 作出选择\n"
+            "> 悬念: 新机会来自谁\n\n主角从雪藏危机重新出发。\n"
+        ),
     )
 
     result = orchestrator.handle_user_message("确认汇总了，生成大纲草案吧")
@@ -943,7 +954,19 @@ def test_outline_generation_request_writes_draft_and_requests_confirmation(
     state = state_store.load_or_create()
     state.stage = BookStage.FOUNDATION
     state_store.save(state)
-    monkeypatch.setattr(orchestrator, "_generate_outline_draft", lambda text: "# 新大纲")
+    complete_outline = (
+        "# 新大纲\n\n## 第一篇\n> 篇弧线: 铺垫 -> 转折\n\n"
+        "### 第一节\n> 节结构: 起(ch_001) -> 合(ch_001)\n\n"
+        "#### 第一章：异常来电\n"
+        "> 戏剧位置: 起\n> 内容焦点: 主角收到异常来电。\n"
+        "> 本章目标: 建立核心冲突\n> 预估字数: 3000\n"
+        "> 出场角色: 主角\n> 涉及设定: 异常节点\n"
+        "> 情感弧线: 平静 -> 戒备\n> 节拍: 日常切入, 异常来电\n"
+        "> 悬念: 来电者身份\n\n主角首次接触异常。"
+    )
+    monkeypatch.setattr(
+        orchestrator, "_generate_outline_draft", lambda text: complete_outline
+    )
 
     result = orchestrator.handle_user_message("帮我生成一份都市异能题材四级大纲")
 
@@ -953,7 +976,7 @@ def test_outline_generation_request_writes_draft_and_requests_confirmation(
     assert result.stage == BookStage.ROLLING_OUTLINE
     assert state.stage == BookStage.ROLLING_OUTLINE
     assert state.pending_confirmation == "outline_scope"
-    assert planning_store.outline_draft_path.read_text(encoding="utf-8") == "# 新大纲"
+    assert planning_store.outline_draft_path.read_text(encoding="utf-8") == complete_outline
     assert planning_store.outline_src_path.exists() is False
 
 
@@ -1016,8 +1039,8 @@ def test_negated_foundation_confirmation_does_not_promote_foundation(tmp_path: P
     assert result.next_action == "ignore"
     assert state.stage == BookStage.DISCOVERY
     assert state.current_chapter == ""
-    assert (planning_store.story_src_dir / "background.md").read_text(encoding="utf-8")
-    assert (planning_store.story_src_dir / "foundation.md").read_text(encoding="utf-8")
+    assert not (planning_store.story_src_dir / "background.md").exists()
+    assert not (planning_store.story_src_dir / "foundation.md").exists()
 
 
 def test_writing_request_after_outline_confirmation_records_current_chapter(
@@ -1199,9 +1222,44 @@ def test_build_chapter_packet_persists_context_snapshot(tmp_path: Path):
         **packet["continuity_documents"],
     }
     assert packet["style_documents"]
+    assert isinstance(packet["character_documents"], dict)
+    assert "角色1" not in packet["character_documents"]
     assert packet["prompt_sections"]
     assert snapshot_path.exists()
     assert yaml.safe_load(snapshot_path.read_text(encoding="utf-8"))["chapter_id"] == "ch_001"
+
+    context = ContextBuilder(root, "demo").build_generation_context("ch_001")
+    writer_payload = build_writer_payload(
+        context=context,
+        truth=TruthFilesManager(root, "demo").load_truth_files(),
+        packet=packet,
+        guidance="",
+        target_words=0,
+    )
+    assert "角色1" not in {
+        character["name"] for character in writer_payload["active_characters"]
+    }
+
+
+def test_orchestrator_character_documents_keep_canonical_name_and_full_context(
+    tmp_path: Path,
+):
+    from models.character import CharacterProfile
+
+    orchestrator = OpenWriteOrchestrator.for_testing(tmp_path, "demo")
+    profile = CharacterProfile(
+        character_id="shen_jin",
+        name="沈烬",
+        backstory="旧事" * 500,
+    )
+
+    documents = orchestrator._build_character_documents(
+        SimpleNamespace(active_characters=[profile])
+    )
+
+    assert list(documents) == ["沈烬"]
+    assert len(documents["沈烬"]) > 800
+    assert documents["沈烬"].endswith("旧事")
 
 
 def test_delegate_writing_runs_review_when_executor_available(

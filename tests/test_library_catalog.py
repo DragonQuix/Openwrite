@@ -49,6 +49,25 @@ def test_library_catalog_classifies_structured_assets_and_subcategories():
     assert progression.asset_kind == "progression"
 
 
+def test_library_catalog_keeps_nested_assets_structured_but_indexes_as_raw_documents():
+    nested = describe_document(
+        "src/world/entities/antagonists/chaos_beast.md",
+        '+++\nid = "chaos_beast"\nname = "乱律者"\nkind = "concept"\n+++\n',
+    )
+    index = describe_document(
+        "src/world/entities/_index.md",
+        "# 世界观实体总索引\n\n这里汇总各设定入口。\n",
+    )
+
+    assert nested.structured is True
+    assert nested.asset_kind == "world"
+    assert nested.asset_id == "chaos_beast"
+    assert index.scope == "settings"
+    assert index.structured is False
+    assert index.asset_kind == ""
+    assert index.asset_id == ""
+
+
 def test_query_library_filters_by_scope_category_and_text(tmp_path: Path):
     root = tmp_path / "novel"
     character = root / "src" / "characters" / "lin_cen.md"

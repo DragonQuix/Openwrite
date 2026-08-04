@@ -2,6 +2,7 @@
 pydantic>=2.0,<3.0
 pyyaml>=6.0
 lightrag-hku>=1.5.5,<2.0
+fastembed>=0.7.0,<1.0
 tomli>=2.0; python_version < "3.11"
 
 # 开发依赖 (可选)

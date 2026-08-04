@@ -96,6 +96,12 @@ def build_dante_tool_layers(project_root: Path) -> dict[str, object]:
             adapter.delegate_chapter_review(
                 _read_text_arg(args, "chapter_id", "chapter"),
                 guidance=_read_text_arg(args, "guidance", "text"),
+                strict=bool(args.get("strict", False)),
+                dimensions=(
+                    args.get("dimensions")
+                    if isinstance(args.get("dimensions"), list)
+                    else None
+                ),
             )
             if _read_text_arg(args, "chapter_id", "chapter")
             else _missing_required("delegate_chapter_review", "chapter_id")
@@ -167,12 +173,20 @@ def build_goethe_tool_layers(
             if _read_text_arg(args, "request_text", "text", "brief")
             else _missing_required("generate_foundation_draft", "request_text")
         ),
+        "confirm_foundation": lambda args: adapter.confirm_foundation(),
         "generate_character_draft": lambda args: (
             adapter.generate_character_draft(
                 _read_text_arg(args, "request_text", "text", "brief")
             )
             if _read_text_arg(args, "request_text", "text", "brief")
             else _missing_required("generate_character_draft", "request_text")
+        ),
+        "confirm_character_draft": lambda args: (
+            adapter.confirm_character_draft(
+                _read_text_arg(args, "character_id", "id")
+            )
+            if _read_text_arg(args, "character_id", "id")
+            else _missing_required("confirm_character_draft", "character_id")
         ),
         "generate_outline_draft": lambda args: (
             adapter.generate_outline_draft(
@@ -214,6 +228,25 @@ def build_goethe_tool_layers(
             )
             if _read_text_arg(args, "source_id", "source_name")
             else _missing_required("promote_source_pack", "source_id")
+        ),
+        "list_reference_library": lambda args: adapter.list_reference_library(),
+        "review_reference_source": lambda args: (
+            adapter.review_reference_source(_read_text_arg(args, "source_id"))
+            if _read_text_arg(args, "source_id")
+            else _missing_required("review_reference_source", "source_id")
+        ),
+        "review_reference_profile": lambda args: (
+            adapter.review_reference_profile(_read_text_arg(args, "profile_id"))
+            if _read_text_arg(args, "profile_id")
+            else _missing_required("review_reference_profile", "profile_id")
+        ),
+        "preview_reference_adoption": lambda args: adapter.preview_reference_adoption(
+            _read_text_arg(args, "profile_id"),
+            args.get("selections") if isinstance(args.get("selections"), list) else [],
+        ),
+        "apply_reference_adoption": lambda args: adapter.apply_reference_adoption(
+            _read_text_arg(args, "preview_id"),
+            confirm=bool(args.get("confirm")),
         ),
         "prepare_dante_handoff": lambda args: adapter.prepare_dante_handoff(),
     }

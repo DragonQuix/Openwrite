@@ -207,9 +207,16 @@ def test_orchestrator_public_actions_drive_planning_flow(tmp_path: Path, monkeyp
                 "### 第一节\n\n"
                 "> 节结构: 起承\n\n"
                 "#### 第一章\n\n"
+                "> 戏剧位置: 起\n"
                 "> 内容焦点: 发现异常\n"
+                "> 本章目标: 建立公司地下的异常冲突\n"
+                "> 预估字数: 3000\n"
                 "> 出场角色: char_001\n"
                 "> 涉及设定: 测试场景\n"
+                "> 情感弧线: 平静 -> 戒备\n"
+                "> 节拍: 正常上班, 发现节点, 决定调查\n"
+                "> 悬念: 节点为何出现在公司\n\n"
+                "主角第一次确认公司地下存在异常。\n"
             )
         raise AssertionError(f"unexpected system prompt: {system_prompt}")
 

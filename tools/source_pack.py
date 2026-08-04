@@ -489,10 +489,10 @@ class SourcePackService:
         config_path = self.project_root / "novel_config.yaml"
         config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
         config["style_id"] = source_id
+        synthesize_style_document(self.project_root, self.novel_id, source_id)
         config_path.write_text(
             yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8"
         )
-        synthesize_style_document(self.project_root, self.novel_id, source_id)
 
     def _promote_setting(self, source_id: str) -> None:
         from tools.story_planning import StoryPlanningStore
@@ -515,6 +515,8 @@ class SourcePackService:
         store.save_foundation_draft(
             background or "# 故事背景\n\n（待补充）\n", merged
         )
+        if not store.promote_foundation():
+            raise RuntimeError("来源设定草案晋升失败")
 
     def _promote_world(self, source_id: str) -> None:
         path = self.source_root(source_id) / "setting_profile.md"

@@ -1,5 +1,5 @@
 import {
-  $, $$, api, countWritingUnits, formatNumber, labels, modelPresets,
+  $, $$, api, countWritingUnits, formatNumber, labels,
   readinessLabels, setSaveState, showToast, state,
 } from "/js/core.js";
 import {
@@ -39,6 +39,50 @@ async function loadResearch() {
   }
 }
 
+function researchSearchProvider(providerId) {
+  return (state.research.status?.settings?.search_providers || [])
+    .find((provider) => provider.id === providerId) || null;
+}
+
+function renderResearchSearchKeyState() {
+  const providerId = $("#research-settings-search").value || "bocha";
+  const provider = researchSearchProvider(providerId);
+  const requiresKey = Boolean(provider?.requires_api_key);
+  $("#research-search-key-field").hidden = !requiresKey;
+  $("#research-search-key-state").textContent = provider?.credential_configured
+    ? "本机已有凭据；留空即可沿用"
+    : "尚未保存 Key";
+  $("#research-search-key-clear").disabled = !provider?.credential_configured;
+}
+
+function renderResearchConfiguration() {
+  const surface = state.research.status || {};
+  const settings = surface.settings || {};
+  const model = surface.model_route || {};
+  if (!state.research.searchProviderInitialized) {
+    $("#research-search").value = settings.search_provider || "bocha";
+    state.research.searchProviderInitialized = true;
+  }
+  const search = researchSearchProvider($("#research-search").value);
+  const modelReady = Boolean(model.configured && model.compatible);
+  const searchReady = Boolean(search?.configured);
+  $("#research-llm").value = model.model
+    ? `${model.label} · ${model.model}`
+    : "尚未配置深度研究模型路由";
+  $("#research-settings-model").textContent = model.model
+    ? `${model.label} · ${model.model}`
+    : "尚未配置";
+  const notes = [];
+  if (!model.configured) notes.push("模型档案缺少 API Key");
+  else if (!model.compatible) notes.push("当前模型不是 OpenAI-compatible 接口");
+  if (!searchReady) notes.push(`${search?.label || "搜索服务"}缺少 API Key`);
+  $("#research-api-state").textContent = notes.length
+    ? notes.join(" · ")
+    : `${model.label || "研究模型"} · ${search?.label || "不联网"}已就绪`;
+  $("#research-submit").disabled = !surface.available || !modelReady || !searchReady;
+  renderResearchSearchKeyState();
+}
+
 function renderResearch() {
   const surface = state.research.status || {};
   const status = $("#research-runtime-status");
@@ -49,6 +93,7 @@ function renderResearch() {
     status.textContent = surface.setup_hint || "运行环境未就绪，请先安装 integrations/deepresearch 的依赖";
     status.classList.remove("ready");
   }
+  renderResearchConfiguration();
   const reports = surface.reports || [];
   $("#research-report-count").textContent = String(reports.length);
   const root = $("#research-report-list");
@@ -72,6 +117,73 @@ function renderResearch() {
     button.addEventListener("click", () => openResearchReport(report.id));
     root.append(button);
   });
+}
+
+function openResearchSettings() {
+  const settings = state.research.status?.settings || {};
+  $("#research-settings-search").value = settings.search_provider || "bocha";
+  $("#research-search-api-key").value = "";
+  $("#research-search-api-key").type = "password";
+  $("#research-search-key-toggle").textContent = "显示";
+  $("#research-search-key-toggle").setAttribute("aria-pressed", "false");
+  $("#research-search-remember-key").checked = true;
+  $("#research-settings-status").textContent = "";
+  renderResearchConfiguration();
+  $("#research-settings-dialog").showModal();
+}
+
+async function saveResearchSettings(event) {
+  event.preventDefault();
+  const button = $("#research-settings-save");
+  button.disabled = true;
+  $("#research-settings-status").textContent = "正在保存…";
+  try {
+    state.research.status = await api("/api/research/settings", {
+      method: "POST",
+      body: JSON.stringify({
+        search_provider: $("#research-settings-search").value,
+        search_api_key: $("#research-search-api-key").value.trim(),
+        remember_api_key: $("#research-search-remember-key").checked,
+      }),
+    });
+    state.research.searchProviderInitialized = false;
+    renderResearch();
+    $("#research-settings-status").textContent = "API 设置已保存。";
+    $("#research-search-api-key").value = "";
+    showToast("深度研究 API 设置已保存");
+  } catch (error) {
+    $("#research-settings-status").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function clearResearchSearchKey() {
+  const providerId = $("#research-settings-search").value;
+  const provider = researchSearchProvider(providerId);
+  if (!provider?.credential_configured) return;
+  if (!window.confirm(`清除本机保存的 ${provider.label} API Key？`)) return;
+  try {
+    state.research.status = await api("/api/research/settings", {
+      method: "POST",
+      body: JSON.stringify({
+        search_provider: providerId,
+        clear_api_key: true,
+      }),
+    });
+    renderResearch();
+    $("#research-settings-status").textContent = `${provider.label} API Key 已清除。`;
+  } catch (error) {
+    $("#research-settings-status").textContent = error.message;
+  }
+}
+
+function toggleResearchSearchKey() {
+  const input = $("#research-search-api-key");
+  const visible = input.type === "text";
+  input.type = visible ? "password" : "text";
+  $("#research-search-key-toggle").textContent = visible ? "显示" : "隐藏";
+  $("#research-search-key-toggle").setAttribute("aria-pressed", String(!visible));
 }
 
 async function openResearchReport(reportId) {
@@ -100,7 +212,6 @@ async function submitResearch(event) {
       "research",
       {
         prompt: $("#research-prompt").value.trim(),
-        llm: $("#research-llm").value,
         search: $("#research-search").value,
         quality: $("#research-quality").value,
         cycles: Number($("#research-cycles").value || 2),
@@ -118,7 +229,7 @@ async function submitResearch(event) {
   } catch (error) {
     formStatus.textContent = error.message;
   } finally {
-    button.disabled = false;
+    renderResearchConfiguration();
   }
 }
 
@@ -193,6 +304,7 @@ function renderWorkspace() {
     ? `${snapshot.average_review_score} / 100`
     : "-";
   renderDocumentList(documentListGroupForView(state.view));
+  syncChapterDeleteControl();
   renderOperations();
   renderInspectorContext();
 }
@@ -569,6 +681,7 @@ async function openDocument(path, pushHistory) {
     );
     $("#review-document").hidden = group !== "chapters" || !reviewProfile?.configured;
     syncRevisionControls();
+    syncChapterDeleteControl();
     $("#outline-tree-back").hidden = group !== "outline";
     updateEditorCount();
     await loadEditorTarget(path);
@@ -650,6 +763,8 @@ function showEmptyEditor(group) {
   editor.setValue(emptyDocumentTip(group));
   editor.setDisabled(true);
   $("#save-document").disabled = true;
+  $("#review-document").hidden = true;
+  syncChapterDeleteControl();
 }
 
 function kindLibraryView(kind) {
@@ -1453,6 +1568,7 @@ async function saveDocument(options = {}) {
   } finally {
     state.saving = false;
     $("#save-document").disabled = !state.dirty;
+    syncChapterDeleteControl();
   }
 }
 
@@ -1461,7 +1577,98 @@ function markEditorDirty() {
   setSaveState("未保存", true);
   updateEditorCount();
   syncRevisionControls();
+  syncChapterDeleteControl();
   scheduleAutoSave();
+}
+
+function syncChapterDeleteControl() {
+  const button = $("#delete-chapter");
+  if (!button) return;
+  const isChapter = documentGroup(state.document?.path || "") === "chapters";
+  button.hidden = !isChapter;
+  button.disabled = !isChapter || state.dirty || state.saving;
+  if (!isChapter) return;
+  const latest = state.workspace?.documents?.chapters?.at(-1);
+  button.title = latest?.path === state.document?.path
+    ? "手动删除当前最新章节"
+    : `为保护连续性，请先删除最新章节 ${latest?.path?.match(/ch_\d+/)?.[0] || ""}`;
+}
+
+function openChapterDeleteDialog() {
+  if (!state.document || documentGroup(state.document.path) !== "chapters") return;
+  if (state.dirty || state.saving) {
+    showToast("请先保存正文再删除", true);
+    return;
+  }
+  const latest = state.workspace?.documents?.chapters?.at(-1);
+  if (!latest || latest.path !== state.document.path) {
+    const latestId = latest?.path?.match(/ch_\d+/)?.[0] || "最新章节";
+    showToast(`为保护连续性，请先打开并删除 ${latestId}`, true);
+    return;
+  }
+  const chapterId = state.document.path.match(/(ch_\d+)\.md$/)?.[1] || "";
+  if (!chapterId) return;
+  $("#chapter-delete-context").textContent = `即将删除《${state.document.title}》（${chapterId}）。如需清空全部正文，请从最新章开始依次删除。`;
+  $("#chapter-delete-confirm").value = "";
+  $("#chapter-delete-confirm").placeholder = chapterId;
+  $("#chapter-delete-status").textContent = `请输入 ${chapterId}`;
+  $("#chapter-delete-submit").disabled = true;
+  $("#chapter-delete-dialog").showModal();
+  $("#chapter-delete-confirm").focus();
+}
+
+function syncChapterDeleteConfirmation() {
+  const chapterId = state.document?.path?.match(/(ch_\d+)\.md$/)?.[1] || "";
+  const matches = $("#chapter-delete-confirm").value.trim() === chapterId;
+  $("#chapter-delete-submit").disabled = !matches;
+  $("#chapter-delete-status").textContent = matches
+    ? "确认信息匹配，可以删除"
+    : `请输入 ${chapterId}`;
+}
+
+async function deleteCurrentChapter(event) {
+  event.preventDefault();
+  if (!state.document) return;
+  const deletedPath = state.document.path;
+  const chapterId = deletedPath.match(/(ch_\d+)\.md$/)?.[1] || "";
+  const submit = $("#chapter-delete-submit");
+  submit.disabled = true;
+  $("#chapter-delete-cancel").disabled = true;
+  $("#chapter-delete-status").textContent = "正在保存删除前版本并清理正文…";
+  try {
+    const payload = await api("/api/chapter/delete", {
+      method: "POST",
+      body: JSON.stringify({
+        path: deletedPath,
+        version: state.document.version,
+        confirm: $("#chapter-delete-confirm").value.trim(),
+      }),
+    });
+    state.document = null;
+    state.dirty = false;
+    clearTimeout(state.autoSaveTimer);
+    state.autoSaveTimer = null;
+    $("#chapter-delete-dialog").close();
+    await loadWorkspace();
+    const previous = payload.previous_chapter
+      ? state.workspace.documents.chapters.find((item) =>
+          item.path.endsWith(`/${payload.previous_chapter}.md`)
+        )
+      : null;
+    if (previous) {
+      await openDocument(previous.path, false);
+    } else {
+      showEmptyEditor("chapters");
+      history.replaceState({ view: "chapters" }, "", "/#chapters");
+    }
+    showToast(`${chapterId} 正文已删除；大纲保持不变`);
+  } catch (error) {
+    $("#chapter-delete-status").textContent = error.message;
+    showToast(error.message, true);
+    submit.disabled = false;
+  } finally {
+    $("#chapter-delete-cancel").disabled = false;
+  }
 }
 
 function toggleEditorFind(open = $("#editor-find-panel").hidden) {
@@ -1687,121 +1894,6 @@ async function saveFocus(event) {
   } finally {
     button.disabled = false;
   }
-}
-
-async function saveModel(event) {
-  event.preventDefault();
-  const submit = $("#model-submit");
-  submit.disabled = true;
-  $("#model-progress").textContent = "正在应用模型配置…";
-  try {
-    state.workspace = await api("/api/model", {
-      method: "POST",
-      body: JSON.stringify(modelFormPayload()),
-    });
-    $("#model-api-key").value = "";
-    renderWorkspace();
-    $("#model-dialog").close();
-    showToast(`模型已切换为 ${state.workspace.model.name}`);
-    advanceProductTourAfterAction("model");
-  } catch (error) {
-    $("#model-progress").textContent = error.message;
-  } finally {
-    submit.disabled = false;
-  }
-}
-
-function detectModelPreset(model) {
-  const base = String(model?.base_url || "").toLowerCase();
-  const name = String(model?.name || model?.model || "").toLowerCase();
-  if (base.includes("deepseek.com")) {
-    return name === "deepseek-v4-flash" ? "deepseek-flash" : "deepseek-pro";
-  }
-  if (model?.provider === "anthropic") return "anthropic";
-  if (base.includes("api.openai.com")) return "openai";
-  return "custom";
-}
-
-function fillModelForm(model) {
-  const preset = detectModelPreset(model);
-  const persistence = model?.persistence || {};
-  $("#model-preset").value = preset;
-  $("#model-base-url").value = model?.base_url || modelPresets[preset].base_url;
-  $("#model-name").value = model?.name === "未配置" ? "" : (model?.name || "");
-  $("#model-api-format").value = model?.api_format || "chat";
-  $("#model-context-tokens").value = String(model?.context_tokens || 64000);
-  $("#model-max-tokens").value = String(model?.max_tokens || 24000);
-  $("#model-remember-key").checked = persistence.remember_api_key !== false;
-  $("#model-key-state").textContent = persistence.credential_saved
-    ? "本机已保存 Key；留空即可沿用"
-    : model?.configured
-    ? "当前进程已有 Key；留空即可沿用"
-    : "当前进程尚无可沿用的 Key";
-  $("#model-dialog-current").textContent = model?.configured
-    ? `${model.name} · ${formatNumber(model.context_tokens)} 上下文`
-    : "尚未配置模型";
-  $("#model-dialog-status-dot").classList.toggle("ready", Boolean(model?.configured));
-}
-
-function applyModelPreset() {
-  const preset = modelPresets[$("#model-preset").value];
-  if (!preset) return;
-  $("#model-base-url").value = preset.base_url;
-  $("#model-name").value = preset.model;
-  $("#model-api-format").value = preset.api_format;
-  $("#model-context-tokens").value = String(preset.context_tokens);
-  $("#model-max-tokens").value = String(preset.max_tokens);
-  $("#model-progress").textContent = "已载入预设，点击“立即应用”后生效。";
-}
-
-function modelFormPayload() {
-  const presetName = $("#model-preset").value;
-  const preset = modelPresets[presetName] || modelPresets.custom;
-  return {
-    provider: preset.provider,
-    base_url: $("#model-base-url").value.trim(),
-    model: $("#model-name").value.trim(),
-    api_key: $("#model-api-key").value.trim(),
-    api_format: $("#model-api-format").value,
-    context_tokens: Number($("#model-context-tokens").value),
-    max_tokens: Number($("#model-max-tokens").value),
-    remember_api_key: $("#model-remember-key").checked,
-  };
-}
-
-function openModelDialog() {
-  fillModelForm(state.workspace?.model || {});
-  $("#model-progress").textContent = "";
-  $("#model-dialog").showModal();
-  $("#model-preset").focus();
-}
-
-async function testModelConnection() {
-  const button = $("#model-test");
-  button.disabled = true;
-  $("#model-submit").disabled = true;
-  $("#model-progress").textContent = "正在发送最小连接测试…";
-  try {
-    const result = await api("/api/model/test", {
-      method: "POST",
-      body: JSON.stringify(modelFormPayload()),
-    });
-    $("#model-progress").textContent = `连接成功 · ${result.model} · ${formatNumber(result.latency_ms)} ms`;
-  } catch (error) {
-    $("#model-progress").textContent = error.message;
-  } finally {
-    button.disabled = false;
-    $("#model-submit").disabled = false;
-  }
-}
-
-function toggleModelKeyVisibility() {
-  const input = $("#model-api-key");
-  const button = $("#model-key-toggle");
-  const visible = input.type === "text";
-  input.type = visible ? "password" : "text";
-  button.textContent = visible ? "显示" : "隐藏";
-  button.setAttribute("aria-pressed", String(!visible));
 }
 
 async function initializeProject(event) {
@@ -2139,8 +2231,11 @@ async function searchProject(event) {
   try {
     const payload = await api(`/api/search?q=${encodeURIComponent(query)}&scope=${encodeURIComponent(scope)}`);
     const engine = payload.engine === "lightrag" ? "LightRAG" : "精确文本降级";
+    const embedding = payload.embedding?.model
+      ? ` · ${payload.embedding.provider_label || payload.embedding.provider} / ${payload.embedding.model}`
+      : "";
     const warning = payload.warning ? ` · ${payload.warning}` : "";
-    $("#search-status").textContent = `${engine} 已索引 ${payload.indexed} 份文档，找到 ${payload.results.length} 条结果${warning}`;
+    $("#search-status").textContent = `${engine}${embedding} 已索引 ${payload.indexed} 份文档，找到 ${payload.results.length} 条结果${warning}`;
     payload.results.forEach((result) => {
       const button = document.createElement("button");
       button.type = "button";
@@ -2151,6 +2246,7 @@ async function searchProject(event) {
       location.textContent = [
         result.scope_label,
         result.category_label,
+        result.retrieval?.includes("semantic") ? "语义召回" : "精确命中",
         `${result.path}:${result.line}`,
       ].filter(Boolean).join(" · ");
       const snippet = document.createElement("p");
@@ -2197,7 +2293,10 @@ function renderOperations() {
   $("#sync-status").textContent = sync.needs_sync
     ? `待同步：大纲 ${sync.outline_pending ? "有变更" : "已同步"}，角色卡 ${sync.cards || 0}/${sync.profiles || 0}`
     : "src 与 data 已同步";
-  renderSourcePacks(operations.source_packs || []);
+  renderReferenceLibrary(
+    operations.reference_library || [],
+    operations.reference_style || {},
+  );
   renderRuntimeSkillStatus(operations);
   renderChapterRuns(operations.chapter_runs_v2 || {});
   renderRollingPlans(operations.rolling_plans || {});
@@ -2364,6 +2463,17 @@ function runtimeSkillLayerLabel(layer) {
   return { builtin: "内置", global: "全局", project: "本作品" }[layer] || layer;
 }
 
+function useRuntimeSkill(skillId, agent) {
+  setView("agents");
+  chooseAgent(agent);
+  const input = $("#chat-input");
+  const mention = `@${skillId}`;
+  const current = input.value.trim();
+  input.value = current.includes(mention) ? current : `${mention}${current ? ` ${current}` : " "}`;
+  input.focus();
+  showToast(`${mention} 将只在下一轮 ${agent === "goethe" ? "Goethe" : "Dante"} 对话中启用`);
+}
+
 function renderRuntimeSkillCatalog() {
   const root = $("#runtime-skill-list");
   root.replaceChildren();
@@ -2390,6 +2500,8 @@ function renderRuntimeSkillCatalog() {
     meta.className = "skill-meta";
     [
       runtimeSkillLayerLabel(skill.layer),
+      skill.source_format === "standard-skill-md" ? "标准 SKILL.md" : "OpenWrite manifest",
+      skill.activation === "explicit" ? "显式调用" : "自动匹配",
       `${skill.budget?.max_tool_calls || 0} 次工具上限`,
       skill.output_contract || "text",
     ].forEach((value) => {
@@ -2402,7 +2514,18 @@ function renderRuntimeSkillCatalog() {
       dependency.textContent = `依赖：${skill.requires.join("、")}`;
       meta.append(dependency);
     }
-    row.append(header, description, meta);
+    const actions = document.createElement("div");
+    actions.className = "row-actions skill-use-actions";
+    [["Goethe", "goethe"], ["Dante", "dante"]].forEach(([label, agent]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "quiet-button";
+      button.textContent = `交给 ${label}`;
+      button.title = `在下一轮 ${label} 对话中启用 @${skill.id}`;
+      button.addEventListener("click", () => useRuntimeSkill(skill.id, agent));
+      actions.append(button);
+    });
+    row.append(header, description, meta, actions);
     root.append(row);
   });
 }
@@ -2640,9 +2763,9 @@ function syncSourceAnalysisControls() {
 }
 
 function sourceFocusValues(mode) {
-  if (mode === "narrative") return ["structure", "hook", "pacing", "voice", "reader_drive", "method"];
-  if (mode === "setting") return ["promise", "character", "conflict", "risk", "method"];
-  return ["promise", "structure", "character", "conflict", "hook", "pacing", "voice", "reader_drive", "method", "risk"];
+  if (mode === "narrative") return ["structure", "hook", "thread", "arc_summary", "chapter_summary", "pacing", "voice", "reader_drive", "method"];
+  if (mode === "setting") return ["promise", "character", "world", "relationship", "progression", "timeline", "conflict", "risk", "method"];
+  return ["promise", "structure", "character", "world", "relationship", "progression", "timeline", "conflict", "hook", "thread", "arc_summary", "chapter_summary", "pacing", "voice", "reader_drive", "method", "risk"];
 }
 
 function renderSourceAnalysis(result) {
@@ -2682,7 +2805,9 @@ function renderSourceAnalysis(result) {
 
   const categories = {
     promise: "作品承诺", structure: "结构", character: "人物", conflict: "冲突",
-    hook: "钩子", pacing: "节奏", voice: "声音", reader_drive: "阅读驱动",
+    world: "世界设定", relationship: "人物关系", progression: "成长体系", timeline: "时间线",
+    hook: "钩子", thread: "叙事线索", arc_summary: "故事弧摘要", chapter_summary: "章节摘要",
+    pacing: "节奏", voice: "声音", reader_drive: "阅读驱动",
     method: "可复用方法", risk: "风险",
   };
   const findings = document.createElement("div");
@@ -2728,6 +2853,580 @@ function renderSourceAnalysis(result) {
   });
 }
 
+function referenceAnalysisCounts(analysis) {
+  const counts = analysis?.chunks || {};
+  const total = Object.values(counts).reduce((sum, value) => sum + Number(value || 0), 0);
+  return {
+    total,
+    completed: Number(counts.completed || 0),
+    failed: Number(counts.failed || 0),
+  };
+}
+
+function renderReferenceLibrary(records, styleSurface) {
+  const root = $("#reference-list");
+  root.replaceChildren();
+  $("#reference-count").textContent = String(records.length);
+  $("#reference-complete-count").textContent = String(
+    records.filter((item) => item.analysis?.complete).length,
+  );
+  const currentIds = new Set(records.map((item) => item.record?.source_id));
+  Array.from(state.referenceLibrary.selectedSourceIds).forEach((sourceId) => {
+    if (!currentIds.has(sourceId)) state.referenceLibrary.selectedSourceIds.delete(sourceId);
+  });
+  if (!records.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "尚未导入参考作品";
+    root.append(empty);
+  }
+  records.forEach((item) => {
+    const record = item.record || {};
+    const analysis = item.analysis || {};
+    const structure = item.structure || {};
+    const counts = referenceAnalysisCounts(analysis);
+    const row = document.createElement("article");
+    row.className = `source-row${state.referenceLibrary.activeSourceId === record.source_id ? " active" : ""}`;
+    const selectWrap = document.createElement("div");
+    selectWrap.className = "source-row-select";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = state.referenceLibrary.selectedSourceIds.has(record.source_id);
+    checkbox.disabled = !analysis.complete;
+    checkbox.setAttribute("aria-label", `选择参考作品 ${record.title}`);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) state.referenceLibrary.selectedSourceIds.add(record.source_id);
+      else state.referenceLibrary.selectedSourceIds.delete(record.source_id);
+      syncReferenceControls();
+    });
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = record.title || record.source_id;
+    const id = document.createElement("code");
+    id.textContent = record.source_id;
+    const meta = document.createElement("span");
+    const intent = {
+      reference: "参考拆解", continuation: "旧稿续写", canon: "同人 Canon", migration: "项目重建",
+    }[record.intent] || record.intent;
+    const status = analysis.complete
+      ? `已拆解 · ${counts.completed}/${counts.total} 块`
+      : structure.status === "confirmed"
+        ? `${analysis.status === "failed" ? "拆解失败" : "等待拆解"} · ${counts.completed}/${counts.total} 块`
+        : `等待确认结构 · ${structure.units?.length || 0} 个单元`;
+    meta.textContent = `${intent} · ${status}`;
+    const progress = document.createElement("span");
+    progress.className = "source-progress";
+    const fill = document.createElement("i");
+    fill.style.width = `${counts.total ? Math.round((counts.completed / counts.total) * 100) : 0}%`;
+    progress.append(fill);
+    copy.append(title, id, meta, progress);
+    selectWrap.append(checkbox, copy);
+    const actions = document.createElement("div");
+    actions.className = "row-actions";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "text-button";
+    button.textContent = analysis.complete
+      ? "查看证据"
+      : structure.status === "confirmed"
+        ? "继续拆解"
+        : "确认结构";
+    button.addEventListener("click", async () => {
+      state.referenceLibrary.activeSourceId = record.source_id;
+      if (analysis.complete) await loadReferenceStatus(record.source_id);
+      else if (structure.status === "confirmed") await enqueueReferenceAnalysis(record.source_id);
+      else await loadReferenceStatus(record.source_id, { showStructure: true });
+    });
+    actions.append(button);
+    row.append(selectWrap, actions);
+    root.append(row);
+  });
+  renderReferenceStyle(styleSurface);
+  syncReferenceControls();
+}
+
+function syncReferenceControls() {
+  $("#reference-synthesize").disabled = state.referenceLibrary.selectedSourceIds.size < 1;
+  $("#reference-send-goethe").disabled = !state.referenceLibrary.profile;
+  $("#reference-adoption-preview").disabled = !state.referenceLibrary.profile;
+  $("#reference-adoption-apply").disabled = !state.referenceLibrary.adoptionPreview;
+}
+
+function renderReferenceStructure(payload) {
+  const structure = payload?.structure || payload?.result?.structure || null;
+  if (!structure) return;
+  state.referenceLibrary.pendingStructure = {
+    sourceId: structure.source_id,
+    structure,
+  };
+  const panel = $("#reference-structure");
+  const root = $("#reference-structure-list");
+  root.replaceChildren();
+  $("#reference-structure-count").textContent = `${structure.units?.length || 0} 个单元`;
+  (structure.units || []).forEach((unit, index) => {
+    const row = document.createElement("div");
+    row.className = "reference-structure-row";
+    const order = document.createElement("span");
+    order.textContent = String(index + 1).padStart(2, "0");
+    const copy = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = unit.title;
+    const meta = document.createElement("small");
+    meta.textContent = `${unit.kind} · ${formatNumber(unit.end - unit.start)} 字符 · ${unit.start}-${unit.end}`;
+    copy.append(title, meta);
+    row.append(order, copy);
+    root.append(row);
+  });
+  panel.hidden = false;
+  $("#reference-status").textContent = "卷章结构已解析，请确认所有原文都被覆盖";
+  panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+async function prepareReference(event) {
+  event.preventDefault();
+  const file = $("#reference-file").files[0];
+  const content = file ? await file.text() : $("#reference-content").value;
+  const button = $("#reference-prepare");
+  button.disabled = true;
+  $("#reference-status").textContent = "正在保存私有快照并解析卷章结构…";
+  try {
+    const payload = await api("/api/reference-library", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "prepare",
+        source_id: $("#reference-id").value.trim(),
+        title: $("#reference-title").value.trim(),
+        relative_name: file?.name || "pasted-reference.txt",
+        intent: $("#reference-intent").value,
+        focus: sourceFocusValues($("#reference-focus").value),
+        input_budget_tokens: Number($("#reference-input-budget").value || 12000),
+        content,
+      }),
+    });
+    state.workspace = payload.workspace;
+    renderWorkspace();
+    renderReferenceStructure(payload.result);
+  } catch (error) {
+    $("#reference-status").textContent = error.message;
+    showToast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function confirmReferenceStructure() {
+  const pending = state.referenceLibrary.pendingStructure;
+  if (!pending) return;
+  $("#reference-structure-confirm").disabled = true;
+  try {
+    await api("/api/reference-library", {
+      method: "POST",
+      body: JSON.stringify({ action: "confirm_structure", source_id: pending.sourceId }),
+    });
+    $("#reference-structure").hidden = true;
+    state.referenceLibrary.pendingStructure = null;
+    await enqueueReferenceAnalysis(pending.sourceId);
+  } catch (error) {
+    $("#reference-status").textContent = error.message;
+    showToast(error.message, true);
+  } finally {
+    $("#reference-structure-confirm").disabled = false;
+  }
+}
+
+async function enqueueReferenceAnalysis(sourceId) {
+  $("#reference-status").textContent = "正在加入全文拆解任务…";
+  try {
+    await enqueueTask(
+      "reference_operation",
+      { action: "analyze", source_id: sourceId },
+      {
+        label: "参考作品拆解已加入队列",
+        onComplete: async () => {
+          await loadWorkspace();
+          await loadReferenceStatus(sourceId);
+          $("#reference-status").textContent = "参考作品拆解完成";
+        },
+      },
+    );
+    $("#reference-status").textContent = "全文拆解正在后台执行";
+  } catch (error) {
+    $("#reference-status").textContent = error.message;
+    showToast(error.message, true);
+  }
+}
+
+async function loadReferenceStatus(sourceId, options = {}) {
+  $("#reference-status").textContent = "正在读取参考作品…";
+  try {
+    const payload = await api("/api/reference-library", {
+      method: "POST",
+      body: JSON.stringify({ action: "status", source_id: sourceId }),
+    });
+    state.workspace = payload.workspace;
+    state.referenceLibrary.activeSourceId = sourceId;
+    renderWorkspace();
+    if (options.showStructure || payload.result.structure?.status !== "confirmed") {
+      renderReferenceStructure(payload.result);
+    } else {
+      renderReferenceEvidence(payload.result);
+    }
+    $("#reference-status").textContent = "参考作品已加载";
+  } catch (error) {
+    $("#reference-status").textContent = error.message;
+    showToast(error.message, true);
+  }
+}
+
+function renderReferenceEvidence(status) {
+  const root = $("#reference-report");
+  root.replaceChildren();
+  const record = status.record || {};
+  const report = status.analysis?.report || null;
+  if (!report) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "当前参考作品还没有完整证据报告";
+    root.append(empty);
+    return;
+  }
+  const summary = document.createElement("div");
+  summary.className = "source-report-summary";
+  const heading = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = record.title || report.source_id;
+  const badge = document.createElement("span");
+  badge.className = "status-badge ready";
+  badge.textContent = "全文证据完整";
+  heading.append(title, badge);
+  const copy = document.createElement("p");
+  copy.textContent = report.summary || "暂无摘要";
+  const meta = document.createElement("span");
+  meta.textContent = `${report.findings?.length || 0} 条结论 · ${(report.models || []).join("、") || "模型未记录"}`;
+  summary.append(heading, copy, meta);
+  root.append(summary);
+  const findings = document.createElement("div");
+  findings.className = "source-findings";
+  (report.findings || []).forEach((finding) => {
+    const item = document.createElement("article");
+    item.className = "source-finding";
+    const header = document.createElement("div");
+    const category = document.createElement("span");
+    category.className = "finding-category";
+    category.textContent = finding.category;
+    const confidence = document.createElement("span");
+    confidence.textContent = `${Math.round(Number(finding.confidence || 0) * 100)}%`;
+    header.append(category, confidence);
+    const claim = document.createElement("strong");
+    claim.textContent = finding.claim;
+    item.append(header, claim);
+    (finding.evidence || []).forEach((evidence) => {
+      const quote = document.createElement("blockquote");
+      const text = document.createElement("p");
+      text.textContent = evidence.quote;
+      const location = document.createElement("cite");
+      location.textContent = `L${evidence.line_start}-${evidence.line_end}`;
+      quote.append(text, location);
+      item.append(quote);
+    });
+    findings.append(item);
+  });
+  root.append(findings);
+}
+
+async function synthesizeReferenceProfile() {
+  const sourceIds = Array.from(state.referenceLibrary.selectedSourceIds);
+  if (!sourceIds.length) return;
+  $("#reference-status").textContent = "正在生成多作品对照画像…";
+  try {
+    const payload = await api("/api/reference-library", {
+      method: "POST",
+      body: JSON.stringify({ action: "synthesize", source_ids: sourceIds }),
+    });
+    state.referenceLibrary.profile = payload.result;
+    state.referenceLibrary.adoptionPreview = null;
+    renderReferenceAdoptionEditor(payload.result);
+    $("#reference-status").textContent = "对照画像已生成，请逐条决定采用方式";
+    syncReferenceControls();
+  } catch (error) {
+    $("#reference-status").textContent = error.message;
+    showToast(error.message, true);
+  }
+}
+
+function referenceCandidateRow(item, group) {
+  const row = document.createElement("article");
+  row.className = "reference-candidate-row";
+  row.dataset.itemId = item.item_id;
+  const selection = document.createElement("input");
+  selection.type = "checkbox";
+  selection.className = "reference-candidate-check";
+  selection.setAttribute("aria-label", `采纳 ${item.claim}`);
+  const copy = document.createElement("div");
+  copy.className = "reference-candidate-copy";
+  const claim = document.createElement("strong");
+  claim.textContent = item.claim;
+  const meta = document.createElement("span");
+  meta.textContent = `${group} · ${item.category || "method"} · ${item.source_bound ? "来源事实" : "可复用"} · ${(item.source_ids || []).join("、")}`;
+  copy.append(claim, meta);
+  const controls = document.createElement("div");
+  controls.className = "reference-candidate-controls";
+  const specs = [
+    ["target", [["style", "风格配方"], ["rules", "项目规则"], ["inspiration", "灵感候选"], ["setting_candidates", "设定候选"]]],
+    ["dimension", [["narration", "叙述"], ["language", "语言"], ["dialogue", "对话"], ["rhythm", "节奏"], ["emotion", "情绪"], ["structure", "结构"], ["craft", "技法"], ["avoid", "避让"]]],
+    ["role", [["primary", "主风格"], ["auxiliary", "辅助"], ["validation_only", "仅校验"], ["avoid", "禁用"]]],
+    ["scope", [["project", "全书"], ["arc", "故事弧"], ["chapter", "章节"]]],
+  ];
+  specs.forEach(([name, options]) => {
+    const select = document.createElement("select");
+    select.className = `reference-candidate-${name}`;
+    select.setAttribute("aria-label", name);
+    options.forEach(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      select.append(option);
+    });
+    controls.append(select);
+  });
+  const scopeId = document.createElement("input");
+  scopeId.className = "reference-candidate-scope-id";
+  scopeId.placeholder = "arc_001 / ch_007";
+  scopeId.setAttribute("aria-label", "适用范围 ID");
+  scopeId.hidden = true;
+  controls.append(scopeId);
+  const target = controls.querySelector(".reference-candidate-target");
+  const dimension = controls.querySelector(".reference-candidate-dimension");
+  const role = controls.querySelector(".reference-candidate-role");
+  const scope = controls.querySelector(".reference-candidate-scope");
+  const categoryDefaults = {
+    voice: ["style", "narration"],
+    pacing: ["style", "rhythm"],
+    reader_drive: ["style", "craft"],
+    method: ["style", "craft"],
+    promise: ["rules", "craft"],
+    structure: ["inspiration", "structure"],
+    conflict: ["inspiration", "structure"],
+    hook: ["inspiration", "structure"],
+    thread: ["inspiration", "structure"],
+    arc_summary: ["inspiration", "structure"],
+    chapter_summary: ["inspiration", "structure"],
+    character: ["setting_candidates", "craft"],
+    world: ["setting_candidates", "craft"],
+    relationship: ["setting_candidates", "craft"],
+    progression: ["setting_candidates", "craft"],
+    timeline: ["setting_candidates", "structure"],
+    risk: ["rules", "avoid"],
+  };
+  const [defaultTarget, defaultDimension] = categoryDefaults[item.category] || ["inspiration", "craft"];
+  target.value = item.source_bound && defaultTarget === "style" ? "inspiration" : defaultTarget;
+  dimension.value = defaultDimension;
+  role.value = item.category === "risk" ? "avoid" : "auxiliary";
+  const syncTargetControls = () => {
+    const style = target.value === "style";
+    dimension.disabled = !style;
+    role.disabled = !style;
+  };
+  target.addEventListener("change", () => {
+    syncTargetControls();
+  });
+  scope.addEventListener("change", () => {
+    scopeId.hidden = scope.value === "project";
+    if (scopeId.hidden) scopeId.value = "";
+  });
+  syncTargetControls();
+  row.append(selection, copy, controls);
+  return row;
+}
+
+function renderReferenceAdoptionEditor(profile) {
+  const root = $("#reference-report");
+  root.replaceChildren();
+  const summary = document.createElement("div");
+  summary.className = "source-report-summary profile";
+  const header = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = "多作品对照与采纳清单";
+  const badge = document.createElement("span");
+  badge.className = "status-badge ready";
+  badge.textContent = `${profile.source_ids?.length || 0} 部作品`;
+  header.append(title, badge);
+  const meta = document.createElement("p");
+  meta.textContent = `profile ${profile.profile_id}`;
+  summary.append(header, meta);
+  root.append(summary);
+  [
+    ["共通方法", profile.common_methods || []],
+    ["差异特征", profile.differences || []],
+    ["可选变体", profile.optional_variants || []],
+  ].forEach(([label, items]) => {
+    if (!items.length) return;
+    const section = document.createElement("section");
+    section.className = "reference-candidate-section";
+    const heading = document.createElement("h3");
+    heading.textContent = `${label} · ${items.length}`;
+    section.append(heading);
+    items.forEach((item) => section.append(referenceCandidateRow(item, label)));
+    root.append(section);
+  });
+  if ((profile.conflicts || []).length || (profile.excluded_items || []).length) {
+    const details = document.createElement("details");
+    details.className = "reference-exclusions";
+    const summaryLine = document.createElement("summary");
+    summaryLine.textContent = `冲突与自动排除 · ${(profile.conflicts || []).length + (profile.excluded_items || []).length}`;
+    const list = document.createElement("ul");
+    [...(profile.conflicts || []), ...(profile.excluded_items || [])].forEach((value) => {
+      const item = document.createElement("li");
+      item.textContent = value;
+      list.append(item);
+    });
+    details.append(summaryLine, list);
+    root.append(details);
+  }
+}
+
+function collectReferenceAdoptionSelections() {
+  return Array.from($$(".reference-candidate-row"))
+    .filter((row) => row.querySelector(".reference-candidate-check").checked)
+    .map((row) => ({
+      item_id: row.dataset.itemId,
+      target: row.querySelector(".reference-candidate-target").value,
+      dimension: row.querySelector(".reference-candidate-dimension").value,
+      role: row.querySelector(".reference-candidate-role").value,
+      scope: row.querySelector(".reference-candidate-scope").value,
+      scope_id: row.querySelector(".reference-candidate-scope-id").value.trim(),
+    }));
+}
+
+async function previewReferenceAdoption() {
+  const profile = state.referenceLibrary.profile;
+  if (!profile) return;
+  const selections = collectReferenceAdoptionSelections();
+  if (!selections.length) {
+    showToast("请至少勾选一条候选", true);
+    return;
+  }
+  try {
+    const payload = await api("/api/reference-library", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "adoption_preview",
+        profile_id: profile.profile_id,
+        selections,
+      }),
+    });
+    state.referenceLibrary.adoptionPreview = payload.result;
+    const root = $("#reference-report");
+    root.replaceChildren();
+    const summary = document.createElement("div");
+    summary.className = "source-report-summary";
+    const title = document.createElement("strong");
+    title.textContent = "项目采纳预览";
+    const meta = document.createElement("span");
+    meta.textContent = `${payload.result.adoption?.selections?.length || 0} 条采用 · ${payload.result.adoption?.rejected_item_ids?.length || 0} 条不采用`;
+    summary.append(title, meta);
+    const diff = document.createElement("pre");
+    diff.className = "context-preview promotion-diff";
+    diff.textContent = payload.result.unified_diff || "目标文件无变化";
+    root.append(summary, diff);
+    $("#reference-status").textContent = "采纳差异已生成，尚未写入项目";
+    syncReferenceControls();
+  } catch (error) {
+    $("#reference-status").textContent = error.message;
+    showToast(error.message, true);
+  }
+}
+
+async function applyReferenceAdoption() {
+  const preview = state.referenceLibrary.adoptionPreview;
+  if (!preview) return;
+  $("#reference-adoption-apply").disabled = true;
+  try {
+    const payload = await api("/api/reference-library", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "adopt",
+        preview_id: preview.preview_id,
+        confirm: true,
+      }),
+    });
+    state.referenceLibrary.adoptionPreview = null;
+    state.workspace = payload.workspace;
+    renderWorkspace();
+    $("#reference-status").textContent = "采纳快照和风格运行文件已更新";
+    showToast("风格配方已确认");
+  } catch (error) {
+    $("#reference-status").textContent = error.message;
+    showToast(error.message, true);
+  } finally {
+    syncReferenceControls();
+  }
+}
+
+function sendReferenceProfileToGoethe() {
+  const profile = state.referenceLibrary.profile;
+  if (!profile) return;
+  chooseAgent("goethe");
+  setView("agents");
+  const input = $("#chat-input");
+  input.value = `请审议参考画像 ${profile.profile_id}。结合当前作者意图和创作罗盘，逐条说明建议采用、改写或拒绝哪些方法，并给出风格维度、主辅角色和适用范围。不要读取或复述整本原文，只引用证据化结论。`;
+  input.focus();
+}
+
+function renderReferenceStyle(surface) {
+  const root = $("#reference-style-recipe");
+  root.replaceChildren();
+  const selections = surface?.selections || [];
+  const status = $("#reference-style-status");
+  status.textContent = selections.length ? `${selections.length} 条已采用` : "尚未配置";
+  status.classList.toggle("ready", selections.length > 0);
+  if (!selections.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "确认采纳后，Writer 使用的风格说明和 Reviewer 使用的指纹目标会显示在这里。";
+    root.append(empty);
+    return;
+  }
+  const groups = new Map();
+  selections.forEach((item) => {
+    const key = item.dimension || "craft";
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  });
+  groups.forEach((items, dimension) => {
+    const section = document.createElement("section");
+    const heading = document.createElement("h3");
+    heading.textContent = dimension;
+    section.append(heading);
+    items.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "reference-style-row";
+      const claim = document.createElement("strong");
+      claim.textContent = item.claim;
+      const meta = document.createElement("span");
+      meta.textContent = `${item.role} · ${item.scope}${item.scope_id ? ` ${item.scope_id}` : ""}`;
+      row.append(claim, meta);
+      section.append(row);
+    });
+    root.append(section);
+  });
+  const targets = surface.fingerprint?.targets || {};
+  if (Object.keys(targets).length) {
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "Reviewer 指纹目标";
+    const metrics = document.createElement("div");
+    metrics.className = "reference-fingerprint-targets";
+    Object.entries(targets).forEach(([name, range]) => {
+      const metric = document.createElement("span");
+      metric.textContent = `${name} ${range.min}-${range.max}`;
+      metrics.append(metric);
+    });
+    details.append(summary, metrics);
+    root.append(details);
+  }
+}
+
 async function runSync() {
   const button = $("#sync-project");
   button.disabled = true;
@@ -2752,12 +3451,26 @@ async function inspectContext(event) {
   try {
     const payload = await api(`/api/context?chapter=${encodeURIComponent(chapter)}`);
     const manifest = payload.manifest || {};
-    $("#context-meta").textContent = `${payload.chapter_id} · 目标 ${formatNumber(payload.target_words)} 字 · ${payload.characters.length} 位相关人物 · 上下文 ${formatNumber(manifest.estimated_tokens)} tokens · revision ${manifest.revision || "-"}`;
+    const semanticRetrieval = payload.semantic_retrieval || {};
+    const semanticResultCount = Number(semanticRetrieval.results || 0);
+    const semanticMeta = semanticRetrieval.status === "ready"
+      ? ` · 语义召回 ${formatNumber(semanticResultCount)} 条`
+      : "";
+    $("#context-meta").textContent = `${payload.chapter_id} · 目标 ${formatNumber(payload.target_words)} 字 · ${payload.characters.length} 位相关人物 · 上下文 ${formatNumber(manifest.estimated_tokens)} tokens${semanticMeta} · revision ${manifest.revision || "-"}`;
     const provenance = (manifest.items || []).map((item) => {
       const sources = (item.sources || []).map((source) => source.path).join(", ");
       return `L${item.level} ${item.section} · ${item.estimated_tokens} tokens · ${sources}`;
     }).join("\n");
-    $("#context-preview").textContent = `${provenance ? `【上下文来源】\n${provenance}\n\n` : ""}${payload.markdown || "上下文为空"}`;
+    const sections = [];
+    if (provenance) sections.push(`【上下文来源】\n${provenance}`);
+    if (String(payload.character_states || "").trim()) {
+      sections.push(`【精确人物状态】\n${payload.character_states.trim()}`);
+    }
+    if (String(payload.semantic_references || "").trim()) {
+      sections.push(`【语义远距记忆（仅供参考）】\n${payload.semantic_references.trim()}`);
+    }
+    sections.push(`【Canonical Packet】\n${payload.markdown || "上下文为空"}`);
+    $("#context-preview").textContent = sections.join("\n\n");
   } catch (error) {
     $("#context-meta").textContent = error.message;
     showToast(error.message, true);
@@ -4542,6 +5255,11 @@ function bindEvents() {
     renderDocumentList(state.view);
   });
   $("#save-document").addEventListener("click", () => saveDocument());
+  $("#delete-chapter").addEventListener("click", openChapterDeleteDialog);
+  $("#chapter-delete-form").addEventListener("submit", deleteCurrentChapter);
+  $("#chapter-delete-confirm").addEventListener("input", syncChapterDeleteConfirmation);
+  $("#chapter-delete-close").addEventListener("click", () => $("#chapter-delete-dialog").close());
+  $("#chapter-delete-cancel").addEventListener("click", () => $("#chapter-delete-dialog").close());
   $("#editor-find-toggle").addEventListener("click", () => toggleEditorFind());
   $("#editor-find-close").addEventListener("click", () => toggleEditorFind(false));
   $("#editor-find-panel").addEventListener("submit", (event) => {
@@ -4627,6 +5345,18 @@ function bindEvents() {
   $("#review-fixable-filter").addEventListener("change", renderReviewWorkspace);
   $("#research-form").addEventListener("submit", submitResearch);
   $("#research-refresh").addEventListener("click", loadResearch);
+  $("#research-settings-open").addEventListener("click", openResearchSettings);
+  $("#research-settings-form").addEventListener("submit", saveResearchSettings);
+  $("#research-settings-close").addEventListener("click", () => $("#research-settings-dialog").close());
+  $("#research-settings-cancel").addEventListener("click", () => $("#research-settings-dialog").close());
+  $("#research-settings-search").addEventListener("change", renderResearchSearchKeyState);
+  $("#research-search-key-toggle").addEventListener("click", toggleResearchSearchKey);
+  $("#research-search-key-clear").addEventListener("click", clearResearchSearchKey);
+  $("#research-model-route-open").addEventListener("click", () => {
+    $("#research-settings-dialog").close();
+    openModelProfilesDialog("routes");
+  });
+  $("#research-search").addEventListener("change", renderResearchConfiguration);
   $("#sync-project").addEventListener("click", runSync);
   $("#context-form").addEventListener("submit", inspectContext);
   $("#import-form").addEventListener("submit", importText);
@@ -4659,10 +5389,17 @@ function bindEvents() {
   $("#relationship-graph").addEventListener("pointercancel", endRelationshipPointer);
   $("#relationship-graph").addEventListener("wheel", zoomRelationshipGraph, { passive: false });
   $("#foreshadow-form").addEventListener("submit", createForeshadowing);
-  $("#source-form").addEventListener("submit", extractSource);
-  $("#source-synthesize").addEventListener("click", synthesizeSelectedSources);
-  $("#source-promotion-preview").addEventListener("click", previewSourcePromotion);
-  $("#source-promotion-apply").addEventListener("click", applySourcePromotion);
+  $("#reference-form").addEventListener("submit", prepareReference);
+  $("#reference-structure-confirm").addEventListener("click", confirmReferenceStructure);
+  $("#reference-structure-cancel").addEventListener("click", () => {
+    $("#reference-structure").hidden = true;
+    state.referenceLibrary.pendingStructure = null;
+    $("#reference-status").textContent = "可修改原文或分析配置后重新解析";
+  });
+  $("#reference-synthesize").addEventListener("click", synthesizeReferenceProfile);
+  $("#reference-send-goethe").addEventListener("click", sendReferenceProfileToGoethe);
+  $("#reference-adoption-preview").addEventListener("click", previewReferenceAdoption);
+  $("#reference-adoption-apply").addEventListener("click", applyReferenceAdoption);
   $("#runtime-skill-resolve").addEventListener("click", resolveRuntimeSkills);
   $("#runtime-skill-diagnose").addEventListener("click", diagnoseRuntimeSkills);
   $("#runtime-rules-preview").addEventListener("click", previewRuntimeRules);
@@ -4680,17 +5417,19 @@ function bindEvents() {
   });
   $("#rolling-plan-create").addEventListener("click", createRollingPlan);
   $("#rolling-plan-goethe").addEventListener("click", sendRollingPlanToGoethe);
-  $("#source-file").addEventListener("change", async (event) => {
+  $("#reference-file").addEventListener("change", async (event) => {
     const file = event.target.files[0];
     if (file) {
-      $("#source-content").value = await file.text();
-      if (!$("#source-id").value.trim()) {
-        $("#source-id").value = file.name
+      $("#reference-content").value = await file.text();
+      const stem = file.name.replace(/\.[^.]+$/, "");
+      if (!$("#reference-title").value.trim()) $("#reference-title").value = stem;
+      if (!$("#reference-id").value.trim()) {
+        $("#reference-id").value = stem
           .replace(/\.[^.]+$/, "")
           .toLocaleLowerCase()
           .replace(/[^a-z0-9_-]+/g, "_")
           .replace(/^_+|_+$/g, "")
-          .slice(0, 64) || `source_${Date.now()}`;
+          .slice(0, 64) || `reference_${Date.now()}`;
       }
     }
   });

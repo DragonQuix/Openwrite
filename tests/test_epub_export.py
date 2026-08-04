@@ -27,6 +27,16 @@ def _book(tmp_path: Path) -> Path:
 
 def test_epub3_preserves_chinese_order_metadata_and_local_cover(tmp_path: Path) -> None:
     cover = _book(tmp_path)
+    first_chapter = next(
+        (tmp_path / "data" / "novels" / "demo" / "data" / "manuscript").rglob(
+            "ch_001.md"
+        )
+    )
+    first_chapter.write_text(
+        first_chapter.read_text(encoding="utf-8")
+        + "\n//**林舟[位置]：钟楼外 -> 钟楼内**\n",
+        encoding="utf-8",
+    )
     output = tmp_path / "book.epub"
     export_epub(
         tmp_path,
@@ -49,6 +59,7 @@ def test_epub3_preserves_chinese_order_metadata_and_local_cover(tmp_path: Path) 
     assert 'properties="cover-image"' in package
     assert nav.index("第一章 雨夜") < nav.index("第二章 回声")
     assert "林舟听见旧钟响了一声" in first
+    assert "//**" not in first
     assert "那一分钟仍不在任何记录里" in second
     ElementTree.fromstring(first)
     ElementTree.fromstring(second)

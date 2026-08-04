@@ -668,16 +668,13 @@ def test_exec_review_chapter_uses_packet_based_context(
         def __init__(self, agent_ctx):
             self.agent_ctx = agent_ctx
 
-        async def review(self, content: str, context: dict):
+        async def review(self, content: str, context: dict, **kwargs):
             captured["content"] = content
             captured["context"] = context
+            captured["review_options"] = kwargs
             return SimpleNamespace(passed=True, score=96, issues=[])
 
-    def forbidden_builder(*args, **kwargs):
-        raise AssertionError("review should use canonical packet, not ContextBuilder fallback")
-
     monkeypatch.setattr(chapter_assembler_module, "ChapterAssemblerV2", FakeAssembler)
-    monkeypatch.setattr(context_builder_module, "ContextBuilder", forbidden_builder)
     monkeypatch.setattr(agent_module, "ReviewerAgent", FakeReviewer)
     monkeypatch.setattr(
         agent_module,

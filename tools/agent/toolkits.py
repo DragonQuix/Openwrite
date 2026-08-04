@@ -11,6 +11,7 @@ ORCHESTRATOR_TOOLKIT = {
     "edit_project_document",
     "list_chapters",
     "get_truth_files",
+    "get_character_state",
     "create_character",
     "query_world",
     "get_world_relations",
@@ -25,6 +26,7 @@ WRITING_TOOLKIT = {
     "get_context",
     "list_chapters",
     "get_truth_files",
+    "get_character_state",
 }
 
 DANTE_DIRECT_TOOLKIT = {
@@ -36,6 +38,7 @@ DANTE_DIRECT_TOOLKIT = {
     "edit_project_document",
     "list_chapters",
     "get_truth_files",
+    "get_character_state",
     "create_character",
     "query_world",
     "get_world_relations",
@@ -79,6 +82,7 @@ GOETHE_DIRECT_TOOLKIT = {
     "edit_project_document",
     "list_chapters",
     "get_truth_files",
+    "get_character_state",
     "create_character",
     "query_world",
     "get_world_relations",
@@ -107,7 +111,9 @@ GOETHE_ACTION_TOOLKIT = {
     "summarize_ideation",
     "confirm_ideation_summary",
     "generate_foundation_draft",
+    "confirm_foundation",
     "generate_character_draft",
+    "confirm_character_draft",
     "generate_outline_draft",
     "read_outline",
     "stage_outline_edits",
@@ -117,5 +123,10 @@ GOETHE_ACTION_TOOLKIT = {
     "extract_setting_source",
     "review_source_pack",
     "promote_source_pack",
+    "list_reference_library",
+    "review_reference_source",
+    "review_reference_profile",
+    "preview_reference_adoption",
+    "apply_reference_adoption",
     "prepare_dante_handoff",
 }

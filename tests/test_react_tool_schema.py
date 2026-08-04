@@ -5,7 +5,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from tools.agent.dante import _build_dante_tool_definitions
 from tools.agent.react import OPENWRITE_SYSTEM_PROMPT, OPENWRITE_TOOLS
+from tools.goethe import DEFAULT_GOETHE_SYSTEM_PROMPT, _build_goethe_tool_definitions
 
 
 def test_react_never_exposes_model_credentials_as_tools():
@@ -27,6 +29,23 @@ def test_update_truth_file_tool_schema_uses_canonical_names():
     assert "current_state/ledger/relationships" in desc
     assert "particle_ledger" not in desc
     assert "character_matrix" not in desc
+    assert tool.required == ["file_name", "content", "source_revision"]
+    assert "source_revision" in tool.parameters["properties"]
+    assert "confirm" in tool.parameters["properties"]
+    assert "默认 false" in tool.parameters["properties"]["confirm"]["description"]
+    assert "不覆盖整份文件" in tool.description
+    assert "完整投影和 revision" in OPENWRITE_SYSTEM_PROMPT
+    assert "禁止整份覆盖" in OPENWRITE_SYSTEM_PROMPT
+
+
+def test_character_state_tool_infers_chapter_and_only_requires_name():
+    tool = next(t for t in OPENWRITE_TOOLS if t.name == "get_character_state")
+
+    assert tool.required == ["name"]
+    assert tool.parameters["required"] == ["name"]
+    assert "chapter" not in tool.parameters["properties"]
+    assert tool.parameters["properties"]["lookback"]["default"] == 50
+    assert "当前写作章节由系统自动推断" in tool.description
 
 
 def test_relation_edit_tool_requires_preview_confirmation_contract():
@@ -73,6 +92,7 @@ def test_library_and_search_tools_use_creator_facing_scopes():
         "settings",
         "continuity",
         "chapters",
+        "sources",
     ]
     assert "story/world/assets" in search.parameters["properties"]["scope"]["description"]
     assert "管理作品核心、角色、设定与连续性资料" in OPENWRITE_SYSTEM_PROMPT
@@ -86,10 +106,13 @@ def test_batch_relation_tools_support_search_and_confirmed_writes():
     assert search_tool.required == ["query"]
     assert "出身地点" in search_tool.description
     assert "能力体系" in search_tool.description
-    assert batch_tool.required == ["relations"]
+    assert batch_tool.required == []
     assert "批量新增、更新或删除" in batch_tool.description
     assert "默认只预览所有源文件 diff" in batch_tool.description
     assert "base_revisions" in properties
+    assert "preview_token" in properties
+    assert "preview_tokens" in properties
+    assert "不可变" in properties["preview_token"]["description"]
     assert properties["relations"]["items"]["required"] == ["source_id", "target_id"]
     assert (
         properties["relations"]["items"]["properties"]["action"]["enum"]
@@ -131,3 +154,20 @@ def test_outline_edit_tool_requires_revision_and_bounded_operations():
     assert "连续重编号" in tool.parameters["properties"]["operation"]["description"]
     assert "confirm" in tool.parameters["properties"]
     assert "默认 false" in tool.parameters["properties"]["confirm"]["description"]
+
+
+def test_reference_adoption_tools_belong_to_goethe_not_dante():
+    goethe_tools = {tool.name for tool in _build_goethe_tool_definitions()}
+    dante_tools = {tool.name for tool in _build_dante_tool_definitions()}
+    reference_tools = {
+        "list_reference_library",
+        "review_reference_source",
+        "review_reference_profile",
+        "preview_reference_adoption",
+        "apply_reference_adoption",
+    }
+
+    assert reference_tools <= goethe_tools
+    assert reference_tools.isdisjoint(dante_tools)
+    assert "不读取或复述整本参考原文" in DEFAULT_GOETHE_SYSTEM_PROMPT
+    assert "Dante 只消费确认后生成的 composed.md" in DEFAULT_GOETHE_SYSTEM_PROMPT

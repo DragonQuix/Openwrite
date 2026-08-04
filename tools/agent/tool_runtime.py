@@ -34,7 +34,13 @@ def _service_executor(project_root: Path, operation: str) -> ToolExecutor:
                 return service.write_chapter(args)
             if operation == "review_chapter":
                 return service.review_chapter(
-                    str(args.get("chapter_id") or "latest")
+                    str(args.get("chapter_id") or "latest"),
+                    strict=bool(args.get("strict", False)),
+                    dimensions=(
+                        args.get("dimensions")
+                        if isinstance(args.get("dimensions"), list)
+                        else None
+                    ),
                 )
             raise NovelServiceError(f"未知应用服务操作: {operation}")
         except NovelServiceError as exc:
@@ -134,31 +140,52 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
             if operation == "list_chapters":
                 from tools.novel_workspace import list_chapters
 
+                novel_root = project_root / "data" / "novels" / novel_id
                 return {
                     "chapters": [
                         {
                             "number": int(item.chapter_id.split("_")[-1]),
                             "chapter_id": item.chapter_id,
                             "title": item.title,
+                            "path": item.path.relative_to(novel_root).as_posix(),
                         }
                         for item in list_chapters(project_root, novel_id)
                     ]
                 }
             if operation == "get_truth_files":
+                from tools.runtime_state import RuntimeStateManager
                 from tools.truth_manager import TruthFilesManager
 
                 truth = TruthFilesManager(project_root, novel_id).load_truth_files()
+                state = RuntimeStateManager(project_root, novel_id).load(
+                    {
+                        "current_state": truth.current_state,
+                        "ledger": truth.ledger,
+                        "relationships": truth.relationships,
+                    }
+                )
                 return {
-                    "current_state": truth.current_state[:500],
-                    "ledger": truth.ledger[:500],
-                    "relationships": truth.relationships[:500],
+                    "schema_version": state.schema_version,
+                    "revision": state.revision,
+                    "current_state": truth.current_state,
+                    "ledger": truth.ledger,
+                    "relationships": truth.relationships,
                 }
+            if operation == "get_character_state":
+                from tools.character_state_index import CharacterStateIndex
+
+                return CharacterStateIndex(project_root, novel_id).query(
+                    str(args.get("name") or ""),
+                    field=str(args.get("field") or ""),
+                    lookback=args.get("lookback") or 50,
+                )
             if operation == "create_character":
                 service = NovelApplicationService(project_root)
                 path = service.create_document(
                     kind="character",
                     name=str(args.get("name") or ""),
                     description=str(args.get("description") or ""),
+                    content=str(args.get("content") or ""),
                 )
                 return {
                     "ok": True,
@@ -169,9 +196,25 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
             if operation == "create_outline":
                 content = str(args.get("outline_content") or "")
                 path = project_root / "data" / "novels" / novel_id / "src" / "outline.md"
+                if path.exists():
+                    return {
+                        "ok": False,
+                        "error": "当前大纲已存在，请使用带 revision 和确认流程的增量编辑工具",
+                        "code": "OUTLINE_ALREADY_EXISTS",
+                    }
+                from tools.outline_contract import validate_outline_markdown
+
+                validation_errors = validate_outline_markdown(content, novel_id)
+                if validation_errors:
+                    return {
+                        "ok": False,
+                        "error": "大纲不符合 OpenWrite 四级写入契约",
+                        "code": "INVALID_OUTLINE_STRUCTURE",
+                        "validation_errors": validation_errors,
+                    }
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content, encoding="utf-8")
-                return {"file": str(path), "size": len(content)}
+                return {"ok": True, "file": str(path), "size": len(content)}
             if operation == "get_outline_structure":
                 from tools.outline_tree import build_outline_structure
 
@@ -256,17 +299,103 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
                 }
             if operation == "update_truth_file":
                 from tools.context_schema import normalize_truth_file_key
+                from tools.runtime_state import RuntimeStateError, RuntimeStateManager
                 from tools.truth_manager import TruthFilesManager
 
                 key = normalize_truth_file_key(str(args.get("file_name") or ""))
                 if key not in {"current_state", "ledger", "relationships"}:
-                    return {"ok": False, "error": f"Unknown file: {key}"}
-                manager = TruthFilesManager(project_root, novel_id)
-                truth = manager.load_truth_files()
-                content = str(args.get("content") or "")
-                setattr(truth, key, content)
-                manager.save_truth_files(truth)
-                return {"file": key, "size": len(content)}
+                    return {
+                        "ok": False,
+                        "applied": False,
+                        "code": "INVALID_TRUTH_FILE",
+                        "error": f"Unknown file: {key}",
+                    }
+                content = str(args.get("content") or "").strip()
+                if not content:
+                    return {
+                        "ok": False,
+                        "applied": False,
+                        "code": "EMPTY_RUNTIME_DELTA",
+                        "error": "追加事实不能为空",
+                    }
+                try:
+                    source_revision = int(args.get("source_revision"))
+                except (TypeError, ValueError):
+                    return {
+                        "ok": False,
+                        "applied": False,
+                        "code": "SOURCE_REVISION_REQUIRED",
+                        "error": "必须先读取 get_truth_files 返回的 revision",
+                    }
+
+                truth_manager = TruthFilesManager(project_root, novel_id)
+                truth = truth_manager.load_truth_files()
+                state_manager = RuntimeStateManager(project_root, novel_id)
+                state = state_manager.load(
+                    {
+                        "current_state": truth.current_state,
+                        "ledger": truth.ledger,
+                        "relationships": truth.relationships,
+                    }
+                )
+                chapter_id = str(
+                    args.get("chapter_id") or config.get("current_chapter") or "manual"
+                ).strip()
+                try:
+                    updated = state_manager.apply(
+                        state,
+                        {
+                            "schema_version": 1,
+                            "chapter_id": chapter_id,
+                            "source_revision": source_revision,
+                            "operations": [
+                                {
+                                    "op": "append",
+                                    "collection": key,
+                                    "value": content,
+                                }
+                            ],
+                        },
+                    )
+                except (RuntimeStateError, ValueError) as exc:
+                    return {
+                        "ok": False,
+                        "applied": False,
+                        "conflict": "版本冲突" in str(exc),
+                        "code": "RUNTIME_DELTA_REJECTED",
+                        "error": str(exc),
+                        "revision": state.revision,
+                    }
+
+                revised = state_manager.render(updated)[key]
+                original = str(getattr(truth, key, "") or "")
+                diff = "".join(
+                    difflib.unified_diff(
+                        original.splitlines(keepends=True),
+                        revised.splitlines(keepends=True),
+                        fromfile=f"data/world/{key}.md",
+                        tofile=f"data/world/{key}.md (preview)",
+                    )
+                )
+                result = {
+                    "ok": True,
+                    "applied": bool(args.get("confirm")),
+                    "file": key,
+                    "chapter_id": chapter_id,
+                    "source_revision": state.revision,
+                    "revision": updated.revision,
+                    "operation": "append",
+                    "diff": diff,
+                }
+                if not bool(args.get("confirm")):
+                    result["next_action"] = (
+                        "确认后使用相同 file_name/content/chapter_id/source_revision，"
+                        "并设置 confirm=true"
+                    )
+                    return result
+                state_manager.save_with_projections(updated)
+                result["size"] = len(revised)
+                return result
             if operation == "query_world":
                 from tools.world_query import get_entity, list_entities
 
@@ -275,18 +404,7 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
                     entity = get_entity(novel_id, entity_id, project_root)
                     if not entity:
                         return {"ok": False, "error": f"实体不存在: {entity_id}"}
-                    return {
-                        "entity": {
-                            "id": entity["id"],
-                            "name": entity["name"],
-                            "type": entity["type"],
-                            "subtype": entity["subtype"],
-                            "status": entity["status"],
-                            "description": str(entity["description"] or "")[:200],
-                            "rules": list(entity["rules"] or [])[:5],
-                            "relations": list(entity["relations"] or [])[:10],
-                        }
-                    }
+                    return {"entity": entity}
                 entities = list_entities(
                     novel_id,
                     entity_type=args.get("type"),
@@ -305,7 +423,7 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
                             "target": edge["target"],
                             "description": edge["label"],
                         }
-                        for edge in graph["edges"][:50]
+                        for edge in graph["edges"]
                     ],
                     "total_entities": graph["totals"]["nodes"],
                     "total_relations": graph["totals"]["edges"],
@@ -338,13 +456,19 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
 
                 return edit_world_relations(
                     novel_id,
-                    args.get("relations") if isinstance(args.get("relations"), list) else [],
+                    args.get("relations") if isinstance(args.get("relations"), list) else None,
                     project_root=project_root,
                     confirm=bool(args.get("confirm")),
                     base_revisions=(
                         args.get("base_revisions")
                         if isinstance(args.get("base_revisions"), dict)
                         else {}
+                    ),
+                    preview_token=str(args.get("preview_token") or ""),
+                    preview_tokens=(
+                        args.get("preview_tokens")
+                        if isinstance(args.get("preview_tokens"), list)
+                        else None
                     ),
                 )
             if operation in {
@@ -798,7 +922,8 @@ def _foreshadowing(
     if operation == "validate_foreshadowing":
         valid, errors = manager.validate_dag()
         return {"valid": valid, "errors": errors}
-    nodes = manager.get_pending_nodes(
+    nodes = manager.get_nodes(
+        status=str(args.get("status") or "") or None,
         min_weight=int(args.get("min_weight") or 1),
         layer=str(args.get("layer") or "") or None,
     )
@@ -887,6 +1012,7 @@ def build_tool_executors(project_root: Path) -> dict[str, ToolExecutor]:
         "edit_outline_structure",
         "create_character",
         "get_truth_files",
+        "get_character_state",
         "update_truth_file",
         "create_foreshadowing",
         "list_foreshadowing",

@@ -114,16 +114,29 @@ class GoethePlanningRuntime:
             genre=genre,
             brief=brief,
         )
-        self.story_planning_store.save_foundation_draft(
-            background=foundation.story_bible,
-            foundation=foundation.book_rules,
-        )
+        try:
+            self.story_planning_store.save_foundation_draft(
+                background=foundation.story_bible,
+                foundation=foundation.book_rules,
+                volume_outline=foundation.volume_outline,
+                current_state=foundation.current_state,
+                foreshadowing=foundation.foreshadowing_seed,
+            )
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            return {
+                "ok": False,
+                "blocked": True,
+                "error": "invalid_foundation_draft",
+                "message": f"基础设定辅助草案不符合 OpenWrite 结构：{exc}",
+                "next_action": "generate_foundation_draft",
+            }
 
-        planning_dir = self.story_planning_store.runtime_planning_dir
-        foreshadowing_path = planning_dir / "foreshadowing_draft.md"
-        foreshadowing_path.write_text(foundation.foreshadowing_seed, encoding="utf-8")
-        current_state_draft_path = planning_dir / "current_state_draft.md"
-        current_state_draft_path.write_text(foundation.current_state, encoding="utf-8")
+        state = self.book_state_store.load_or_create()
+        state.stage = BookStage.FOUNDATION
+        state.pending_confirmation = "foundation"
+        state.blocking_reason = ""
+        state.last_agent_action = "generated_foundation_draft"
+        self.book_state_store.save(state)
 
         return {
             "ok": True,
@@ -133,15 +146,28 @@ class GoethePlanningRuntime:
             "genre": genre,
             "background_path": str(self.story_planning_store.background_draft_path),
             "foundation_path": str(self.story_planning_store.foundation_draft_path),
-            "current_state_path": str(current_state_draft_path),
-            "foreshadowing_path": str(foreshadowing_path),
+            "volume_outline_path": str(
+                self.story_planning_store.volume_outline_draft_path
+            ),
+            "current_state_path": str(
+                self.story_planning_store.current_state_draft_path
+            ),
+            "foreshadowing_path": str(
+                self.story_planning_store.foreshadowing_draft_path
+            ),
             "story_bible": foundation.story_bible,
             "book_rules": foundation.book_rules,
             "current_state": foundation.current_state,
             "outline_seed": foundation.volume_outline,
             "foreshadowing_seed": foundation.foreshadowing_seed,
-            "message": "基础设定草案已写入 planning，未修改运行态 current_state。",
+            "message": (
+                "基础设定、卷纲、初始状态与伏笔草案已写入 planning；"
+                "确认前未修改 canonical 资产。"
+            ),
         }
+
+    def confirm_foundation(self) -> OrchestratorResult:
+        return self.orchestrator.confirm_foundation()
 
     def generate_character_draft(self, request_text: str) -> dict[str, Any]:
         name, role = self._parse_character_request(request_text)
@@ -168,24 +194,135 @@ class GoethePlanningRuntime:
             "kind": "character_draft",
             "status": "draft",
             "title": name or role or character_id,
+            "name": name or role or character_id,
+            "tier": role or "普通配角",
+            "summary": f"{name or role or character_id}的待确认角色设定。",
+            "tags": [role] if role else [],
+            "related": [],
             "source": "goethe",
-            "detail_refs": ["background", "relationship", "voice", "special_notes"],
+            "detail_refs": [
+                "基本信息",
+                "背景",
+                "外貌",
+                "性格",
+                "与主角关系",
+                "说话风格",
+                "当前戏剧用途",
+                "特殊能力",
+            ],
         }
         draft_path.write_text(
             compose_toml_document(draft_meta, character_md),
             encoding="utf-8",
         )
+        state = self.book_state_store.load_or_create()
+        state.pending_confirmation = f"character:{character_id}"
+        state.blocking_reason = ""
+        state.last_agent_action = "generated_character_draft"
+        self.book_state_store.save(state)
 
         return {
             "ok": True,
             "blocked": False,
-            "next_action": "revise_character",
+            "next_action": "confirm_character_draft",
             "character_id": character_id,
             "name": name,
             "role": role,
             "genre": genre,
             "draft_path": str(draft_path),
             "content": character_md,
+        }
+
+    def confirm_character_draft(self, character_id: str) -> dict[str, Any]:
+        clean_id = str(character_id or "").strip()
+        if not clean_id or not re.fullmatch(r"[\w\u3400-\u9fff.-]+", clean_id):
+            return {
+                "ok": False,
+                "blocked": True,
+                "error": "invalid_character_id",
+                "message": "character_id 无效。",
+            }
+        draft_path = (
+            self.story_planning_store.runtime_planning_dir
+            / "characters"
+            / f"{clean_id}.md"
+        )
+        if not draft_path.is_file():
+            return {
+                "ok": False,
+                "blocked": True,
+                "error": "missing_character_draft",
+                "message": "未找到待确认角色草案。",
+            }
+
+        from ..frontmatter import parse_toml_front_matter, strip_front_matter_padding
+        from ..shared_documents import normalize_character_document
+
+        draft = draft_path.read_text(encoding="utf-8")
+        meta, body = parse_toml_front_matter(draft)
+        clean_body = strip_front_matter_padding(body if meta else draft).strip()
+        name = str(meta.get("name") or meta.get("title") or "").strip()
+        required_meta = ("id", "name", "tier", "summary", "tags")
+        missing_meta = [key for key in required_meta if meta.get(key) in (None, "")]
+        required_sections = (
+            "基本信息",
+            "背景",
+            "外貌",
+            "性格",
+            "与主角关系",
+            "说话风格",
+            "当前戏剧用途",
+        )
+        headings = {
+            match.group(1).strip()
+            for match in re.finditer(r"^##\s+(.+?)\s*$", clean_body, re.MULTILINE)
+        }
+        missing_sections = [title for title in required_sections if title not in headings]
+        if missing_meta or not name or missing_sections:
+            return {
+                "ok": False,
+                "blocked": True,
+                "error": "incomplete_character_draft",
+                "message": "角色草案结构不完整，不能晋升。",
+                "missing_metadata": missing_meta,
+                "missing_sections": missing_sections,
+            }
+
+        canonical_meta = dict(meta)
+        canonical_meta.pop("kind", None)
+        canonical_meta["status"] = "active"
+        canonical = normalize_character_document(
+            compose_toml_document(canonical_meta, clean_body),
+            fallback_id=clean_id,
+            fallback_name=name,
+        )
+        try:
+            path = self.novel_service.create_document(
+                kind="character",
+                name=name,
+                content=canonical,
+            )
+        except NovelServiceError as exc:
+            return self._service_error("confirm_character_draft", clean_id, exc)
+
+        self.orchestrator._sync_runtime_caches(  # noqa: SLF001
+            sync_outline=False,
+            sync_characters=True,
+        )
+        state = self.book_state_store.load_or_create()
+        if state.pending_confirmation in {"character", f"character:{clean_id}"}:
+            state.pending_confirmation = ""
+        state.blocking_reason = ""
+        state.last_agent_action = "confirmed_character_draft"
+        self.book_state_store.save(state)
+        return {
+            "ok": True,
+            "blocked": False,
+            "next_action": "continue_planning",
+            "character_id": clean_id,
+            "name": name,
+            "path": str(path),
+            "message": f"角色 {name} 已确认并晋升到 src/characters。",
         }
 
     def extract_style_source(self, source_id: str, source: str) -> dict[str, Any]:
@@ -232,6 +369,114 @@ class GoethePlanningRuntime:
             "source_root": str(source_root),
         }
 
+    def list_reference_library(self) -> dict[str, Any]:
+        from ..reference_library import ReferenceLibraryService, default_reference_library_root
+
+        service = ReferenceLibraryService(
+            default_reference_library_root(),
+            project_root=self.project_root,
+            novel_id=self.novel_id,
+        )
+        return {
+            "ok": True,
+            "references": service.list(),
+            "project_style": service.project_style_surface(),
+        }
+
+    def review_reference_source(self, source_id: str) -> dict[str, Any]:
+        from ..reference_library import ReferenceLibraryService, default_reference_library_root
+
+        service = ReferenceLibraryService(
+            default_reference_library_root(),
+            project_root=self.project_root,
+            novel_id=self.novel_id,
+        )
+        try:
+            source = service.status(source_id)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "blocked": True,
+                "error": "reference_source_unavailable",
+                "message": str(exc),
+            }
+        return {
+            "ok": True,
+            "source": source,
+            "project_style": service.project_style_surface(),
+        }
+
+    def review_reference_profile(self, profile_id: str) -> dict[str, Any]:
+        from ..reference_library import ReferenceLibraryService, default_reference_library_root
+
+        service = ReferenceLibraryService(
+            default_reference_library_root(),
+            project_root=self.project_root,
+            novel_id=self.novel_id,
+        )
+        try:
+            profile = service.profile(profile_id)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "blocked": True,
+                "error": "reference_profile_unavailable",
+                "message": str(exc),
+            }
+        return {
+            "ok": True,
+            "profile": profile.model_dump(mode="json"),
+            "project_style": service.project_style_surface(),
+        }
+
+    def preview_reference_adoption(
+        self,
+        profile_id: str,
+        selections: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        from ..reference_library import ReferenceLibraryService, default_reference_library_root
+
+        service = ReferenceLibraryService(
+            default_reference_library_root(),
+            project_root=self.project_root,
+            novel_id=self.novel_id,
+        )
+        try:
+            preview = service.preview_adoption(profile_id, selections)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "blocked": True,
+                "error": "reference_adoption_preview_failed",
+                "message": str(exc),
+            }
+        return {"ok": True, "preview": preview.model_dump(mode="json")}
+
+    def apply_reference_adoption(self, preview_id: str, *, confirm: bool) -> dict[str, Any]:
+        from ..reference_library import ReferenceLibraryService, default_reference_library_root
+
+        if not confirm:
+            return {
+                "ok": False,
+                "blocked": True,
+                "error": "confirmation_required",
+                "message": "应用参考采纳预览需要用户明确确认。",
+            }
+        service = ReferenceLibraryService(
+            default_reference_library_root(),
+            project_root=self.project_root,
+            novel_id=self.novel_id,
+        )
+        try:
+            return service.apply_adoption(preview_id, confirm=True)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "blocked": True,
+                "error": "reference_adoption_apply_failed",
+                "message": str(exc),
+            }
+
     def prepare_dante_handoff(self) -> dict[str, Any]:
         readiness = self._evaluate_handoff_readiness()
         if readiness["missing_items"]:
@@ -242,6 +487,8 @@ class GoethePlanningRuntime:
                 "message": "Goethe 资产尚未满足切换到 Dante 的条件。",
                 "missing_items": readiness["missing_items"],
                 "required_assets": readiness["required_assets"],
+                "outline_errors": readiness.get("outline_errors", []),
+                "persona_errors": readiness.get("persona_errors", []),
                 "next_action": "continue_planning",
             }
 
@@ -441,15 +688,17 @@ class GoethePlanningRuntime:
         foundation_body = str(foundation_doc.get("body", "")).strip()
         foundation_ready = bool(background_body and foundation_body)
         outline_text = self.story_planning_store.read_outline_source()
-        outline_ready = bool(outline_text.strip()) and not (
-            self.story_planning_store.outline_source_is_placeholder()
-        )
+        outline_errors = self._outline_readiness_errors(outline_text)
+        outline_ready = not outline_errors
         outline_pending = self.story_planning_store.outline_edit_state_path.exists()
-        persona_paths = [
-            item["path"]
-            for item in self.story_planning_store.list_character_documents()
+        persona_documents = self.story_planning_store.list_character_documents()
+        persona_paths = [item["path"] for item in persona_documents]
+        persona_errors = [
+            error
+            for item in persona_documents
+            for error in self._character_readiness_errors(Path(item["path"]))
         ]
-        persona_ready = bool(persona_paths)
+        persona_ready = bool(persona_paths) and not persona_errors
 
         if not ideation_ready:
             missing_items.append("ideation_summary")
@@ -466,7 +715,49 @@ class GoethePlanningRuntime:
             "required_assets": required_assets,
             "missing_items": missing_items,
             "persona_paths": persona_paths,
+            "outline_errors": outline_errors,
+            "persona_errors": persona_errors,
         }
+
+    def _outline_readiness_errors(self, outline_text: str) -> list[str]:
+        if not outline_text.strip() or self.story_planning_store.outline_source_is_placeholder():
+            return ["大纲缺失或仍是占位模板"]
+        from ..outline_contract import validate_outline_markdown
+
+        return validate_outline_markdown(outline_text, self.novel_id)
+
+    @staticmethod
+    def _character_readiness_errors(path: Path) -> list[str]:
+        from ..frontmatter import parse_toml_front_matter, strip_front_matter_padding
+
+        text = path.read_text(encoding="utf-8")
+        meta, body = parse_toml_front_matter(text)
+        errors: list[str] = []
+        missing_meta = [
+            key for key in ("id", "name", "tier", "summary", "tags")
+            if meta.get(key) in (None, "")
+        ]
+        if missing_meta:
+            errors.append(f"{path.name} front matter 缺少: {', '.join(missing_meta)}")
+        clean_body = strip_front_matter_padding(body if meta else text)
+        headings = {
+            match.group(1).strip()
+            for match in re.finditer(r"^##\s+(.+?)\s*$", clean_body, re.MULTILINE)
+        }
+        required_groups = (
+            ("背景",),
+            ("外貌", "外貌特征"),
+            ("性格", "性格特点"),
+            ("与主角关系", "关系"),
+            ("说话风格", "语言风格"),
+            ("当前戏剧用途", "戏剧用途"),
+        )
+        missing_sections = [
+            "/".join(group) for group in required_groups if not headings.intersection(group)
+        ]
+        if missing_sections:
+            errors.append(f"{path.name} 正文缺少: {', '.join(missing_sections)}")
+        return errors
 
     def _build_handoff_summary(self, readiness: dict[str, Any]) -> str:
         persona_paths = readiness.get("persona_paths", [])
@@ -511,10 +802,24 @@ class GoetheActionAdapter:
             self.runtime.generate_foundation_draft(request_text),
         )
 
+    def confirm_foundation(self) -> dict[str, Any]:
+        return self._wrap(
+            "confirm_foundation",
+            self.runtime.confirm_foundation(),
+        )
+
     def generate_character_draft(self, request_text: str) -> dict[str, Any]:
         return self._wrap(
             "generate_character_draft",
             self.runtime.generate_character_draft(request_text),
+        )
+
+    def confirm_character_draft(self, character_id: str) -> dict[str, Any]:
+        if not str(character_id or "").strip():
+            return self._missing_required("confirm_character_draft", "character_id")
+        return self._wrap(
+            "confirm_character_draft",
+            self.runtime.confirm_character_draft(character_id),
         )
 
     def generate_outline_draft(self, request_text: str) -> dict[str, Any]:
@@ -600,6 +905,49 @@ class GoetheActionAdapter:
         return self._wrap(
             "promote_source_pack",
             self.runtime.promote_source_pack(source_id, target=target or "all"),
+        )
+
+    def list_reference_library(self) -> dict[str, Any]:
+        return self._wrap(
+            "list_reference_library", self.runtime.list_reference_library()
+        )
+
+    def review_reference_source(self, source_id: str) -> dict[str, Any]:
+        if not str(source_id or "").strip():
+            return self._missing_required("review_reference_source", "source_id")
+        return self._wrap(
+            "review_reference_source",
+            self.runtime.review_reference_source(source_id),
+        )
+
+    def review_reference_profile(self, profile_id: str) -> dict[str, Any]:
+        if not str(profile_id or "").strip():
+            return self._missing_required("review_reference_profile", "profile_id")
+        return self._wrap(
+            "review_reference_profile",
+            self.runtime.review_reference_profile(profile_id),
+        )
+
+    def preview_reference_adoption(
+        self, profile_id: str, selections: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        if not str(profile_id or "").strip():
+            return self._missing_required("preview_reference_adoption", "profile_id")
+        if not selections:
+            return self._missing_required("preview_reference_adoption", "selections")
+        return self._wrap(
+            "preview_reference_adoption",
+            self.runtime.preview_reference_adoption(profile_id, selections),
+        )
+
+    def apply_reference_adoption(
+        self, preview_id: str, *, confirm: bool
+    ) -> dict[str, Any]:
+        if not str(preview_id or "").strip():
+            return self._missing_required("apply_reference_adoption", "preview_id")
+        return self._wrap(
+            "apply_reference_adoption",
+            self.runtime.apply_reference_adoption(preview_id, confirm=confirm),
         )
 
     def prepare_dante_handoff(self) -> dict[str, Any]:

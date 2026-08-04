@@ -824,6 +824,33 @@ def test_dante_and_goethe_cold_start_prompts_include_onboarding(tmp_path: Path):
     assert "首次冷启动" in DEFAULT_GOETHE_SYSTEM_PROMPT
 
 
+def test_dante_redirects_manuscript_deletion_to_manual_studio_control(tmp_path: Path):
+    from tools.agent.dante import DanteChatAgent
+    from tools.agent.manuscript_safety import manual_chapter_delete_guidance
+    from tools.goethe import GoetheChatAgent
+    from tools.init_project import init_project
+
+    init_project(tmp_path, "demo", "雾城来信")
+    react_agent = FakeReActAgent()
+    dante = DanteChatAgent(tmp_path, "demo", react_agent=react_agent)
+
+    response = dante.respond("现在的剧情不满意，帮我把现有章节都删掉吧，我重写大纲")
+
+    assert "不会直接删除正文章节" in response
+    assert "删除正文" in response
+    assert "从最新章开始依次向前删除" in response
+    assert react_agent.instructions == []
+    assert dante.session_state is not None
+    assert dante.session_state.last_action == "manual_chapter_delete_guidance"
+    assert manual_chapter_delete_guidance("删除大纲里的第三章") == ""
+
+    goethe_react = FakeReActAgent()
+    goethe = GoetheChatAgent(tmp_path, "demo", react_agent=goethe_react)
+    goethe_response = goethe.respond("请清空所有正文，我要重写")
+    assert "删除正文" in goethe_response
+    assert goethe_react.instructions == []
+
+
 def test_goethe_passes_project_title_and_id_to_react_context(tmp_path: Path):
     from tools.goethe import GoetheChatAgent
     from tools.init_project import init_project

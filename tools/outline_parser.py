@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 import re
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Optional, Tuple
+
 from models.outline import (
     OutlineHierarchy,
     OutlineNode,
@@ -294,6 +295,9 @@ class OutlineMdParser:
             node.involved_settings.extend(settings)
 
         # 章纲字段
+        elif key_lower in ("本章目标", "写作目标", "goals", "目标"):
+            goals = [g.strip() for g in re.split(r"[，,、]", value) if g.strip()]
+            node.goals.extend(goals)
         elif key_lower in ("预估字数", "estimated_words", "字数"):
             try:
                 node.estimated_words = int(value.replace(",", ""))
@@ -306,12 +310,10 @@ class OutlineMdParser:
         elif key_lower in ("情感弧线", "emotional_arc", "情感"):
             node.emotional_arc = value
         elif key_lower in ("节拍", "beats"):
-            # 解析逗号分隔的节拍
-            beats = [b.strip() for b in value.split(",") if b.strip()]
+            beats = [b.strip() for b in re.split(r"[，,、]", value) if b.strip()]
             node.beats.extend(beats)
         elif key_lower in ("悬念", "hooks"):
-            # 解析逗号分隔的悬念
-            hooks = [h.strip() for h in value.split(",") if h.strip()]
+            hooks = [h.strip() for h in re.split(r"[，,、]", value) if h.strip()]
             node.hooks.extend(hooks)
 
     def _extract_section_text(

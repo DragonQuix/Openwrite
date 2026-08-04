@@ -9,17 +9,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Dict, Optional, List
-import re
+from typing import Dict, List, Optional
 
 from .base import AgentContext
 from .writer import WriterAgent, WritingResult
 from .reviewer import ReviewerAgent, ReviewResult
 from ..chapter_assembler import ChapterAssemblerV2, ChapterAssemblyPacket, ROLE_SYSTEM_PROMPTS
-from ..context_schema import normalize_context_payload, normalize_truth_file_key
-from ..shared_documents import normalize_world_entity_document
+from ..context_schema import normalize_truth_file_key
 from ..truth_manager import TruthFilesManager
 from ..agent_policy import get_default_agent_specs
 
@@ -54,51 +52,76 @@ class MultiAgentDirector:
     def assemble_packet(self, chapter_id: str) -> ChapterAssemblyPacket:
         return self.assembler.assemble(chapter_id)
 
-    async def run(self, chapter_id: str, temperature: float = 0.7, run_review: bool = True) -> MultiAgentResult:
+    async def run(
+        self,
+        chapter_id: str,
+        temperature: float = 0.7,
+        run_review: bool = True,
+        *,
+        guidance: str = "",
+        target_words: int | None = None,
+        dimensions: list[int] | None = None,
+        strict: bool = False,
+    ) -> MultiAgentResult:
         self._assert_permission("context_engineer", "packet:build")
         packet = self.assemble_packet(chapter_id)
+        from ..chapter_pipeline import build_review_payload, build_writer_payload
+        from ..context_builder import ContextBuilder
 
-        writing_context = normalize_context_payload(
-            {
-                "target_words": 4000,
-                "chapter_goals": ["遵循本章戏剧位置", "保持人物连续性", "承接上一章"],
-                "outline": packet.to_markdown(),
-                "style_profile": "\n\n".join(packet.style_documents.values())[:6000],
-                "active_characters": [
-                    {"name": k, "description": v[:1200]} for k, v in packet.character_documents.items()
-                ],
-                "current_state": packet.current_state[:1200],
-                "ledger": packet.ledger[:1200],
-                "relationships": packet.relationships[:1200],
-                "recent_chapters": packet.previous_chapter_content,
-                "dramatic_context": self._extract_dramatic_context(packet),
-            },
-            include_aliases=False,
+        generation_context = ContextBuilder(
+            Path(self.ctx.project_root), self.novel_id
+        ).build_generation_context(chapter_id)
+        truth = self.truth_manager.load_truth_files()
+        writing_context = build_writer_payload(
+            context=generation_context,
+            truth=truth,
+            packet=asdict(packet),
+            guidance=guidance,
+            target_words=int(
+                target_words
+                or packet.target_words
+                or generation_context.target_words
+                or 6000
+            ),
         )
 
         chapter_number = self._parse_chapter_index(chapter_id)
+        effective_target = int(writing_context.get("target_words") or 6000)
         self._assert_permission("writer", "manuscript:draft")
         draft = await self.writer.write_chapter(
             context=writing_context,
             chapter_number=chapter_number,
             temperature=temperature,
-            target_words=4000,
+            target_words=effective_target,
         )
 
         review = None
         if run_review:
             self._assert_permission("continuity_reviewer", "review:report")
+            review_context = build_review_payload(
+                asdict(packet),
+                context=generation_context,
+            )
+            review_context["target_words"] = effective_target
             review = await self.reviewer.review(
                 content=draft.content,
-                context={
-                    "character_profiles": "\n\n".join(packet.character_documents.values())[:4000],
-                    "current_state": packet.current_state[:1000],
-                    "relationships": packet.relationships[:1000],
-                },
+                context=review_context,
+                dimensions=dimensions,
+                strict=strict,
             )
 
-        applied_updates = self._apply_state_updates(draft.state_updates)
-        new_concepts = self._curate_new_concepts(draft.content, packet.concept_documents)
+        known_entities = [
+            str(item.get("name") or "").strip()
+            for item in writing_context.get("active_characters", [])
+            if isinstance(item, dict) and str(item.get("name") or "").strip()
+        ]
+        applied_updates = self._apply_state_settlement(
+            draft.state_delta,
+            draft.state_updates,
+            chapter_id=chapter_id,
+            known_entities=known_entities,
+        )
+        new_concepts = self._collect_proposed_concepts(draft.state_delta)
 
         return MultiAgentResult(
             packet=packet,
@@ -109,12 +132,19 @@ class MultiAgentDirector:
             new_concepts=new_concepts,
         )
 
-    def _apply_state_updates(self, updates: Dict[str, str]) -> Dict[str, str]:
+    def _apply_state_settlement(
+        self,
+        state_delta: dict,
+        updates: Dict[str, str],
+        *,
+        chapter_id: str,
+        known_entities: List[str],
+    ) -> Dict[str, str]:
         if not updates:
-            return {}
-        self._assert_permission("state_settler", "world:current_state")
+            if not state_delta:
+                return {}
+        self._assert_permission("state_settler", "runtime:delta")
 
-        truth = self.truth_manager.load_truth_files()
         writable: Dict[str, str] = {}
         file_map = {
             "current_state": "current_state",
@@ -130,42 +160,49 @@ class MultiAgentDirector:
             if attr:
                 writable[attr] = value
 
-        if writable:
-            self.truth_manager.update_truth_files(truth, writable)
+        from ..chapter_pipeline import apply_runtime_delta_with_fallback
+
+        apply_runtime_delta_with_fallback(
+            self.truth_manager,
+            state_delta,
+            writable,
+            chapter_id=chapter_id,
+            known_entities=known_entities,
+        )
         return writable
 
-    def _curate_new_concepts(self, content: str, existing_docs: Dict[str, str]) -> List[str]:
-        self._assert_permission("concept_curator", "src:world/entities")
-        concept_hits = re.findall(r"(?:新概念|概念)[:：]\s*([A-Za-z0-9_\-\u4e00-\u9fff]{2,32})", content)
-        if not concept_hits:
-            return []
+    def _apply_state_updates(
+        self,
+        updates: Dict[str, str],
+        *,
+        chapter_id: str = "ch_000",
+    ) -> Dict[str, str]:
+        """Compatibility wrapper that persists legacy updates additively."""
 
-        existing_keys = set(existing_docs.keys())
-        entities_dir = Path(self.ctx.project_root) / "data" / "novels" / self.novel_id / "src" / "world" / "entities"
-        entities_dir.mkdir(parents=True, exist_ok=True)
+        return self._apply_state_settlement(
+            {},
+            updates,
+            chapter_id=chapter_id,
+            known_entities=[],
+        )
 
-        created: List[str] = []
-        for concept in concept_hits:
-            slug = concept.strip().lower().replace(" ", "_")
-            key = f"entity.{slug}"
-            if key in existing_keys:
+    @staticmethod
+    def _collect_proposed_concepts(state_delta: dict) -> List[str]:
+        names: List[str] = []
+        operations = (
+            state_delta.get("operations", [])
+            if isinstance(state_delta, dict)
+            else []
+        )
+        for operation in operations:
+            if not isinstance(operation, dict) or operation.get("collection") != "proposed_entities":
                 continue
-            target = entities_dir / f"{slug}.md"
-            if target.exists():
-                continue
-            target.write_text(
-                normalize_world_entity_document(
-                    "",
-                    fallback_id=slug,
-                    fallback_name=concept,
-                    fallback_summary=f"章节初稿中首次出现的概念“{concept}”，待补充规则、特征与关联。",
-                    default_type="concept",
-                    default_subtype="emergent",
-                ),
-                encoding="utf-8",
-            )
-            created.append(concept)
-        return created
+            value = operation.get("value")
+            if isinstance(value, dict):
+                name = str(value.get("name") or operation.get("target") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+        return names
 
     def _assert_permission(self, agent_name: str, action: str) -> None:
         spec = self.agent_specs.get(agent_name)

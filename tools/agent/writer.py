@@ -24,6 +24,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..llm import Message
+from ..runtime_state_contract import RUNTIME_DELTA_PROMPT_CONTRACT
 from .base import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -166,6 +167,7 @@ class WriterAgent(BaseAgent):
             response.content,
             chapter_number,
             response.usage if response.usage else {},
+            target_words=target_words,
         )
 
     def _build_creative_system_prompt(self, context: dict) -> str:
@@ -239,6 +241,17 @@ class WriterAgent(BaseAgent):
             goals = "\n".join(f"- {g}" for g in context["chapter_goals"])
             parts.append(f"## 章节目标\n{goals}\n")
 
+        if context.get("chapter_beats"):
+            beats = "\n".join(f"- {item}" for item in context["chapter_beats"])
+            parts.append(f"## 章内节拍（按顺序落实）\n{beats}\n")
+
+        if context.get("chapter_hooks"):
+            hooks = "\n".join(f"- {item}" for item in context["chapter_hooks"])
+            parts.append(f"## 章末悬念（正文结尾必须承接）\n{hooks}\n")
+
+        if context.get("emotion_arc"):
+            parts.append(f"## 章内情感弧线\n{context['emotion_arc']}\n")
+
         # 戏剧位置
         if context.get("dramatic_context"):
             parts.append(f"## 戏剧位置\n{context['dramatic_context']}\n")
@@ -252,21 +265,44 @@ class WriterAgent(BaseAgent):
             parts.append(f"## 本章出场角色\n{chars}\n")
 
         # 伏笔
-        if context.get("foreshadowing"):
+        if context.get("foreshadowing_summary"):
+            parts.append(
+                "## 规范伏笔摘要（只推进与本章相关的条目）\n"
+                f"{context['foreshadowing_summary']}\n"
+            )
+        elif context.get("foreshadowing"):
             pending = context["foreshadowing"].get("pending", [])
             if pending:
                 hooks = "\n".join(f"- {h['content']}" for h in pending[:5])
                 parts.append(f"## 待回收伏笔（选择性埋设）\n{hooks}\n")
 
         # 真相文件
+        if context.get("character_states"):
+            parts.append(
+                "## 人物当前状态（内联批注）\n"
+                f"{context['character_states']}\n"
+            )
+
         if context.get("current_state"):
-            parts.append(f"## 世界当前状态\n{context['current_state'][:500]}\n")
+            parts.append(f"## 世界当前状态\n{context['current_state']}\n")
+
+        if context.get("ledger"):
+            parts.append(f"## 资源账本\n{context['ledger']}\n")
+
+        if context.get("relationships"):
+            parts.append(f"## 人物关系\n{context['relationships']}\n")
 
         if context.get("recent_chapters"):
-            parts.append(f"## 前文内容\n{context['recent_chapters'][:1000]}\n")
+            parts.append(f"## 前文内容\n{context['recent_chapters']}\n")
+
+        if context.get("semantic_references"):
+            parts.append(
+                "## 远程相关片段（语义召回，仅供参考，不覆盖人物状态和正典事实）\n"
+                f"{context['semantic_references']}\n"
+            )
 
         if context.get("chapter_summaries"):
-            parts.append(f"## 历史章节记忆\n{context['chapter_summaries'][:4000]}\n")
+            parts.append(f"## 历史章节记忆\n{context['chapter_summaries']}\n")
 
         # 外部上下文
         if context.get("external_context"):
@@ -274,7 +310,14 @@ class WriterAgent(BaseAgent):
 
         return "\n".join(parts)
 
-    def _parse_creative_output(self, content: str, chapter_number: int, usage: dict) -> dict:
+    def _parse_creative_output(
+        self,
+        content: str,
+        chapter_number: int,
+        usage: dict,
+        *,
+        target_words: int = 0,
+    ) -> dict:
         """解析创意写作输出"""
         if not str(content or "").strip():
             raise RuntimeError("empty model reply")
@@ -296,6 +339,17 @@ class WriterAgent(BaseAgent):
         # 计算字数（中文字符数）
         chinese_chars = len(re.findall(r"[\u4e00-\u9fff]", body))
         word_count = chinese_chars
+        if target_words > 0:
+            minimum_words = max(1, int(target_words * 0.8))
+            maximum_words = max(minimum_words, int(target_words * 1.2))
+            if word_count < minimum_words or word_count > maximum_words:
+                from ..llm.response import ProviderResponseError
+
+                raise ProviderResponseError(
+                    "CHAPTER_LENGTH_OUT_OF_RANGE",
+                    f"正文约 {word_count} 个中文字符，不在目标区间 "
+                    f"{minimum_words}-{maximum_words} 内",
+                )
 
         return {
             "title": title,
@@ -372,7 +426,7 @@ class WriterAgent(BaseAgent):
 
 章节标题：{title}
 章节内容：
-{content[:3000]}
+{content}
 
 请提取所有关键事实："""
 
@@ -396,7 +450,7 @@ class WriterAgent(BaseAgent):
         observations: str,
     ) -> dict:
         """2b: 结算者 - 将观察结果合并到真相文件"""
-        system_prompt = """你是一位细心的编辑，负责将章节中的变化合并到世界观状态中。
+        system_prompt = f"""你是一位细心的编辑，负责将章节中的变化合并到世界观状态中。
 
 根据观察结果，更新以下真相文件：
 1. current_state.md - 世界当前状态
@@ -423,9 +477,7 @@ state_delta:
     # resources / relationship_states / open_threads / foreshadowing_refs /
     # timeline / proposed_entities
     # current_state / ledger / relationships 的 value 使用字符串。
-    # 其余集合（timeline 除外）的 value 必须是对象，示例：
-    # value: {title: "待确认线索", status: open, detail: "本章新增事实"}
-    # 不确定对象结构时，不要输出该 operation，只写下方 state_updates。
+    # 对象 collection 的 value 必须严格遵守下方 runtime-delta-v1 契约。
 state_updates:
   current_state: |
     [旧客户端兼容字段：只写本章新增事实，不要重写整份文件]
@@ -442,7 +494,9 @@ chapter_summary: |
 
 注意：对外文档与公共接口以 current_state / ledger / relationships 为准，
 历史别名仅用于兼容旧链路输入。
-```"""
+```
+
+{RUNTIME_DELTA_PROMPT_CONTRACT}"""
 
         user_prompt = f"""根据以下观察结果，更新真相文件：
 
@@ -477,24 +531,30 @@ chapter_summary: |
         parts = []
 
         if context.get("current_state"):
-            parts.append(f"## current_state.md\n{context['current_state'][:500]}\n")
+            parts.append(f"## current_state.md\n{context['current_state']}\n")
+
+        if context.get("character_states"):
+            parts.append(
+                "## 人物当前状态（内联批注，只读）\n"
+                f"{context['character_states']}\n"
+            )
 
         ledger_text = context.get("ledger") or context.get("particle_ledger")
         if ledger_text:
-            parts.append(f"## ledger.md\n{ledger_text[:300]}\n")
+            parts.append(f"## ledger.md\n{ledger_text}\n")
 
         relationships_text = context.get("relationships") or context.get("character_matrix")
         if relationships_text:
-            parts.append(f"## relationships.md\n{relationships_text[:300]}\n")
+            parts.append(f"## relationships.md\n{relationships_text}\n")
 
         hooks_text = context.get("foreshadowing_summary") or context.get("pending_hooks")
         if hooks_text:
-            parts.append(f"## foreshadowing/dag.yaml（摘要）\n{hooks_text[:300]}\n")
+            parts.append(f"## foreshadowing/dag.yaml（摘要）\n{hooks_text}\n")
 
         if context.get("chapter_summaries"):
             parts.append(
                 "## hierarchy.yaml / compressed/*.md（摘要）\n"
-                f"{context['chapter_summaries'][:500]}\n"
+                f"{context['chapter_summaries']}\n"
             )
 
         if context.get("active_characters"):
@@ -505,11 +565,11 @@ chapter_summary: |
                     description = str(item.get("description") or "").strip()
                     character_parts.append(f"### {name}\n{description}")
                 elif hasattr(item, "to_context_text"):
-                    character_parts.append(item.to_context_text(max_chars=1200))
+                    character_parts.append(item.to_context_text())
             if character_parts:
                 parts.append(
                     "## 角色正典（不得改写身份与关系）\n"
-                    + "\n\n".join(character_parts)[:4000]
+                    + "\n\n".join(character_parts)
                     + "\n"
                 )
 
@@ -580,6 +640,16 @@ chapter_summary: |
                     "MALFORMED_STRUCTURED_OUTPUT",
                     "模型返回的状态增量不符合 runtime-delta-v1",
                 ) from delta_error
+            elif (
+                result["state_delta"].get("operations")
+                and not result["state_updates"]
+            ):
+                from ..llm.response import ProviderResponseError
+
+                raise ProviderResponseError(
+                    "MALFORMED_STRUCTURED_OUTPUT",
+                    "state_delta 必须同时提供追加式 state_updates 安全回退",
+                )
 
         if not result["chapter_summary"] and observations:
             compact = " ".join(

@@ -70,11 +70,11 @@ def test_agent_direct_tools_do_not_call_cli_private_functions(monkeypatch, tmp_p
     assert context["chapter_id"] == "ch_001"
     assert (
         context["compression"]["message_budget"]["strategy"]
-        == "tiered-hierarchical-v2"
+        == "staircase-proportional-v3"
     )
     assert (
         context["compression"]["packet_documents"]["strategy"]
-        == "hierarchical-budget-v1"
+        == "staircase-proportional-v3"
     )
     assert executors["list_chapters"]({}) == {"chapters": []}
     assert "current_state" in executors["get_truth_files"]({})
@@ -167,6 +167,150 @@ def test_agent_direct_tools_do_not_call_cli_private_functions(monkeypatch, tmp_p
     assert relation_source.read_text(encoding="utf-8") == original
 
 
+def test_relation_preview_tokens_survive_turns_and_replace_regenerated_arguments():
+    from tools.agent.confirmation import (
+        RELATION_PREVIEW_TOKENS_KEY,
+        remember_relation_previews,
+    )
+
+    memory: dict[str, object] = {}
+    persisted: list[dict[str, object]] = []
+    instruction = {"text": "批量预览这些关系"}
+    calls: list[dict] = []
+    preview_tokens = iter(("a" * 24, "b" * 24))
+
+    def executor(args: dict) -> dict:
+        calls.append(args)
+        if args.get("confirm"):
+            return {"ok": True, "applied": True}
+        return {"ok": True, "applied": False, "preview_token": next(preview_tokens)}
+
+    wrapped = remember_relation_previews(
+        {"edit_world_relations": executor},
+        working_memory=lambda: memory,
+        persist=lambda: persisted.append(dict(memory)),
+        instruction=lambda: instruction["text"],
+    )["edit_world_relations"]
+
+    wrapped({"relations": [{"source_id": "hero", "target_id": "city"}]})
+    wrapped({"relations": [{"source_id": "hero", "target_id": "ability"}]})
+    assert memory[RELATION_PREVIEW_TOKENS_KEY] == ["a" * 24, "b" * 24]
+
+    instruction["text"] = "确认应用"
+    result = wrapped(
+        {
+            "relations": [{"source_id": "模型重新生成的错字", "target_id": "city"}],
+            "confirm": True,
+        }
+    )
+
+    assert result["applied"] is True
+    assert calls[-1] == {"confirm": True, "preview_tokens": ["a" * 24, "b" * 24]}
+    assert RELATION_PREVIEW_TOKENS_KEY not in memory
+    assert len(persisted) == 3
+
+
+def test_truth_tools_return_complete_documents_and_use_revisioned_append_preview(
+    tmp_path: Path,
+):
+    from tools.init_project import init_project
+    from tools.truth_manager import TruthFiles, TruthFilesManager
+
+    init_project(tmp_path, "demo")
+    long_state = "既有事实。" + "甲" * 900
+    manager = TruthFilesManager(tmp_path, "demo")
+    manager.save_truth_files(
+        TruthFiles(
+            current_state=long_state,
+            ledger="旧账本。",
+            relationships="旧关系。",
+        )
+    )
+    executors = build_tool_executors(tmp_path)
+
+    snapshot = executors["get_truth_files"]({})
+    assert snapshot["schema_version"] == 1
+    assert snapshot["revision"] == 0
+    assert snapshot["current_state"] == long_state
+
+    args = {
+        "file_name": "current_state",
+        "content": "本章新增事实。",
+        "chapter_id": "ch_007",
+        "source_revision": snapshot["revision"],
+    }
+    preview = executors["update_truth_file"](args)
+    assert preview["ok"] is True
+    assert preview["applied"] is False
+    assert preview["operation"] == "append"
+    assert "+本章新增事实。" in preview["diff"]
+    assert manager.load_truth_files().current_state == long_state
+    assert not (manager.world_dir / "runtime_state.json").exists()
+
+    applied = executors["update_truth_file"]({**args, "confirm": True})
+    assert applied["ok"] is True
+    assert applied["applied"] is True
+    assert applied["revision"] == 1
+    updated = manager.load_truth_files().current_state
+    assert long_state in updated
+    assert "本章新增事实。" in updated
+
+    conflict = executors["update_truth_file"]({**args, "confirm": True})
+    assert conflict["ok"] is False
+    assert conflict["conflict"] is True
+
+
+def test_world_read_tools_do_not_silently_truncate_details_or_relations(
+    monkeypatch,
+    tmp_path: Path,
+):
+    import tools.world_query as world_query
+    from tools.init_project import init_project
+
+    init_project(tmp_path, "demo")
+    description = "完整描述" * 100
+    rules = [f"规则{i}" for i in range(12)]
+    relations = [{"target": f"entity_{i}", "description": "关联"} for i in range(18)]
+    entity = {
+        "id": "entity_0",
+        "name": "完整实体",
+        "type": "地点",
+        "subtype": "遗迹",
+        "status": "active",
+        "description": description,
+        "rules": rules,
+        "features": ["特征"],
+        "relations": relations,
+        "tags": [],
+        "detail_refs": [],
+        "extra_sections": {"历史": "完整段落"},
+        "file": "entity_0.md",
+    }
+    edges = [
+        {"source": "entity_0", "target": f"entity_{i}", "label": f"关系{i}"}
+        for i in range(75)
+    ]
+    monkeypatch.setattr(world_query, "get_entity", lambda *args, **kwargs: entity)
+    monkeypatch.setattr(
+        world_query,
+        "get_relations_topology",
+        lambda *args, **kwargs: {
+            "nodes": [{"id": "entity_0"}],
+            "edges": edges,
+            "totals": {"nodes": 1, "edges": len(edges)},
+        },
+    )
+    executors = build_tool_executors(tmp_path)
+
+    detail = executors["query_world"]({"entity_id": "entity_0"})["entity"]
+    graph = executors["get_world_relations"]({})
+
+    assert detail["description"] == description
+    assert detail["rules"] == rules
+    assert detail["relations"] == relations
+    assert len(graph["relations"]) == 75
+
+
 def test_orchestrator_toolkit_excludes_write_tools():
     assert "get_status" in ORCHESTRATOR_TOOLKIT
     assert "write_chapter" not in ORCHESTRATOR_TOOLKIT
@@ -180,6 +324,7 @@ def test_writing_toolkit_stays_small():
         "get_context",
         "list_chapters",
         "get_truth_files",
+        "get_character_state",
     }
 
 
@@ -193,6 +338,7 @@ def test_dante_direct_toolkit_exposes_only_light_tools():
         "edit_project_document",
         "list_chapters",
         "get_truth_files",
+        "get_character_state",
         "create_character",
         "query_world",
         "get_world_relations",
@@ -489,8 +635,7 @@ summary = "沈烛在回响中逐渐掌握的感知能力。"
 
     relation_applied = executors["edit_world_relations"](
         {
-            "relations": relations,
-            "base_revisions": relation_preview["source_revisions"],
+            "preview_token": relation_preview["preview_token"],
             "confirm": True,
         }
     )
@@ -499,6 +644,44 @@ summary = "沈烛在回响中逐渐掌握的感知能力。"
     updated = hero.read_text(encoding="utf-8")
     assert 'target = "birth_city"' in updated
     assert 'target = "echo_ability"' in updated
+
+
+def test_list_chapters_returns_canonical_path_for_document_reads(tmp_path: Path):
+    from tools.init_project import init_project
+
+    init_project(tmp_path, "demo")
+    chapter = (
+        tmp_path
+        / "data"
+        / "novels"
+        / "demo"
+        / "data"
+        / "manuscript"
+        / "arc_001"
+        / "ch_007.md"
+    )
+    chapter.parent.mkdir(parents=True, exist_ok=True)
+    chapter.write_text("# 第七章：回声归来\n\n钟声越过空城。\n", encoding="utf-8")
+
+    executors = build_tool_executors(tmp_path)
+    listed = executors["list_chapters"]({})
+
+    assert listed == {
+        "chapters": [
+            {
+                "number": 7,
+                "chapter_id": "ch_007",
+                "title": "第七章：回声归来",
+                "path": "data/manuscript/arc_001/ch_007.md",
+            }
+        ]
+    }
+    read = executors["read_project_document"](
+        {"path": listed["chapters"][0]["path"]}
+    )
+    assert read["ok"] is True
+    assert read["path"] == "data/manuscript/arc_001/ch_007.md"
+    assert "钟声越过空城" in read["content"]
 
 
 def test_agent_runtime_workflow_and_arc_compression_tools_use_current_apis(

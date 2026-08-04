@@ -263,7 +263,12 @@ class NovelApplicationService:
         }
 
     def create_document(
-        self, *, kind: str, name: str, description: str = ""
+        self,
+        *,
+        kind: str,
+        name: str,
+        description: str = "",
+        content: str = "",
     ) -> Path:
         from tools.shared_documents import (
             normalize_character_document,
@@ -288,7 +293,7 @@ class NovelApplicationService:
         if kind == "character":
             path = self.novel_root / "src" / "characters" / f"{safe_name}.md"
             content = normalize_character_document(
-                "",
+                content,
                 fallback_id=safe_name,
                 fallback_name=clean_name,
                 fallback_description=description,
@@ -296,7 +301,7 @@ class NovelApplicationService:
         else:
             path = self.novel_root / "src" / "world" / "entities" / f"{safe_name}.md"
             content = normalize_world_entity_document(
-                "",
+                content,
                 fallback_id=safe_name,
                 fallback_name=clean_name,
                 fallback_summary=description,
@@ -308,13 +313,21 @@ class NovelApplicationService:
         return path
 
     def context_preview(self, chapter_id: str = "next") -> dict[str, Any]:
+        from tools.context_builder import ContextBuilder
+
         target = self.resolve_chapter_id(chapter_id)
         packet = self.assemble_packet(target)
+        generation = ContextBuilder(self.project_root, self.novel_id).build_generation_context(
+            target
+        )
         return {
             "chapter_id": target,
             "target_words": int(packet.get("target_words") or 0),
             "characters": list((packet.get("character_documents") or {}).keys()),
             "markdown": str(packet.get("outline") or ""),
+            "character_states": generation.character_states,
+            "semantic_references": generation.semantic_references,
+            "semantic_retrieval": generation.semantic_retrieval,
             "packet": packet,
         }
 
@@ -387,6 +400,8 @@ class NovelApplicationService:
         self,
         chapter_id: str,
         *,
+        strict: bool = False,
+        dimensions: list[int] | None = None,
         task_phase: Callable[[str, str], None] | None = None,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> dict[str, Any]:
@@ -396,7 +411,11 @@ class NovelApplicationService:
             raise NovelServiceError("已有写作或审稿任务正在运行", code="PROJECT_BUSY")
         try:
             if self._review_executor is None:
-                args: dict[str, Any] = {"chapter_id": target}
+                args: dict[str, Any] = {
+                    "chapter_id": target,
+                    "strict": bool(strict),
+                    "dimensions": list(dimensions) if dimensions is not None else None,
+                }
                 if task_phase is not None:
                     args["_task_phase"] = task_phase
                 if cancel_requested is not None:
@@ -411,7 +430,16 @@ class NovelApplicationService:
                         self.novel_id,
                         operation=f"review:{target}",
                     ):
-                        result = executor(self.project_root, {"chapter_id": target})
+                        result = executor(
+                            self.project_root,
+                            {
+                                "chapter_id": target,
+                                "strict": bool(strict),
+                                "dimensions": (
+                                    list(dimensions) if dimensions is not None else None
+                                ),
+                            },
+                        )
                 except ProjectBusyError as exc:
                     raise NovelServiceError(str(exc), code="PROJECT_BUSY") from exc
         finally:

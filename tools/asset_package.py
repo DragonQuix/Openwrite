@@ -126,14 +126,18 @@ class AssetPackageService:
     def preview_import(self, source: Path) -> dict[str, Any]:
         source_path = Path(source).expanduser().resolve()
         package = self._read_package(source_path)
-        existing = {item["id"]: item for item in self.assets.list()}
+        existing = {
+            (str(item["kind"]), str(item["id"])): item
+            for item in self.assets.list()
+        }
         package_ids = {str(item["id"]) for item in package["manifest"]["assets"]}
         assets: list[dict[str, Any]] = []
         all_dependencies: set[str] = set()
         for item in package["manifest"]["assets"]:
             asset_id = str(item["id"])
+            kind = str(item["kind"])
             content = package["entries"][str(item["path"])].decode("utf-8")
-            current = existing.get(asset_id)
+            current = existing.get((kind, asset_id))
             dependencies = {str(value) for value in item.get("dependencies", [])}
             all_dependencies.update(dependencies)
             status = "conflict" if current else "new"
@@ -158,7 +162,7 @@ class AssetPackageService:
                     "default_action": "skip" if current else "import",
                 }
             )
-        existing_ids = set(existing)
+        existing_ids = {asset_id for _, asset_id in existing}
         missing_dependencies = sorted(all_dependencies - package_ids - existing_ids)
         return {
             "format": PACKAGE_FORMAT,
@@ -218,7 +222,10 @@ class AssetPackageService:
                 )
             if action == "rename":
                 new_id = StructuredAssetService._asset_id(decision.get("new_id"))
-                if self._find_any(new_id) is not None or new_id in id_map.values():
+                if (
+                    self._find_any(str(item["kind"]), new_id) is not None
+                    or new_id in id_map.values()
+                ):
                     raise AssetPackageError(
                         f"重命名目标已存在: {new_id}",
                         code="ASSET_CONFLICT",
@@ -231,6 +238,10 @@ class AssetPackageService:
                 raise AssetPackageError("未知导入决策", code="INVALID_IMPORT_RESOLUTION")
         writes: dict[Path, bytes] = {}
         imported: list[dict[str, Any]] = []
+        preview_assets = {
+            (str(item["kind"]), str(item["id"])): item
+            for item in preview["assets"]
+        }
         for item in package["manifest"]["assets"]:
             old_id = str(item["id"])
             if old_id in skipped:
@@ -239,7 +250,13 @@ class AssetPackageService:
             kind = str(item["kind"])
             raw = package["entries"][str(item["path"])].decode("utf-8")
             rendered = self._remap_content(kind, raw, old_id, new_id, id_map)
-            target = self._target_path(kind, new_id)
+            preview_item = preview_assets[(kind, old_id)]
+            current = preview_item.get("existing")
+            target = (
+                (self.novel_root / str(current["path"])).resolve()
+                if current and new_id == old_id
+                else self._target_path(kind, new_id)
+            )
             if target in writes:
                 raise AssetPackageError("多个资产映射到同一目标", code="ASSET_CONFLICT")
             writes[target] = rendered.encode("utf-8")
@@ -419,8 +436,15 @@ class AssetPackageService:
                 dependencies.append(str(meta[field]))
         return dependencies, relations
 
-    def _find_any(self, asset_id: str) -> dict[str, Any] | None:
-        return next((item for item in self.assets.list() if item["id"] == asset_id), None)
+    def _find_any(self, kind: str, asset_id: str) -> dict[str, Any] | None:
+        return next(
+            (
+                item
+                for item in self.assets.list(kind)
+                if item["id"] == asset_id
+            ),
+            None,
+        )
 
     def _target_path(self, kind: str, asset_id: str) -> Path:
         extension = ".yaml" if kind == "progression" else ".md"

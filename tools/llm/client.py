@@ -1,29 +1,47 @@
-"""LLM 客户端
-
-支持:
-- OpenAI (chat completions / responses API)
-- Anthropic (messages API)
-- 自定义 baseUrl (用于代理/兼容接口)
-- 流式输出监控
-- 流失败自动降级
-"""
+"""Provider-neutral LLM client backed by LiteLLM."""
 
 from __future__ import annotations
 
-import os
+import copy
 import json
-import time
 import logging
-from typing import Any, Optional, Callable, Literal
+import os
+import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from typing import Any, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
+
+from .context import ContextBudgetPolicy
 
 logger = logging.getLogger(__name__)
 
+ProviderName = Literal["openai", "anthropic", "custom"]
+APIFormat = Literal["chat", "responses"]
+
+
+def _provider_name(value: Any) -> ProviderName:
+    normalized = str(value or "openai").strip().lower()
+    if normalized not in {"openai", "anthropic", "custom"}:
+        normalized = "openai"
+    return cast(ProviderName, normalized)
+
+
+def _api_format(value: Any) -> APIFormat:
+    normalized = str(value or "chat").strip().lower()
+    if normalized not in {"chat", "responses"}:
+        normalized = "chat"
+    return cast(APIFormat, normalized)
+
+
+def _value(value: Any, key: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(key, default)
+    return getattr(value, key, default)
+
 
 def _plain_usage(usage: Any) -> dict[str, Any]:
-    """Convert SDK usage models into YAML/JSON-safe plain data."""
+    """Convert SDK usage models into YAML/JSON-safe, OpenAI-shaped data."""
 
     def convert(value: Any) -> Any:
         if value is None or isinstance(value, (str, int, float, bool)):
@@ -57,15 +75,49 @@ def _plain_usage(usage: Any) -> dict[str, Any]:
             except (TypeError, ValueError):
                 return {}
     converted = convert(raw)
-    return converted if isinstance(converted, dict) else {}
+    if not isinstance(converted, dict):
+        return {}
+
+    prompt = converted.get("prompt_tokens", converted.get("input_tokens", 0))
+    completion = converted.get(
+        "completion_tokens", converted.get("output_tokens", 0)
+    )
+    if "prompt_tokens" not in converted and prompt:
+        converted["prompt_tokens"] = prompt
+    if "completion_tokens" not in converted and completion:
+        converted["completion_tokens"] = completion
+    if "total_tokens" not in converted and (prompt or completion):
+        converted["total_tokens"] = int(prompt or 0) + int(completion or 0)
+    return converted
+
+
+def _content_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            text = _value(block, "text", _value(block, "content", ""))
+            if text:
+                parts.append(str(text))
+        return "".join(parts)
+    return str(content)
+
+
+def _ensure_exception(value: Any) -> Exception:
+    if isinstance(value, Exception):
+        return value
+    return Exception(str(value))
 
 
 @dataclass
 class LLMResponse:
-    """LLM 响应"""
+    """Normalized LLM response."""
 
     content: str
-    usage: dict = field(default_factory=dict)
+    usage: dict[str, Any] = field(default_factory=dict)
     model: str = ""
     provider: str = "openai"
     finish_reason: str = ""
@@ -73,36 +125,36 @@ class LLMResponse:
 
     @property
     def prompt_tokens(self) -> int:
-        return self.usage.get("prompt_tokens", 0)
+        return int(self.usage.get("prompt_tokens", 0) or 0)
 
     @property
     def completion_tokens(self) -> int:
-        return self.usage.get("completion_tokens", 0)
+        return int(self.usage.get("completion_tokens", 0) or 0)
 
     @property
     def total_tokens(self) -> int:
-        return self.usage.get("total_tokens", 0)
+        return int(self.usage.get("total_tokens", 0) or 0)
 
 
 @dataclass
 class ToolCallResponse:
-    """工具调用响应（Function Calling）"""
+    """Normalized function-calling response."""
 
     content: str
-    tool_calls: list[dict] = field(default_factory=list)
-    usage: dict = field(default_factory=dict)
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    usage: dict[str, Any] = field(default_factory=dict)
     model: str = ""
     provider: str = "openai"
     finish_reason: str = ""
 
     @property
     def has_tool_calls(self) -> bool:
-        return len(self.tool_calls) > 0
+        return bool(self.tool_calls)
 
 
 @dataclass
 class Message:
-    """对话消息"""
+    """Conversation message used by OpenWrite agents."""
 
     role: Literal["system", "user", "assistant", "tool"]
     content: str
@@ -111,32 +163,35 @@ class Message:
 
 @dataclass
 class LLMConfig:
-    """LLM 配置"""
+    """Runtime model configuration."""
 
-    provider: Literal["openai", "anthropic", "custom"] = "openai"
+    provider: ProviderName = "openai"
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     model: str = "gpt-4o-mini"
     temperature: float = 0.7
     max_tokens: int = 24000
+    context_tokens: int = 64000
     stream: bool = True
-    api_format: Literal["chat", "responses"] = "chat"
+    api_format: APIFormat = "chat"
     timeout_seconds: float = 120.0
     max_retries: int = 3
-    extra: dict = field(default_factory=dict)
+    extra: dict[str, Any] = field(default_factory=dict)
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        self.provider = _provider_name(self.provider)
+        self.api_format = _api_format(self.api_format)
         self.base_url = self._normalize_base_url(self.base_url)
 
     @classmethod
-    def from_env(cls) -> "LLMConfig":
-        """从环境变量创建配置"""
+    def from_env(cls) -> LLMConfig:
+        """Build a configuration from the active profile or legacy environment."""
         from tools.model_profiles import active_model_profile
 
         profile = active_model_profile()
         if profile:
             return cls(
-                provider=profile["provider"],
+                provider=_provider_name(profile["provider"]),
                 api_key=profile["api_key"],
                 base_url=profile["base_url"],
                 model=profile["model"],
@@ -144,47 +199,46 @@ class LLMConfig:
                     0.7 if profile.get("temperature") in {None, ""} else profile["temperature"]
                 ),
                 max_tokens=int(profile.get("max_output_tokens") or 24000),
+                context_tokens=int(profile.get("context_tokens") or 64000),
                 stream=os.getenv("LLM_STREAM", "true").lower() == "true",
-                api_format=profile.get("api_format") or "chat",
+                api_format=_api_format(profile.get("api_format")),
                 timeout_seconds=float(profile.get("timeout_seconds") or 120),
                 max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
             )
         return cls(
-            provider=os.getenv("LLM_PROVIDER", "openai"),
+            provider=_provider_name(os.getenv("LLM_PROVIDER", "openai")),
             api_key=os.getenv("LLM_API_KEY", ""),
             base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
             model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
             temperature=float(os.getenv("LLM_TEMPERATURE", "0.7")),
             max_tokens=int(os.getenv("LLM_MAX_TOKENS", "24000")),
+            context_tokens=int(os.getenv("OPENWRITE_CONTEXT_TOKENS", "64000")),
             stream=os.getenv("LLM_STREAM", "true").lower() == "true",
-            api_format=os.getenv("LLM_API_FORMAT", "chat"),
+            api_format=_api_format(os.getenv("LLM_API_FORMAT", "chat")),
             timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
             max_retries=int(os.getenv("LLM_MAX_RETRIES", "3")),
         )
 
     @staticmethod
     def _normalize_base_url(base_url: str) -> str:
-        """把完整兼容端点折回到 SDK 需要的 API 根路径。"""
+        """Fold a full compatible endpoint back to the API root."""
         if not base_url:
             return base_url
 
         normalized = base_url.rstrip("/")
         parsed = urlsplit(normalized)
         path = parsed.path.rstrip("/")
-        endpoint_suffixes = ("/chat/completions", "/responses")
-
-        for suffix in endpoint_suffixes:
+        for suffix in ("/chat/completions", "/responses"):
             if path.endswith(suffix):
                 path = path[: -len(suffix)] or "/"
                 return urlunsplit(
                     (parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment)
                 )
-
         return normalized
 
 
 class StreamProgress:
-    """流式输出进度"""
+    """Progress snapshot for a streaming response."""
 
     def __init__(
         self,
@@ -192,322 +246,84 @@ class StreamProgress:
         total_chars: int = 0,
         chinese_chars: int = 0,
         status: str = "streaming",
-    ):
+    ) -> None:
         self.elapsed_ms = elapsed_ms
         self.total_chars = total_chars
         self.chinese_chars = chinese_chars
         self.status = status
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (
             f"StreamProgress(elapsed={self.elapsed_ms}ms, "
             f"chars={self.total_chars}, chinese={self.chinese_chars})"
         )
 
 
-OnStreamProgress = Optional[Callable[[StreamProgress], None]]
+OnStreamProgress = Callable[[StreamProgress], None] | None
 
 
 class LLMClient:
-    """统一 LLM 客户端
-
-    用法:
-        config = LLMConfig.from_env()
-        client = LLMClient(config)
-
-        # 简单对话
-        response = client.chat([
-            Message("system", "你是一个助手"),
-            Message("user", "你好")
-        ])
-
-        # 流式对话
-        for chunk in client.stream_chat([...]):
-            print(chunk, end="")
-    """
+    """OpenWrite's LiteLLM adapter with request-time context planning."""
 
     def __init__(self, config: LLMConfig, client: Any | None = None):
         self.config = config
-        self._client = client if client is not None else self._init_client()
-
-    def _init_client(self):
-        """初始化底层客户端"""
-        if self.config.provider == "anthropic":
+        if client is None:
             try:
-                import anthropic
-
-                return anthropic.Anthropic(
-                    api_key=self.config.api_key,
-                    base_url=self.config.base_url.rstrip("/") + "/v1",
-                )
-            except ImportError:
-                raise ImportError("请安装 anthropic: pip install anthropic")
-
-        # OpenAI 或自定义 (都使用 OpenAI SDK)
-        try:
-            import openai
-        except ImportError:
-            raise ImportError("请安装 openai: pip install openai")
-
-        return openai.OpenAI(
-            api_key=self.config.api_key,
-            base_url=self.config.base_url,
-            timeout=self.config.timeout_seconds,
-            max_retries=self.config.max_retries,
+                import litellm
+            except ImportError as exc:
+                raise ImportError("请安装 litellm: pip install litellm") from exc
+            self._backend = litellm
+        else:
+            self._backend = client
+        self._completion = (
+            self._backend
+            if callable(self._backend) and not hasattr(self._backend, "completion")
+            else getattr(self._backend, "completion")
         )
+        self.last_context_plan: dict[str, Any] = {}
 
     def chat(
         self,
         messages: list[Message],
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
         stream: bool = False,
         on_progress: OnStreamProgress = None,
     ) -> LLMResponse:
-        """对话
-
-        Args:
-            messages: 对话消息列表
-            temperature: 温度参数
-            max_tokens: 最大 token 数
-            stream: 是否流式输出
-            on_progress: 进度回调
-
-        Returns:
-            LLMResponse 响应对象
-        """
+        """Send one provider-neutral chat request."""
         temp = temperature if temperature is not None else self.config.temperature
         maxt = max_tokens if max_tokens is not None else self.config.max_tokens
-
-        if self.config.provider == "anthropic":
-            return self._chat_anthropic(messages, temp, maxt, stream, on_progress)
         if self.config.api_format == "responses":
-            return self._chat_openai_responses(messages, temp, maxt, stream, on_progress)
-        return self._chat_openai(messages, temp, maxt, stream, on_progress)
+            return self._chat_responses(messages, temp, maxt, stream, on_progress)
+        return self._chat_completion(messages, temp, maxt, stream, on_progress)
 
     def chat_with_tools(
         self,
         messages: list[Message],
-        tools: list[dict],
-        temperature: Optional[float] = None,
-        max_tokens: Optional[int] = None,
-    ) -> "ToolCallResponse":
-        """带工具调用的对话（Function Calling）
-
-        Args:
-            messages: 对话消息列表
-            tools: 工具定义列表
-            temperature: 温度参数
-            max_tokens: 最大 token 数
-
-        Returns:
-            ToolCallResponse 响应对象（包含 content 和 tool_calls）
-        """
+        tools: list[dict[str, Any]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> ToolCallResponse:
+        """Send a normalized function-calling request through LiteLLM."""
         temp = temperature if temperature is not None else self.config.temperature
         maxt = max_tokens if max_tokens is not None else self.config.max_tokens
-
-        if self.config.provider == "anthropic":
-            return self._chat_anthropic_with_tools(messages, tools, temp, maxt)
-
         try:
-            return self._chat_openai_with_tools(messages, tools, temp, maxt)
-        except Exception as e:
-            # 如果工具调用失败，回退到普通聊天
-            # 这对于某些不支持 tool calling 的 API 很有用
-            error_msg = str(e)
-            if "invalid tool type" in error_msg.lower() or "tool_calls" in error_msg.lower():
-                logger.warning(f"Tool calling failed, falling back to regular chat: {e}")
+            return self._chat_completion_with_tools(messages, tools, temp, maxt)
+        except Exception as exc:
+            error_msg = str(exc).lower()
+            if "invalid tool type" in error_msg or "tool_calls" in error_msg:
+                logger.warning("Tool calling failed, falling back to regular chat: %s", exc)
                 response = self.chat(messages, temperature=temp, max_tokens=maxt, stream=False)
                 return ToolCallResponse(
                     content=response.content,
-                    tool_calls=[],
                     usage=response.usage,
                     model=response.model,
                     provider=response.provider,
+                    finish_reason=response.finish_reason,
                 )
             raise
 
-    def _chat_openai_with_tools(
-        self,
-        messages: list[Message],
-        tools: list[dict],
-        temperature: float,
-        max_tokens: int,
-    ) -> "ToolCallResponse":
-        """OpenAI Chat API with Function Calling"""
-        import openai
-
-        openai_messages = []
-        for m in messages:
-            if m.role == "system":
-                openai_messages.append({"role": "system", "content": m.content})
-            elif m.role == "tool":
-                openai_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": m.tool_call_id,
-                        "content": m.content,
-                    }
-                )
-            elif m.role == "assistant" and hasattr(m, "tool_calls"):
-                raw_calls = getattr(m, "tool_calls", []) or []
-                tool_calls = [
-                    {
-                        "id": tc.get("id", ""),
-                        "type": "function",
-                        "function": {
-                            "name": tc.get("name", ""),
-                            "arguments": tc.get("arguments", "{}"),
-                        },
-                    }
-                    for tc in raw_calls
-                ]
-                openai_messages.append(
-                    {
-                        "role": "assistant",
-                        "content": m.content or "",
-                        "tool_calls": tool_calls,
-                    }
-                )
-            else:
-                openai_messages.append({"role": m.role, "content": m.content})
-
-        create_params = {
-            "model": self.config.model,
-            "messages": openai_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "tools": tools,
-            **self.config.extra,
-        }
-
-        try:
-            response = self._client.chat.completions.create(**create_params)
-            message = response.choices[0].message
-
-            # 解析 tool_calls
-            tool_calls = []
-            if hasattr(message, "tool_calls") and message.tool_calls:
-                for tc in message.tool_calls:
-                    func = tc.function
-                    tool_calls.append(
-                        {
-                            "id": tc.id,
-                            "name": func.name,
-                            "arguments": func.arguments,
-                        }
-                    )
-
-            from .response import classify_response, validate_tool_arguments
-
-            validate_tool_arguments(tool_calls)
-            classify_response(
-                message.content or "",
-                finish_reason=str(getattr(response.choices[0], "finish_reason", "") or ""),
-                require_content=not tool_calls,
-            )
-
-            return ToolCallResponse(
-                content=message.content or "",
-                tool_calls=tool_calls,
-                usage=_plain_usage(getattr(response, "usage", None)),
-                model=response.model,
-                provider="openai",
-                finish_reason=str(getattr(response.choices[0], "finish_reason", "") or ""),
-            )
-        except openai.APIError as e:
-            raise self._wrap_error(e)
-
-    def _chat_anthropic_with_tools(
-        self,
-        messages: list[Message],
-        tools: list[dict],
-        temperature: float,
-        max_tokens: int,
-    ) -> "ToolCallResponse":
-        """Anthropic Messages API with Tools"""
-        import anthropic
-
-        anthropic_messages = []
-        for m in messages:
-            if m.role == "system":
-                anthropic_messages.append(
-                    {"role": "user", "content": f"<system>{m.content}</system>"}
-                )
-            elif m.role == "tool":
-                anthropic_messages.append(
-                    {
-                        "role": "user",
-                        "content": f"[tool result: {getattr(m, 'tool_call_id', '')}] {m.content}",
-                    }
-                )
-            else:
-                anthropic_messages.append({"role": m.role, "content": m.content})
-
-        # Anthropic 的工具格式不同
-        anthropic_tools = []
-        for tool in tools:
-            func = tool.get("function", {})
-            anthropic_tools.append(
-                {
-                    "name": func.get("name"),
-                    "description": func.get("description", ""),
-                    "input_schema": func.get("parameters", {}),
-                }
-            )
-
-        create_params = {
-            "model": self.config.model,
-            "messages": anthropic_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "tools": anthropic_tools,
-        }
-
-        try:
-            response = self._client.messages.create(**create_params)
-            content_blocks = response.content
-
-            # 解析内容
-            content = ""
-            tool_calls = []
-            for block in content_blocks:
-                if hasattr(block, "text"):
-                    content += block.text
-                elif hasattr(block, "name"):  # tool_use
-                    tool_calls.append(
-                        {
-                            "id": block.id,
-                            "name": block.name,
-                            "arguments": block.input if hasattr(block, "input") else "{}",
-                        }
-                    )
-
-            from .response import classify_response, validate_tool_arguments
-
-            validate_tool_arguments(tool_calls)
-            classify_response(
-                content,
-                finish_reason=str(getattr(response, "stop_reason", "") or ""),
-                require_content=not tool_calls,
-            )
-
-            return ToolCallResponse(
-                content=content,
-                tool_calls=tool_calls,
-                usage={
-                    "input_tokens": response.usage.input_tokens,
-                    "output_tokens": response.usage.output_tokens,
-                    "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
-                },
-                model=response.model,
-                provider="anthropic",
-                finish_reason=str(getattr(response, "stop_reason", "") or ""),
-            )
-        except anthropic.APIError as e:
-            raise self._wrap_error(e)
-
-    def _chat_openai(
+    def _chat_completion(
         self,
         messages: list[Message],
         temperature: float,
@@ -515,276 +331,587 @@ class LLMClient:
         stream: bool,
         on_progress: OnStreamProgress,
     ) -> LLMResponse:
-        """OpenAI Chat API"""
-        import openai
+        prepared = self._prepare_messages(messages, max_tokens=max_tokens)
+        params = self._completion_params(
+            prepared,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=stream,
+        )
+        response = self._call(self._completion, params)
+        if stream:
+            return self._stream_response(response, on_progress)
 
-        openai_messages = [{"role": m.role, "content": m.content} for m in messages]
-
-        create_params = {
-            "model": self.config.model,
-            "messages": openai_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": stream,
-            **self.config.extra,
-        }
-
-        try:
-            if stream:
-                return self._stream_response(
-                    self._client.chat.completions.create(**create_params),
-                    on_progress,
-                )
-
-            response = self._client.chat.completions.create(**create_params)
-            return LLMResponse(
-                content=response.choices[0].message.content or "",
-                usage=_plain_usage(response.usage),
-                model=response.model,
-                provider="openai",
-                finish_reason=str(getattr(response.choices[0], "finish_reason", "") or ""),
-                reasoning=str(
-                    getattr(response.choices[0].message, "reasoning_content", "") or ""
-                ),
-            )
-        except openai.APIError as e:
-            raise self._wrap_error(e)
-
-    def _chat_openai_responses(
-        self,
-        messages: list[Message],
-        temperature: float,
-        max_tokens: int,
-        stream: bool,
-        on_progress: OnStreamProgress,
-    ) -> LLMResponse:
-        """OpenAI Responses API"""
-        import openai
-
-        input_text = "\n".join(f"{m.role}: {m.content}" for m in messages)
-
-        create_params = {
-            "model": self.config.model,
-            "input": input_text,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": stream,
-            **self.config.extra,
-        }
-
-        try:
-            if stream:
-                return self._stream_response(
-                    self._client.responses.create(**create_params),
-                    on_progress,
-                )
-
-            response = self._client.responses.create(**create_params)
-            output_text = "\n".join(o.text for o in response.output if hasattr(o, "text"))
-            return LLMResponse(
-                content=output_text,
-                usage=_plain_usage(getattr(response, "usage", None)),
-                model=response.model,
-                provider="openai",
-                finish_reason=str(getattr(response, "status", "") or ""),
-            )
-        except openai.APIError as e:
-            raise self._wrap_error(e)
-
-    def _chat_anthropic(
-        self,
-        messages: list[Message],
-        temperature: float,
-        max_tokens: int,
-        stream: bool,
-        on_progress: OnStreamProgress,
-    ) -> LLMResponse:
-        """Anthropic Messages API"""
-        import anthropic
-
-        # Anthropic 使用不同的消息格式
-        anthropic_messages = []
-        for m in messages:
-            if m.role == "system":
-                anthropic_messages.append(
-                    {"role": "user", "content": f"<system>{m.content}</system>"}
-                )
-            else:
-                anthropic_messages.append({"role": m.role, "content": m.content})
-
-        create_params = {
-            "model": self.config.model,
-            "messages": anthropic_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": stream,
-        }
-
-        try:
-            if stream:
-                return self._stream_response_anthropic(
-                    self._client.messages.create(**create_params),
-                    on_progress,
-                )
-
-            response = self._client.messages.create(**create_params)
-            content = ""
-            if response.content and hasattr(response.content[0], "text"):
-                content = response.content[0].text
-
-            return LLMResponse(
-                content=content,
-                usage={
-                    "prompt_tokens": response.usage.input_tokens,
-                    "completion_tokens": response.usage.output_tokens,
-                    "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
-                },
-                model=response.model,
-                provider="anthropic",
-                finish_reason=str(getattr(response, "stop_reason", "") or ""),
-            )
-        except anthropic.APIError as e:
-            raise self._wrap_error(e)
-
-    def _stream_response(self, stream, on_progress: OnStreamProgress) -> LLMResponse:
-        """处理 OpenAI 流式响应"""
-        chunks = []
-        chinese_chars = 0
-        start_time = time.time()
-
-        def count_chinese(text: str) -> int:
-            return sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
-
-        try:
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content or ""
-                chunks.append(delta)
-                chinese_chars += count_chinese(delta)
-
-                if on_progress:
-                    on_progress(
-                        StreamProgress(
-                            elapsed_ms=int((time.time() - start_time) * 1000),
-                            total_chars=sum(len(c) for c in chunks),
-                            chinese_chars=chinese_chars,
-                        )
-                    )
-        except Exception as e:
-            # 流中断但有部分内容可用
-            partial = "".join(chunks)
-            if len(partial) > 100:  # 有意义的内容
-                logger.warning(f"Stream interrupted: {e}, returning partial ({len(partial)} chars)")
-                return LLMResponse(
-                    content=partial, provider="openai", finish_reason="incomplete"
-                )
-            raise
-
+        choice = self._first_choice(response)
+        message = _value(choice, "message", {})
         return LLMResponse(
-            content="".join(chunks),
-            usage={},  # 流式响应不返回 usage
-            provider="openai",
+            content=_content_text(_value(message, "content", "")),
+            usage=_plain_usage(_value(response, "usage")),
+            model=str(_value(response, "model", self.config.model) or self.config.model),
+            provider=self.config.provider,
+            finish_reason=str(_value(choice, "finish_reason", "") or ""),
+            reasoning=str(_value(message, "reasoning_content", "") or ""),
         )
 
-    def _stream_response_anthropic(self, stream, on_progress: OnStreamProgress) -> LLMResponse:
-        """处理 Anthropic 流式响应"""
-        chunks = []
+    def _chat_completion_with_tools(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]],
+        temperature: float,
+        max_tokens: int,
+    ) -> ToolCallResponse:
+        prepared = self._prepare_messages(
+            messages,
+            tools=tools,
+            max_tokens=max_tokens,
+        )
+        params = self._completion_params(
+            prepared,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=False,
+            tools=tools,
+        )
+        response = self._call(self._completion, params)
+        choice = self._first_choice(response)
+        message = _value(choice, "message", {})
+        content = _content_text(_value(message, "content", ""))
+        tool_calls = self._normalize_tool_calls(_value(message, "tool_calls", []) or [])
+
+        from .response import classify_response, validate_tool_arguments
+
+        validate_tool_arguments(tool_calls)
+        finish_reason = str(_value(choice, "finish_reason", "") or "")
+        classify_response(content, finish_reason=finish_reason, require_content=not tool_calls)
+        return ToolCallResponse(
+            content=content,
+            tool_calls=tool_calls,
+            usage=_plain_usage(_value(response, "usage")),
+            model=str(_value(response, "model", self.config.model) or self.config.model),
+            provider=self.config.provider,
+            finish_reason=finish_reason,
+        )
+
+    def _chat_responses(
+        self,
+        messages: list[Message],
+        temperature: float,
+        max_tokens: int,
+        stream: bool,
+        on_progress: OnStreamProgress,
+    ) -> LLMResponse:
+        responses = getattr(self._backend, "responses", None)
+        if not callable(responses):
+            return self._chat_completion(messages, temperature, max_tokens, stream, on_progress)
+
+        prepared = self._prepare_messages(messages, max_tokens=max_tokens)
+        params = self._base_params()
+        params.update(
+            {
+                "input": prepared,
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
+                "stream": stream,
+            }
+        )
+        params.update(self.config.extra)
+        response = self._call(responses, params)
+        if stream:
+            return self._stream_response(response, on_progress)
+
+        output_text = _content_text(_value(response, "output_text", ""))
+        if not output_text:
+            output_text = self._responses_output_text(_value(response, "output", []) or [])
+        return LLMResponse(
+            content=output_text,
+            usage=_plain_usage(_value(response, "usage")),
+            model=str(_value(response, "model", self.config.model) or self.config.model),
+            provider=self.config.provider,
+            finish_reason=str(_value(response, "status", "") or ""),
+        )
+
+    def _base_params(self) -> dict[str, Any]:
+        provider = "openai" if self.config.provider == "custom" else self.config.provider
+        return {
+            "model": self.config.model,
+            "custom_llm_provider": provider,
+            "api_key": self.config.api_key,
+            "base_url": self.config.base_url or None,
+            "timeout": self.config.timeout_seconds,
+            "max_retries": self.config.max_retries,
+            "drop_params": True,
+        }
+
+    def _completion_params(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float,
+        max_tokens: int,
+        stream: bool,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        params = self._base_params()
+        params.update(
+            {
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": stream,
+            }
+        )
+        if tools:
+            params["tools"] = tools
+        params.update(self.config.extra)
+        return params
+
+    def _call(self, operation: Callable[..., Any], params: dict[str, Any]) -> Any:
+        try:
+            return operation(**params)
+        except Exception as exc:
+            raise self._wrap_error(exc) from exc
+
+    def _prepare_messages(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        max_tokens: int,
+    ) -> list[dict[str, Any]]:
+        prepared = [self._message_dict(message) for message in messages]
+        used_tokens = self._count_tokens(prepared, tools=tools)
+        policy = ContextBudgetPolicy(self.config.context_tokens, max_tokens)
+        plan = policy.plan(used_tokens)
+        report = plan.as_dict()
+        report["original_message_count"] = len(prepared)
+        original_messages = copy.deepcopy(prepared)
+
+        if plan.requires_compression:
+            message_tokens = self._count_tokens(prepared)
+            tool_tokens = max(0, used_tokens - message_tokens)
+            message_target = max(256, plan.target_tokens - tool_tokens)
+            prepared = self._trim_messages(prepared, message_target)
+
+        final_tokens = self._count_tokens(prepared, tools=tools)
+        if final_tokens > plan.input_budget_tokens:
+            message_tokens = self._count_tokens(prepared)
+            tool_tokens = max(0, final_tokens - message_tokens)
+            hard_target = max(256, plan.input_budget_tokens - tool_tokens)
+            prepared = self._fallback_trim_messages(prepared, hard_target)
+            final_tokens = self._count_tokens(prepared, tools=tools)
+
+        report["final_message_count"] = len(prepared)
+        report["final_used_tokens"] = final_tokens
+        report["trimmed"] = prepared != original_messages
+        report["within_budget"] = final_tokens <= plan.input_budget_tokens
+        self.last_context_plan = report
+        if not report["within_budget"]:
+            from .errors import ContextLengthError
+
+            raise ContextLengthError(
+                "系统提示词与工具定义已超过模型输入预算，请提高上下文窗口或减少工具"
+            )
+        return prepared
+
+    def _count_tokens(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> int:
+        counter = getattr(self._backend, "token_counter", None)
+        if callable(counter):
+            try:
+                return int(
+                    counter(
+                        model=self._tokenizer_model(),
+                        messages=messages,
+                        tools=tools,
+                    )
+                )
+            except Exception as exc:
+                logger.debug("LiteLLM token counter fallback: %s", exc)
+        payload = json.dumps(
+            {"messages": messages, "tools": tools or []},
+            ensure_ascii=False,
+            default=str,
+        )
+        return self._estimate_text_tokens(payload)
+
+    def _trim_messages(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+    ) -> list[dict[str, Any]]:
+        proportional = self._proportional_trim_messages(messages, max_tokens)
+        if self._count_tokens(proportional) <= max_tokens:
+            return proportional
+
+        trimmer = getattr(self._backend, "trim_messages", None)
+        if callable(trimmer):
+            try:
+                trimmed = trimmer(
+                    messages=proportional,
+                    model=self._tokenizer_model(),
+                    max_tokens=max_tokens,
+                )
+                if isinstance(trimmed, list) and trimmed:
+                    return trimmed
+            except Exception as exc:
+                logger.warning("LiteLLM message trimming fallback: %s", exc)
+        return self._fallback_trim_messages(proportional, max_tokens)
+
+    def _proportional_trim_messages(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+    ) -> list[dict[str, Any]]:
+        """Keep message structure while distributing content by priority."""
+        prepared = copy.deepcopy(messages)
+        if self._count_tokens(prepared) <= max_tokens:
+            return prepared
+
+        content_tokens = [self._message_content_tokens(item) for item in prepared]
+        overhead = max(0, self._count_tokens(prepared) - sum(content_tokens))
+        content_budget = max(0, max_tokens - overhead)
+        priorities = [
+            self._message_priority(item, index, len(prepared))
+            for index, item in enumerate(prepared)
+        ]
+        allocations = self._weighted_allocations(
+            content_tokens,
+            priorities,
+            content_budget,
+        )
+        for item, original_tokens, allocated_tokens in zip(
+            prepared,
+            content_tokens,
+            allocations,
+            strict=True,
+        ):
+            if allocated_tokens >= original_tokens:
+                continue
+            item["content"] = self._fit_content_to_tokens(
+                _content_text(item.get("content", "")),
+                allocated_tokens,
+                role=str(item.get("role", "")),
+            )
+        return prepared
+
+    def _message_content_tokens(self, message: dict[str, Any]) -> int:
+        content = _content_text(message.get("content", ""))
+        if not content:
+            return 0
+        with_content = self._count_tokens([{"role": "user", "content": content}])
+        empty = self._count_tokens([{"role": "user", "content": ""}])
+        return max(1, with_content - empty)
+
+    @staticmethod
+    def _message_priority(
+        message: dict[str, Any],
+        index: int,
+        total: int,
+    ) -> float:
+        role = str(message.get("role", ""))
+        if role == "system":
+            return 6.0
+        if index == total - 1:
+            return 8.0
+        if role == "tool" or message.get("tool_calls"):
+            return 5.0
+        recency = index / max(1, total - 1)
+        return 1.0 + 2.0 * recency
+
+    @staticmethod
+    def _weighted_allocations(
+        token_counts: list[int],
+        priorities: list[float],
+        budget: int,
+    ) -> list[int]:
+        allocations = [0.0] * len(token_counts)
+        remaining = {index for index, count in enumerate(token_counts) if count > 0}
+        remaining_budget = float(max(0, budget))
+
+        while remaining and remaining_budget > 0:
+            denominator = sum(
+                token_counts[index] * priorities[index] for index in remaining
+            )
+            if denominator <= 0:
+                break
+            shares = {
+                index: remaining_budget
+                * token_counts[index]
+                * priorities[index]
+                / denominator
+                for index in remaining
+            }
+            saturated = {
+                index for index, share in shares.items() if share >= token_counts[index]
+            }
+            if not saturated:
+                for index, share in shares.items():
+                    allocations[index] = share
+                break
+            for index in saturated:
+                allocations[index] = float(token_counts[index])
+                remaining_budget -= token_counts[index]
+                remaining.remove(index)
+
+        return [
+            min(count, max(0, int(allocation)))
+            for count, allocation in zip(token_counts, allocations, strict=True)
+        ]
+
+    def _fit_content_to_tokens(self, text: str, max_tokens: int, *, role: str) -> str:
+        content = str(text or "")
+        if not content or max_tokens <= 0:
+            return ""
+        current_tokens = self._message_content_tokens({"content": content})
+        if current_tokens <= max_tokens:
+            return content
+
+        max_chars = max(1, int(len(content) * max_tokens / current_tokens))
+        fitted = content
+        for _ in range(8):
+            if role == "tool":
+                fitted = content[-max_chars:]
+            else:
+                head = max(1, int(max_chars * 0.6))
+                tail = max(0, max_chars - head)
+                marker = "\n...[context compressed proportionally]...\n"
+                fitted = content[:head] + marker + (content[-tail:] if tail else "")
+            actual_tokens = self._message_content_tokens({"content": fitted})
+            if actual_tokens <= max_tokens:
+                return fitted
+            max_chars = max(1, int(max_chars * max_tokens / actual_tokens * 0.95))
+        return fitted
+
+    def _fallback_trim_messages(
+        self,
+        messages: list[dict[str, Any]],
+        max_tokens: int,
+    ) -> list[dict[str, Any]]:
+        kept = [dict(message) for message in messages]
+        while len(kept) > 2 and self._count_tokens(kept) > max_tokens:
+            removable = next(
+                (index for index, item in enumerate(kept[:-1]) if item.get("role") != "system"),
+                None,
+            )
+            if removable is None:
+                break
+            kept.pop(removable)
+
+        if self._count_tokens(kept) <= max_tokens:
+            return kept
+
+        for message in kept:
+            content = _content_text(message.get("content", ""))
+            if not content:
+                continue
+            share = max(64, int(max_tokens * 2 / max(1, len(kept))))
+            if len(content) > share:
+                message["content"] = (
+                    content[: share // 2]
+                    + "\n...[context trimmed]...\n"
+                    + content[-share // 2 :]
+                )
+        return kept
+
+    def _tokenizer_model(self) -> str:
+        if "/" in self.config.model:
+            return self.config.model
+        provider = "openai" if self.config.provider == "custom" else self.config.provider
+        return f"{provider}/{self.config.model}"
+
+    @staticmethod
+    def _estimate_text_tokens(text: str) -> int:
+        total = 0.0
+        for char in text:
+            code = ord(char)
+            if (
+                0x3400 <= code <= 0x9FFF
+                or 0x3040 <= code <= 0x30FF
+                or 0xAC00 <= code <= 0xD7AF
+            ):
+                total += 1.5
+            elif char.isascii():
+                total += 0.25
+            else:
+                total += 0.75
+        return max(1, int(total + 0.999))
+
+    @staticmethod
+    def _message_dict(message: Message) -> dict[str, Any]:
+        payload: dict[str, Any] = {"role": message.role, "content": message.content}
+        if message.role == "tool":
+            payload["tool_call_id"] = message.tool_call_id
+        raw_calls = getattr(message, "tool_calls", None)
+        if message.role == "assistant" and raw_calls:
+            payload["tool_calls"] = [
+                {
+                    "id": call.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": call.get("name", ""),
+                        "arguments": call.get("arguments", "{}"),
+                    },
+                }
+                for call in raw_calls
+            ]
+        return payload
+
+    @staticmethod
+    def _normalize_tool_calls(raw_calls: list[Any]) -> list[dict[str, Any]]:
+        calls: list[dict[str, Any]] = []
+        for raw in raw_calls:
+            function = _value(raw, "function", {})
+            arguments = _value(function, "arguments", "{}")
+            if isinstance(arguments, dict):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+            calls.append(
+                {
+                    "id": str(_value(raw, "id", "") or ""),
+                    "name": str(_value(function, "name", "") or ""),
+                    "arguments": str(arguments or "{}"),
+                }
+            )
+        return calls
+
+    @staticmethod
+    def _first_choice(response: Any) -> Any:
+        choices = _value(response, "choices", []) or []
+        if not choices:
+            raise ValueError("LiteLLM response contains no choices")
+        return choices[0]
+
+    @staticmethod
+    def _responses_output_text(output: list[Any]) -> str:
+        parts: list[str] = []
+        for item in output:
+            for block in _value(item, "content", []) or []:
+                text = _value(block, "text", "")
+                if text:
+                    parts.append(str(text))
+        return "".join(parts)
+
+    def _stream_response(self, stream: Any, on_progress: OnStreamProgress) -> LLMResponse:
+        chunks: list[str] = []
+        reasoning: list[str] = []
+        usage: dict[str, Any] = {}
+        finish_reason = ""
+        response_model = self.config.model
         chinese_chars = 0
         start_time = time.time()
 
-        def count_chinese(text: str) -> int:
-            return sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
-
         try:
-            for chunk in stream:
-                if hasattr(chunk, "content_block") and hasattr(chunk.content_block, "text"):
-                    delta = chunk.content_block.text
-                    chunks.append(delta)
-                    chinese_chars += count_chinese(delta)
+            for event in stream:
+                delta = ""
+                choices = _value(event, "choices", []) or []
+                if choices:
+                    choice = choices[0]
+                    choice_delta = _value(choice, "delta", {})
+                    delta = _content_text(_value(choice_delta, "content", ""))
+                    reasoning_delta = _value(choice_delta, "reasoning_content", "")
+                    if reasoning_delta:
+                        reasoning.append(str(reasoning_delta))
+                    finish_reason = str(
+                        _value(choice, "finish_reason", finish_reason) or finish_reason
+                    )
+                elif str(_value(event, "type", "")).endswith("output_text.delta"):
+                    delta = str(_value(event, "delta", "") or "")
 
+                if delta:
+                    chunks.append(delta)
+                    chinese_chars += sum(1 for char in delta if "\u4e00" <= char <= "\u9fff")
                     if on_progress:
                         on_progress(
                             StreamProgress(
                                 elapsed_ms=int((time.time() - start_time) * 1000),
-                                total_chars=sum(len(c) for c in chunks),
+                                total_chars=sum(len(chunk) for chunk in chunks),
                                 chinese_chars=chinese_chars,
                             )
                         )
-                elif hasattr(chunk, "message") and hasattr(chunk.message, "content"):
-                    # 完整消息块
-                    pass
-        except Exception as e:
+                event_usage = _plain_usage(_value(event, "usage"))
+                if event_usage:
+                    usage = event_usage
+                response_model = str(
+                    _value(event, "model", response_model) or response_model
+                )
+        except Exception as exc:
             partial = "".join(chunks)
             if len(partial) > 100:
-                logger.warning(f"Anthropic stream interrupted: {e}")
+                logger.warning("Stream interrupted: %s; returning partial content", exc)
                 return LLMResponse(
-                    content=partial, provider="anthropic", finish_reason="incomplete"
+                    content=partial,
+                    usage=usage,
+                    model=response_model,
+                    provider=self.config.provider,
+                    finish_reason="incomplete",
+                    reasoning="".join(reasoning),
                 )
-            raise
+            raise self._wrap_error(exc) from exc
 
         return LLMResponse(
             content="".join(chunks),
-            usage={},
-            provider="anthropic",
+            usage=usage,
+            model=response_model,
+            provider=self.config.provider,
+            finish_reason=finish_reason,
+            reasoning="".join(reasoning),
         )
 
     def _wrap_error(self, error: Exception) -> Exception:
-        """包装错误为更人性化的消息"""
+        """Map LiteLLM/provider failures to OpenWrite's stable error surface."""
         from .errors import (
             APIError,
             AuthenticationError,
-            LLMTimeoutError,
-            RateLimitError,
+            ContextLengthError,
             InvalidRequestError,
+            LLMTimeoutError,
             NetworkError,
+            RateLimitError,
         )
-
         from .response import redact_sensitive_text
 
         error_msg = redact_sensitive_text(error)
-
-        if any(token in error_msg.lower() for token in ("timeout", "timed out")):
-            return LLMTimeoutError("模型服务请求超时，请稍后重试")
-
-        if "400" in error_msg:
-            return InvalidRequestError(
-                f"API 返回 400 (请求参数错误)。可能原因：\n"
-                f"  1. 模型名称不正确（检查 LLM_MODEL）\n"
-                f"  2. 提供方不支持某些参数（如 max_tokens、stream）\n"
-                f"  3. 消息格式不兼容\n"
-                f"建议：设置 LLM_STREAM=false 试试\n"
-                f"原始错误: {error_msg}"
-            )
-
-        if "401" in error_msg or "api_key" in error_msg.lower():
-            return AuthenticationError(
-                f"API 返回 401 (未授权)。请检查 LLM_API_KEY 是否正确。\n原始错误: {error_msg}"
-            )
-
-        if "403" in error_msg or "forbidden" in error_msg.lower():
-            return AuthenticationError(
-                f"API 返回 403 (请求被拒绝)。可能原因：\n"
-                f"  1. API Key 无效或过期\n"
-                f"  2. API 提供方的内容审查拦截了请求\n"
-                f"  3. 账户余额不足\n"
-                f"原始错误: {error_msg}"
-            )
-
-        if "429" in error_msg or "rate_limit" in error_msg.lower():
-            return RateLimitError(
-                f"API 返回 429 (请求过多)。请稍后重试，或检查 API 配额。\n原始错误: {error_msg}"
-            )
-
-        if any(
-            x in error_msg.lower()
-            for x in ["connection", "econnrefused", "enotfound", "fetch failed"]
+        lowered = error_msg.lower()
+        if "context" in lowered and any(
+            token in lowered for token in ("length", "window", "maximum", "too long")
         ):
-            return NetworkError(
-                f"无法连接到 API 服务。可能原因：\n"
-                f"  1. baseUrl 地址不正确（当前：{self.config.base_url}）\n"
-                f"  2. 网络不通或被防火墙拦截\n"
-                f"  3. API 服务暂时不可用\n"
-                f"建议：检查 LLM_BASE_URL 是否包含完整路径（如 /v1）\n"
-                f"原始错误: {error_msg}"
+            return _ensure_exception(
+                ContextLengthError("模型上下文超限，请缩小输入或输出预算", error_msg)
             )
-
-        return APIError(f"LLM API 错误: {error_msg}")
+        if "timeout" in lowered or "timed out" in lowered:
+            return _ensure_exception(
+                LLMTimeoutError("模型服务请求超时，请稍后重试", error_msg)
+            )
+        if "400" in error_msg:
+            return _ensure_exception(
+                InvalidRequestError(
+                    "API 返回 400（请求参数错误），请检查模型名称、接口格式与模型能力",
+                    error_msg,
+                )
+            )
+        if "401" in error_msg or "api_key" in lowered:
+            return _ensure_exception(
+                AuthenticationError("API 返回 401（未授权），请检查 API Key", error_msg)
+            )
+        if "403" in error_msg or "forbidden" in lowered:
+            return _ensure_exception(
+                AuthenticationError("API 返回 403（请求被拒绝）", error_msg)
+            )
+        if "429" in error_msg or "rate_limit" in lowered:
+            return _ensure_exception(
+                RateLimitError("API 返回 429（请求过多），请稍后重试", error_msg)
+            )
+        if any(
+            token in lowered
+            for token in ("connection", "econnrefused", "enotfound", "fetch failed")
+        ):
+            return _ensure_exception(
+                NetworkError(
+                    f"无法连接到 API 服务（Base URL: {self.config.base_url}）",
+                    error_msg,
+                )
+            )
+        return _ensure_exception(APIError("LLM API 错误", error_msg))

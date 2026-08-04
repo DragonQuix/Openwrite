@@ -277,7 +277,12 @@ class AgentContextInspector:
         content = load_chapter(self.project_root, self.novel_id, chapter_id)
         if not content:
             raise AgentContextInspectionError(f"审稿上下文需要已存在章节: {chapter_id}")
-        payload = build_review_payload(packet)
+        from tools.context_builder import ContextBuilder
+
+        generation_context = ContextBuilder(
+            self.project_root, self.novel_id
+        ).build_generation_context(chapter_id)
+        payload = build_review_payload(packet, context=generation_context)
         run = ChapterRunStore(self.project_root, self.novel_id).latest_for_chapter(
             chapter_id, statuses={"written", "reviewed"}
         )

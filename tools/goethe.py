@@ -13,15 +13,24 @@ from typing import Any
 from .agent.confirmation import (
     guard_confirmable_executors,
     is_explicit_mutation_confirmation,
+    remember_relation_previews,
 )
 from .agent.goethe_session_state import (
     GoetheSessionState,
     GoetheSessionStateStore,
     GoetheSessionTurn,
 )
+from .agent.manuscript_safety import manual_chapter_delete_guidance
 from .agent.react import OPENWRITE_TOOLS, ReActAgent, ToolDefinition
 from .agent.toolkits import GOETHE_DIRECT_TOOLKIT
-from .runtime_skills import RuleCompiler, render_runtime_context
+from .outline_contract import OUTLINE_MARKDOWN_CONTRACT
+from .runtime_skills import (
+    RuleCompiler,
+    RuntimeSkillResolver,
+    extract_explicit_skill_mentions,
+    render_runtime_context,
+)
+from .shared_documents import CHARACTER_MARKDOWN_CONTRACT
 
 logger = logging.getLogger(__name__)
 
@@ -39,23 +48,45 @@ GOETHE_TOOL_DESCRIPTIONS: dict[str, str] = {
     "get_outline_structure": "读取卷、幕、节、章树和下一章建议，不修改文件。",
     "edit_outline_structure": (
         "按 revision 增量修改卷、幕、节、章；confirm=false 预览 diff，"
-        "用户明确确认后才以 confirm=true 写入。"
+        "用户明确确认后才以 confirm=true 写入；新增或补全内容必须遵守系统提示中的大纲写入契约。"
     ),
     "summarize_ideation": "汇总当前灵感与讨论，形成共识摘要。",
     "confirm_ideation_summary": (
         "持久化用户对当前想法汇总的明确确认；可继续执行同句中的大纲生成请求。"
     ),
-    "generate_foundation_draft": "生成背景与基础设定草案。",
-    "generate_character_draft": "生成角色草案。",
-    "generate_outline_draft": "只在尚无大纲时生成首版完整草稿；不会直接写入 src。",
+    "generate_foundation_draft": (
+        "生成背景、基础设定、卷纲、初始状态与伏笔 DAG 草案；只写 planning。"
+    ),
+    "confirm_foundation": (
+        "仅在用户明确确认后，将基础设定草案晋升到 canonical，并初始化 truth 与伏笔 DAG。"
+    ),
+    "generate_character_draft": (
+        "生成符合 OpenWrite 角色文档结构的完整草案；只写 planning。"
+    ),
+    "confirm_character_draft": (
+        "仅在用户明确确认后，校验并晋升指定角色草案到 src/characters。"
+    ),
+    "generate_outline_draft": (
+        "只在尚无大纲时按系统提示中的大纲写入契约生成首版完整草稿；不会直接写入 src。"
+    ),
     "read_outline": "读取已确认大纲的原文窗口和 revision；局部修改前必须先调用。",
-    "stage_outline_edits": "用精确 old_text/new_text 补丁暂存局部修改并返回 diff；不会写入 src。",
+    "stage_outline_edits": (
+        "用精确 old_text/new_text 补丁暂存局部修改并返回 diff；新增或补全章纲时必须遵守"
+        "系统提示中的大纲写入契约；不会写入 src。"
+    ),
     "confirm_outline_edits": "仅在用户明确确认后，将待确认大纲补丁写入 src/outline.md。",
     "discard_outline_edits": "用户拒绝修改时丢弃待确认大纲补丁，不改变 src。",
     "extract_style_source": "从用户提供文本提取风格来源。",
     "extract_setting_source": "从用户提供文本提取设定来源。",
     "review_source_pack": "审阅已提取的来源包。",
     "promote_source_pack": "将来源包晋升到可写资产。",
+    "list_reference_library": "列出本机私有参考库的作品、结构确认和拆解状态，不读取整本原文。",
+    "review_reference_source": "读取单部参考作品的证据结论和结构化资产索引，不读取整本原文。",
+    "review_reference_profile": "读取证据化参考画像候选、冲突和排除项，用于和用户讨论取舍。",
+    "preview_reference_adoption": (
+        "按目标、风格维度、主辅角色和适用范围生成项目采纳 diff，不写入项目。"
+    ),
+    "apply_reference_adoption": "仅在用户明确确认后应用刚生成的采纳预览并重新编译项目风格。",
     "prepare_dante_handoff": "检查当前资产是否满足切换到 Dante 的条件，并生成交接产物。",
 }
 
@@ -113,7 +144,7 @@ class GoetheStartupSnapshot:
     recovery_prompt: str
 
 
-DEFAULT_GOETHE_SYSTEM_PROMPT = """你是 OpenWrite 的 Goethe，长期会话规划 Agent。
+DEFAULT_GOETHE_SYSTEM_PROMPT = f"""你是 OpenWrite 的 Goethe，长期会话规划 Agent。
 
 你的职责是汇总灵感、提出建议、收敛人物/设定/大纲，并把确认后的资产整理成可写内容。
 正文推进交给 Dante。项目目录通常已由 Studio 或 `openwrite init` 创建，你不负责建目录。
@@ -149,11 +180,29 @@ DEFAULT_GOETHE_SYSTEM_PROMPT = """你是 OpenWrite 的 Goethe，长期会话规�
 确认后，才可使用预览返回的 base_revision 再次调用并设置 confirm=true。普通讨论不得写入关系。
 当用户要求把人物与出身地点、能力设定、组织、物品或概念联系起来时，先用
 search_relation_targets/get_world_relations 定位候选，再用 edit_world_relations(confirm=false)
-批量预览；只有用户明确确认后才传回 source_revisions 并 confirm=true 写入。
+批量预览；relations 必须优先使用查询返回的正式实体 ID。只有用户明确确认后才传回
+preview_token/preview_tokens 并 confirm=true 写入，不得重新生成 relations。
 修改已有角色、地点、能力设定、故事资料或正文时，先 read_project_document 读取 revision，
 再 edit_project_document(confirm=false) 预览 diff；只有用户明确确认后才写入。
 草案工具（generate_foundation_draft / generate_character_draft / generate_outline_draft）
 只写 planning 草案，不直接当作最终 src 真源；晋升或确认前必须让用户过目。
+基础设定草案由 confirm_foundation 晋升；角色草案由 confirm_character_draft 晋升。
+这两个确认工具只能在用户明确采用当前草案时调用，不能在生成草案的同一轮自动调用。
+用户要求删除已写正文、现有章节或全部章节时，不得调用大纲编辑或文档编辑工具绕过，
+也不得声称重写 src/outline.md 可以删除正文；应引导用户到 Studio 正文页，
+从最新章节开始点击“删除正文”并按章节 ID 手动确认。
+
+参考作品工作流必须保持私有库与项目正典隔离：使用 list_reference_library、
+review_reference_source 和 review_reference_profile 读取证据与结构化候选，不读取或复述整本参考原文。
+讨论采用与否时先给出理由，
+再调用 preview_reference_adoption 生成 diff；不得在同一轮自动调用 apply_reference_adoption，
+除非用户原始请求明确要求直接应用。只有用户明确确认当前预览时，才能携带 preview_id 和
+confirm=true 调用 apply_reference_adoption。Dante 只消费确认后生成的 composed.md，不能替用户
+选择参考作品。参考模式中的人物、专名和专属设定不能直接晋升为项目正典。
+
+{OUTLINE_MARKDOWN_CONTRACT}
+
+{CHARACTER_MARKDOWN_CONTRACT}
 """
 
 
@@ -196,6 +245,21 @@ def _build_goethe_tool_definitions(
             },
         ),
         ToolDefinition(
+            name="confirm_foundation",
+            description=GOETHE_TOOL_DESCRIPTIONS["confirm_foundation"],
+            parameters={
+                "type": "object",
+                "properties": {
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "用户明确确认当前草案时必须为 true",
+                    },
+                },
+                "required": ["confirm"],
+            },
+            required=["confirm"],
+        ),
+        ToolDefinition(
             name="generate_character_draft",
             description=GOETHE_TOOL_DESCRIPTIONS["generate_character_draft"],
             parameters={
@@ -204,6 +268,25 @@ def _build_goethe_tool_definitions(
                     "request_text": {"type": "string", "description": "角色生成请求"},
                 },
             },
+        ),
+        ToolDefinition(
+            name="confirm_character_draft",
+            description=GOETHE_TOOL_DESCRIPTIONS["confirm_character_draft"],
+            parameters={
+                "type": "object",
+                "properties": {
+                    "character_id": {
+                        "type": "string",
+                        "description": "generate_character_draft 返回的角色草案 ID",
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "description": "用户明确确认当前草案时必须为 true",
+                    },
+                },
+                "required": ["character_id", "confirm"],
+            },
+            required=["character_id", "confirm"],
         ),
         ToolDefinition(
             name="generate_outline_draft",
@@ -330,6 +413,97 @@ def _build_goethe_tool_definitions(
                 "required": ["source_id"],
             },
             required=["source_id"],
+        ),
+        ToolDefinition(
+            name="list_reference_library",
+            description=GOETHE_TOOL_DESCRIPTIONS["list_reference_library"],
+            parameters={"type": "object", "properties": {}},
+        ),
+        ToolDefinition(
+            name="review_reference_source",
+            description=GOETHE_TOOL_DESCRIPTIONS["review_reference_source"],
+            parameters={
+                "type": "object",
+                "properties": {
+                    "source_id": {"type": "string", "description": "私有参考库中的作品 ID"},
+                },
+                "required": ["source_id"],
+            },
+            required=["source_id"],
+        ),
+        ToolDefinition(
+            name="review_reference_profile",
+            description=GOETHE_TOOL_DESCRIPTIONS["review_reference_profile"],
+            parameters={
+                "type": "object",
+                "properties": {
+                    "profile_id": {"type": "string", "description": "Studio 生成的参考画像 ID"},
+                },
+                "required": ["profile_id"],
+            },
+            required=["profile_id"],
+        ),
+        ToolDefinition(
+            name="preview_reference_adoption",
+            description=GOETHE_TOOL_DESCRIPTIONS["preview_reference_adoption"],
+            parameters={
+                "type": "object",
+                "properties": {
+                    "profile_id": {"type": "string"},
+                    "selections": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "item_id": {"type": "string"},
+                                "target": {
+                                    "type": "string",
+                                    "enum": ["style", "rules", "inspiration", "setting_candidates"],
+                                },
+                                "dimension": {
+                                    "type": "string",
+                                    "enum": [
+                                        "narration",
+                                        "language",
+                                        "dialogue",
+                                        "rhythm",
+                                        "emotion",
+                                        "structure",
+                                        "craft",
+                                        "avoid",
+                                    ],
+                                },
+                                "role": {
+                                    "type": "string",
+                                    "enum": ["primary", "auxiliary", "validation_only", "avoid"],
+                                },
+                                "scope": {
+                                    "type": "string",
+                                    "enum": ["project", "arc", "chapter"],
+                                },
+                                "scope_id": {"type": "string"},
+                                "adapted_claim": {"type": "string"},
+                            },
+                            "required": ["item_id", "target"],
+                        },
+                    },
+                },
+                "required": ["profile_id", "selections"],
+            },
+            required=["profile_id", "selections"],
+        ),
+        ToolDefinition(
+            name="apply_reference_adoption",
+            description=GOETHE_TOOL_DESCRIPTIONS["apply_reference_adoption"],
+            parameters={
+                "type": "object",
+                "properties": {
+                    "preview_id": {"type": "string"},
+                    "confirm": {"type": "boolean"},
+                },
+                "required": ["preview_id", "confirm"],
+            },
+            required=["preview_id", "confirm"],
         ),
         ToolDefinition(
             name="prepare_dante_handoff",
@@ -543,13 +717,16 @@ class GoetheChatAgent:
             state = self._require_session_state()
             state.last_action = "chat"
             self.session_store.save(state)
-
-            try:
-                response_text = self._run_react_agent(react_agent, user_input)
-            except Exception:
-                state.last_action = "react_error"
-                self.session_store.save(state)
-                raise
+            response_text = manual_chapter_delete_guidance(user_input)
+            if response_text:
+                state.last_action = "manual_chapter_delete_guidance"
+            else:
+                try:
+                    response_text = self._run_react_agent(react_agent, user_input)
+                except Exception:
+                    state.last_action = "react_error"
+                    self.session_store.save(state)
+                    raise
 
             if response_text:
                 self._append_assistant_turn(response_text)
@@ -564,6 +741,7 @@ class GoetheChatAgent:
             raise ValueError("消息不能为空")
         if self.session_state is None:
             self.startup()
+        self._active_user_instruction = text
         if self._should_use_handoff_shortcut(text):
             self._append_user_turn(text)
             handoff = self.prepare_dante_handoff()
@@ -583,12 +761,17 @@ class GoetheChatAgent:
         state = self._require_session_state()
         state.last_action = "chat"
         self.session_store.save(state)
-        try:
-            response_text = self._run_react_agent(self._get_react_agent(), text)
-        except Exception:
-            state.last_action = "react_error"
-            self.session_store.save(state)
-            raise
+        response_text = manual_chapter_delete_guidance(text)
+        if response_text:
+            state.last_action = "manual_chapter_delete_guidance"
+            self._active_user_instruction = ""
+        else:
+            try:
+                response_text = self._run_react_agent(self._get_react_agent(), text)
+            except Exception:
+                state.last_action = "react_error"
+                self.session_store.save(state)
+                raise
         if response_text:
             self._append_assistant_turn(response_text)
         self.session_store.save(self._require_session_state())
@@ -646,31 +829,37 @@ class GoetheChatAgent:
         if react_agent is None:
             return
 
-        allowed_tools, _ = self._runtime_surface()
+        allowed_tools, runtime_prompt = self._runtime_surface()
         canonical_tools = {
             tool.name: tool for tool in _build_goethe_tool_definitions(allowed_tools)
         }
         if hasattr(react_agent, "tools"):
-            existing_tools = list(getattr(react_agent, "tools", []) or [])
-            merged_tools = []
-            seen: set[str] = set()
-            for tool in existing_tools:
-                tool_name = getattr(tool, "name", "")
-                if not tool_name:
-                    merged_tools.append(tool)
-                    continue
-                canonical_tool = canonical_tools.get(tool_name)
-                if canonical_tool is not None:
-                    merged_tools.append(canonical_tool)
-                    seen.add(tool_name)
-                else:
-                    merged_tools.append(tool)
-            for tool_name, canonical_tool in canonical_tools.items():
-                if tool_name not in seen and all(
-                    getattr(tool, "name", "") != tool_name for tool in merged_tools
-                ):
-                    merged_tools.append(canonical_tool)
-            react_agent.tools = merged_tools
+            if self._react_agent_factory is not None:
+                react_agent.tools = list(canonical_tools.values())
+            else:
+                existing_tools = list(getattr(react_agent, "tools", []) or [])
+                merged_tools = []
+                seen: set[str] = set()
+                for tool in existing_tools:
+                    tool_name = getattr(tool, "name", "")
+                    if not tool_name:
+                        merged_tools.append(tool)
+                        continue
+                    canonical_tool = canonical_tools.get(tool_name)
+                    if canonical_tool is not None:
+                        merged_tools.append(canonical_tool)
+                        seen.add(tool_name)
+                    else:
+                        merged_tools.append(tool)
+                for tool_name, canonical_tool in canonical_tools.items():
+                    if tool_name not in seen and all(
+                        getattr(tool, "name", "") != tool_name for tool in merged_tools
+                    ):
+                        merged_tools.append(canonical_tool)
+                react_agent.tools = merged_tools
+
+        if self._react_agent_factory is not None and hasattr(react_agent, "system_prompt"):
+            react_agent.system_prompt = f"{DEFAULT_GOETHE_SYSTEM_PROMPT}\n\n{runtime_prompt}"
 
         if self._combined_tool_executors() and hasattr(react_agent, "_register_tool_executors"):
             react_agent._register_tool_executors(self._combined_tool_executors())
@@ -680,6 +869,7 @@ class GoetheChatAgent:
     def _run_react_agent(self, react_agent: Any, instruction: str) -> str:
         self._active_user_instruction = instruction
         try:
+            self._ensure_react_agent_surface(react_agent)
             result = react_agent.run(
                 instruction,
                 context_messages=self._build_context_messages(include_recent_turns=False),
@@ -753,6 +943,18 @@ class GoetheChatAgent:
             combined.update(tool_executors)
         if isinstance(action_tool_executors, dict):
             combined.update(action_tool_executors)
+        combined = remember_relation_previews(
+            combined,
+            working_memory=lambda: (
+                self.session_state.working_memory if self.session_state is not None else {}
+            ),
+            persist=lambda: (
+                self.session_store.save(self.session_state)
+                if self.session_state is not None
+                else None
+            ),
+            instruction=lambda: self._active_user_instruction,
+        )
         return guard_confirmable_executors(
             combined,
             instruction=lambda: self._active_user_instruction,
@@ -791,6 +993,23 @@ class GoetheChatAgent:
     def _runtime_surface(self) -> tuple[set[str], str]:
         layers = self._load_tool_layers()
         resolution = layers.get("runtime_resolution")
+        resolver = RuntimeSkillResolver(self.project_root)
+        available = set(resolver.discover()[0])
+        explicit = tuple(
+            skill_id
+            for skill_id in extract_explicit_skill_mentions(
+                self._active_user_instruction
+            )
+            if skill_id in available
+        )
+        if explicit:
+            baseline = {tool.name for tool in _build_goethe_tool_definitions()}
+            resolution = resolver.resolve(
+                agent="goethe",
+                task="planning",
+                base_tools=baseline,
+                explicit_skills=explicit,
+            )
         if resolution is None:
             return (
                 {tool.name for tool in _build_goethe_tool_definitions()},

@@ -91,6 +91,8 @@ def test_exec_get_truth_files_returns_canonical_keys_only(tmp_path: Path):
     result = _exec_get_truth_files(tmp_path)
 
     assert result == {
+        "schema_version": 1,
+        "revision": 0,
         "current_state": "状态",
         "ledger": "账本",
         "relationships": "关系",

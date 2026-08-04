@@ -242,11 +242,7 @@ class RuntimeStateManager:
         state: RuntimeState, operation: RuntimeDeltaOperation, chapter_id: str
     ) -> None:
         if operation.op == "append":
-            payload = (
-                dict(operation.value)
-                if isinstance(operation.value, dict)
-                else {"event": str(operation.value or "")}
-            )
+            payload = dict(operation.value) if isinstance(operation.value, dict) else {}
             payload.setdefault("id", operation.target or f"event_{uuid4().hex[:12]}")
             payload.setdefault("chapter_id", chapter_id)
             state.timeline.append(TimelineRuntimeEvent.model_validate(payload))

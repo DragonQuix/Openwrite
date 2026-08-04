@@ -118,8 +118,8 @@ def test_save_foundation_draft_normalizes_runtime_drafts(tmp_path: Path):
     assert foundation_meta["id"] == "story_foundation"
     assert background_body.strip() == "背景A"
     assert foundation_body.strip() == "设定B"
-    assert (store.story_src_dir / "background.md").read_text(encoding="utf-8") == store.background_draft_path.read_text(encoding="utf-8")
-    assert (store.story_src_dir / "foundation.md").read_text(encoding="utf-8") == store.foundation_draft_path.read_text(encoding="utf-8")
+    assert not (store.story_src_dir / "background.md").exists()
+    assert not (store.story_src_dir / "foundation.md").exists()
 
 
 def test_load_story_document_returns_metadata_and_body(tmp_path: Path):

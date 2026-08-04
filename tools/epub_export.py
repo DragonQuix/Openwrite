@@ -14,6 +14,7 @@ from xml.etree import ElementTree
 
 from markdown_it import MarkdownIt
 
+from tools.character_state_index import strip_character_state_annotations
 from tools.novel_workspace import list_chapters
 
 
@@ -60,7 +61,9 @@ def export_epub(
     chapter_entries: list[tuple[str, str, str]] = []
     renderer = MarkdownIt("commonmark", {"html": False})
     for index, chapter in enumerate(chapters, start=1):
-        markdown = chapter.path.read_text(encoding="utf-8")
+        markdown = strip_character_state_annotations(
+            chapter.path.read_text(encoding="utf-8")
+        )
         digest.update(chapter.chapter_id.encode("utf-8"))
         digest.update(markdown.encode("utf-8"))
         chapter_title = chapter.title or chapter.chapter_id

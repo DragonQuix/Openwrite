@@ -241,6 +241,22 @@ def test_generated_report_rejects_repeated_evidence_after_one_repair(
     assert calls == 2
 
 
+def test_generated_report_rejects_low_coverage_for_long_chunk():
+    with pytest.raises(SourceAnalysisError, match="至少需要 3 条"):
+        SourceAnalysisService._validate_generated_report_quality(
+            SimpleNamespace(findings=[SimpleNamespace()]),
+            chunk_chars=2000,
+        )
+
+
+def test_generated_report_rejects_more_than_eight_findings():
+    with pytest.raises(SourceAnalysisError, match="8 条结论上限"):
+        SourceAnalysisService._validate_generated_report_quality(
+            SimpleNamespace(findings=[SimpleNamespace() for _ in range(9)]),
+            chunk_chars=2000,
+        )
+
+
 def test_changed_source_reuses_unchanged_chunks(tmp_path: Path):
     service = _service(tmp_path)
     original = _text(chapters=7, body_size=80)
@@ -339,6 +355,59 @@ def test_evidence_quote_repairs_incorrect_model_offsets(tmp_path: Path):
     assert result["ok"] is True
     assert evidence["start"] == text.index("钟声响了三次")
     assert text[evidence["start"] : evidence["end"]] == evidence["quote"]
+
+
+def test_evidence_quote_normalizes_quote_glyphs_but_persists_source_slice(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    text = '第一章\n\n他说："钟声响了三次。"'
+    service.prepare(
+        "reference_quote_glyphs",
+        text,
+        relative_name="quote-glyphs.txt",
+        input_budget_tokens=500,
+    )
+
+    def normalized_quotes(chunk: str, context: dict) -> dict:
+        payload = _analyzer(chunk, context)
+        supplied = "他说：“钟声响了三次。”"
+        payload["findings"][0]["evidence"] = [
+            {"start": 0, "end": len(supplied), "quote": supplied}
+        ]
+        return payload
+
+    result = service.analyze("reference_quote_glyphs", analyzer=normalized_quotes)
+    evidence = result["report"]["findings"][0]["evidence"][0]
+
+    assert result["ok"] is True
+    assert evidence["quote"] == '他说："钟声响了三次。"'
+    assert text[evidence["start"] : evidence["end"]] == evidence["quote"]
+
+
+def test_invalid_extra_evidence_is_dropped_when_finding_keeps_valid_quote(
+    tmp_path: Path,
+):
+    service = _service(tmp_path)
+    text = "第一章\n\n钟声响了三次。"
+    service.prepare(
+        "reference_extra_evidence",
+        text,
+        relative_name="extra-evidence.txt",
+        input_budget_tokens=500,
+    )
+
+    def extra_invalid(chunk: str, context: dict) -> dict:
+        payload = _analyzer(chunk, context)
+        payload["findings"][0]["evidence"].append(
+            {"start": 0, "end": 0, "quote": ""}
+        )
+        return payload
+
+    result = service.analyze("reference_extra_evidence", analyzer=extra_invalid)
+
+    assert result["ok"] is True
+    assert len(result["report"]["findings"][0]["evidence"]) == 1
 
 
 def test_synthesis_excludes_bound_content_and_promotion_requires_confirmation(

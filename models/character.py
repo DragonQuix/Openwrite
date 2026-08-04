@@ -31,6 +31,7 @@ class CharacterProfile(BaseModel):
     appearance: str = Field(default="", description="外貌")
     personality: List[str] = Field(default_factory=list, description="性格标签")
     faction: str = Field(default="", description="势力")
+    aliases: List[str] = Field(default_factory=list, description="别名")
     current_location: str = Field(default="", description="当前位置")
     current_status: str = Field(default="", description="当前状态")
     tags: List[str] = Field(default_factory=list, description="标签")
@@ -51,6 +52,8 @@ class CharacterProfile(BaseModel):
             parts.append(f"背景: {self.backstory}")
         if self.faction:
             parts.append(f"势力: {self.faction}")
+        if self.aliases:
+            parts.append(f"别名: {'、'.join(self.aliases)}")
         if self.current_location:
             parts.append(f"位置: {self.current_location}")
         if self.current_status:
@@ -109,5 +112,6 @@ class CharacterCard(BaseModel):
             backstory=self.background,
             personality=self.personality,
             faction=self.faction,
+            aliases=self.aliases,
             related=self.relationships,
         )

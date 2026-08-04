@@ -15,8 +15,8 @@ from tools.agent.director import MultiAgentDirector
 from tools.agent.reviewer import ReviewResult
 from tools.agent.writer import WritingResult
 from tools.chapter_assembler import ChapterAssemblerV2, ChapterAssemblyPacket
-from tools.frontmatter import parse_toml_front_matter
 from tools.init_project import init_project
+from tools.llm.context import ContextBudgetPolicy
 from tools.truth_manager import TruthFilesManager
 
 
@@ -132,6 +132,78 @@ def test_packet_budget_counts_canonical_groups_once_and_keeps_legacy_fallbacks()
     assert ChapterAssemblerV2._packet_character_count(legacy) == expected
 
 
+def test_packet_document_budget_keeps_every_relevant_character():
+    documents = {
+        "角色甲": "甲" * 2200,
+        "角色乙": "乙" * 2200,
+        "角色丙": "丙" * 2200,
+        "角色丁": "丁" * 2200,
+        "角色戊": "戊" * 2200,
+        "角色己": "己" * 2200,
+    }
+
+    kept, truncated, dropped = ChapterAssemblerV2._limit_document_map(
+        documents,
+        total_chars=7000,
+        per_document=2200,
+    )
+
+    assert set(kept) == set(documents)
+    assert all(kept[name] for name in documents)
+    assert set(truncated) == set(documents)
+    assert dropped == []
+    assert sum(len(value) for value in kept.values()) <= 7000
+
+
+def test_packet_budget_keeps_full_documents_when_context_is_plentiful(tmp_path: Path):
+    assembler = ChapterAssemblerV2(tmp_path, "demo")
+    assembler._context_policy = ContextBudgetPolicy(
+        10000, 0, input_budget_override=10000
+    )
+    full_profile = "# 沈烬\n\n" + "完整角色资料。" * 200
+    packet = ChapterAssemblyPacket(
+        novel_id="demo",
+        chapter_id="ch_001",
+        character_documents={"沈烬": full_profile},
+        setting_documents={"world.rules": "完整规则。" * 100},
+    )
+
+    assembler._enforce_context_budget(packet)
+
+    assert packet.character_documents["沈烬"] == full_profile
+    assert packet.compression["strategy"] == "staircase-proportional-v3"
+    assert packet.compression["applied"] is False
+    assert packet.compression["level"] == 0
+
+
+def test_packet_budget_uses_staircase_tier_and_proportional_document_shares(
+    tmp_path: Path,
+):
+    assembler = ChapterAssemblerV2(tmp_path, "demo")
+    assembler._context_policy = ContextBudgetPolicy(
+        1000, 0, input_budget_override=1000
+    )
+    packet = ChapterAssemblyPacket(
+        novel_id="demo",
+        chapter_id="ch_001",
+        previous_chapter_content="上" * 3000,
+        character_documents={
+            "沈烬": "甲" * 3000,
+            "刑无咎": "乙" * 3000,
+        },
+        setting_documents={"world.rules": "规" * 3000},
+        style_documents={"work.composed": "风" * 3000},
+    )
+
+    assembler._enforce_context_budget(packet)
+
+    assert packet.compression["strategy"] == "staircase-proportional-v3"
+    assert packet.compression["applied"] is True
+    assert packet.compression["level"] == 4
+    assert packet.compression["final_estimated_tokens"] <= 1000
+    assert set(packet.character_documents) == {"沈烬", "刑无咎"}
+
+
 def test_director_run_uses_runtime_truth_files_for_writer_and_reviewer(tmp_path: Path):
     captured: dict[str, dict] = {}
     ctx = SimpleNamespace(project_root=str(tmp_path))
@@ -139,6 +211,7 @@ def test_director_run_uses_runtime_truth_files_for_writer_and_reviewer(tmp_path:
     packet = ChapterAssemblyPacket(
         novel_id="demo",
         chapter_id="ch_001",
+        target_words=5200,
         character_documents={"陈明": "角色文档"},
         style_documents={"style": "风格"},
         concept_documents={"world.rules": "静态规则"},
@@ -166,15 +239,27 @@ def test_director_run_uses_runtime_truth_files_for_writer_and_reviewer(tmp_path:
             )
 
     class FakeReviewer:
-        async def review(self, content: str, context: dict):
+        async def review(
+            self,
+            content: str,
+            context: dict,
+            dimensions=None,
+            strict: bool = False,
+        ):
             captured["reviewer"] = context
+            captured["review_options"] = {
+                "dimensions": dimensions,
+                "strict": strict,
+            }
             return ReviewResult(passed=True, issues=[], summary="ok", score=95)
 
     director.writer = FakeWriter()
     director.reviewer = FakeReviewer()
     director.assemble_packet = lambda chapter_id: packet
 
-    result = asyncio.run(director.run("ch_001"))
+    result = asyncio.run(
+        director.run("ch_001", dimensions=[1, 33], strict=True)
+    )
 
     assert result.packet is packet
     assert captured["writer"]["current_state"] == "这是运行态 current_state。"
@@ -183,9 +268,15 @@ def test_director_run_uses_runtime_truth_files_for_writer_and_reviewer(tmp_path:
     assert "particle_ledger" not in captured["writer"]
     assert "character_matrix" not in captured["writer"]
     assert captured["writer"]["current_state"] != "静态规则"
+    assert captured["writer"]["target_words"] == 5200
+    assert captured["writer"]["active_characters"][0]["description"] == "角色文档"
     assert captured["reviewer"]["current_state"] == "这是运行态 current_state。"
     assert "particle_ledger" not in captured["reviewer"]
     assert "character_matrix" not in captured["reviewer"]
+    assert captured["review_options"] == {
+        "dimensions": [1, 33],
+        "strict": True,
+    }
 
 
 def test_apply_state_updates_accepts_canonical_truth_keys(tmp_path: Path):
@@ -207,17 +298,34 @@ def test_apply_state_updates_accepts_canonical_truth_keys(tmp_path: Path):
         "ledger": "账本更新",
         "relationships": "关系更新",
     }
-    assert truth.current_state == "状态更新"
-    assert truth.ledger == "账本更新"
-    assert truth.relationships == "关系更新"
+    assert "状态更新" in truth.current_state
+    assert "账本更新" in truth.ledger
+    assert "关系更新" in truth.relationships
+    assert director.truth_manager.load_runtime_state().revision == 1
 
 
-def test_curate_new_concepts_writes_frontmatter_entity_document(tmp_path: Path):
+def test_director_reports_proposed_concepts_without_writing_canonical_asset(
+    tmp_path: Path,
+):
     init_project(tmp_path, "demo")
     ctx = SimpleNamespace(project_root=str(tmp_path))
     director = MultiAgentDirector(ctx, novel_id="demo")
 
-    created = director._curate_new_concepts("新概念：灵网回声", {})
+    proposed = director._collect_proposed_concepts(
+        {
+            "operations": [
+                {
+                    "op": "append",
+                    "collection": "proposed_entities",
+                    "value": {
+                        "name": "灵网回声",
+                        "entity_type": "unknown",
+                        "reason": "本章首次出现",
+                    },
+                }
+            ]
+        }
+    )
 
     entity_path = (
         tmp_path
@@ -229,18 +337,8 @@ def test_curate_new_concepts_writes_frontmatter_entity_document(tmp_path: Path):
         / "entities"
         / "灵网回声.md"
     )
-    text = entity_path.read_text(encoding="utf-8")
-    meta, body = parse_toml_front_matter(text)
-
-    assert created == ["灵网回声"]
-    assert meta["id"] == "灵网回声"
-    assert meta["name"] == "灵网回声"
-    assert meta["type"] == "concept"
-    assert meta["detail_refs"] == ["规则", "特征", "关联"]
-    assert body.lstrip().startswith("# 灵网回声")
-    assert "## 规则" in body
-    assert "## 特征" in body
-    assert "## 关联" in body
+    assert proposed == ["灵网回声"]
+    assert not entity_path.exists()
 
 
 def test_assembler_prefers_src_outline_over_runtime_hierarchy(tmp_path: Path):
@@ -420,3 +518,43 @@ summary = "谨慎的磁带修复师。"
     assert "沈砚" in packet.character_documents
     assert "谨慎的磁带修复师" in packet.character_documents["沈砚"]
     assert "阿迟" in packet.character_documents["沈砚"]
+
+
+def test_assembler_uses_current_chapter_mentions_and_not_section_character_union(
+    tmp_path: Path,
+):
+    novel_root = _bootstrap_novel(tmp_path)
+    (novel_root / "src" / "outline.md").write_text(
+        """# 测试小说
+
+## 第一篇
+### 第一节
+#### 第一章：最后一课
+> 出场角色: 沈烬
+
+#### 第二章：别处
+> 出场角色: 裴织
+""",
+        encoding="utf-8",
+    )
+    characters = novel_root / "src" / "characters"
+    (characters / "shen_jin.md").write_text(
+        '+++\nid = "shen_jin"\nname = "沈烬"\ntier = "主角"\nsummary = "机械师。"\n+++\n# 沈烬\n',
+        encoding="utf-8",
+    )
+    (characters / "xing_wujiu.md").write_text(
+        '+++\nid = "xing_wujiu"\nname = "刑无咎"\naliases = ["老刑"]\ntier = "重要配角"\nsummary = "顾问。"\n+++\n# 刑无咎\n',
+        encoding="utf-8",
+    )
+    (characters / "pei_zhi.md").write_text(
+        '+++\nid = "pei_zhi"\nname = "裴织"\ntier = "重要配角"\nsummary = "构装师。"\n+++\n# 裴织\n',
+        encoding="utf-8",
+    )
+    manuscript = novel_root / "data" / "manuscript" / "arc_001" / "ch_001.md"
+    manuscript.write_text("# 第一章\n\n沈烬听老刑讲完最后一课。\n", encoding="utf-8")
+
+    packet = ChapterAssemblerV2(tmp_path, "demo").assemble("ch_001")
+
+    assert "沈烬" in packet.character_documents
+    assert "刑无咎" in packet.character_documents
+    assert "裴织" not in packet.character_documents

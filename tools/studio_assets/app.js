@@ -1,1 +1,1 @@
-import "/js/application.js?v=outline-6";
+import "/js/application.js?v=chapter-delete-1";

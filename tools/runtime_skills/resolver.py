@@ -6,6 +6,7 @@ import difflib
 import hashlib
 import json
 import os
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,9 +41,15 @@ class _SkillRecord:
     root: Path
     layer: str
     source: str
+    source_format: str = "openwrite-manifest"
+    explicit_only: bool = False
+    instruction_text: str = ""
 
 
 _LAYER_ORDER = ("builtin", "global", "project")
+_STANDARD_SKILL_FILE = "SKILL.md"
+_SKILL_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
+_SKILL_MENTION_RE = re.compile(r"(?<![A-Za-z0-9_@])@([a-z][a-z0-9_-]{1,63})", re.I)
 
 
 def _safe_relative(value: str) -> bool:
@@ -65,6 +72,40 @@ def _as_str_tuple(value: Any) -> tuple[str, ...]:
     return (str(value),)
 
 
+def extract_explicit_skill_mentions(text: str) -> tuple[str, ...]:
+    """Return stable, de-duplicated ``@skill-id`` mentions from one user turn."""
+    found: list[str] = []
+    for match in _SKILL_MENTION_RE.finditer(str(text or "")):
+        skill_id = match.group(1).lower()
+        if skill_id not in found:
+            found.append(skill_id)
+    return tuple(found)
+
+
+def _slugify_skill_id(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9_-]+", "-", str(value).strip().lower()).strip("-_")
+    if not slug:
+        digest = hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:12]
+        slug = f"skill-{digest}"
+    elif not slug[0].isalpha():
+        slug = f"skill-{slug}".strip("-")
+    return slug[:64]
+
+
+def _split_skill_markdown(text: str) -> tuple[dict[str, Any], str]:
+    """Parse optional YAML front matter without imposing a private schema."""
+    normalized = str(text).replace("\r\n", "\n")
+    if not normalized.startswith("---\n"):
+        return {}, normalized.strip()
+    end = normalized.find("\n---\n", 4)
+    if end < 0:
+        raise ValueError("SKILL.md front matter 未闭合")
+    raw = yaml.safe_load(normalized[4:end]) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("SKILL.md front matter 必须是对象")
+    return raw, normalized[end + 5 :].strip()
+
+
 class RuntimeSkillResolver:
     """Load and resolve built-in, machine-global and project Skills."""
 
@@ -77,6 +118,7 @@ class RuntimeSkillResolver:
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.builtin_root = Path(builtin_root or Path(__file__).parent).resolve()
+        self._custom_global_root = global_root is not None
         configured_global = os.environ.get("OPENWRITE_GLOBAL_SKILLS_DIR", "").strip()
         self.global_root = Path(
             global_root or configured_global or (Path.home() / ".openwrite" / "skills")
@@ -85,19 +127,55 @@ class RuntimeSkillResolver:
     def discover(self) -> tuple[dict[str, _SkillRecord], tuple[SkillDiagnosticV1, ...]]:
         records: dict[str, _SkillRecord] = {}
         diagnostics: list[SkillDiagnosticV1] = []
-        roots = (
-            ("builtin", self.builtin_root),
-            ("global", self.global_root),
-            ("project", self.project_root / ".openwrite" / "skills"),
+        roots: list[tuple[str, Path, bool]] = [
+            ("builtin", self.builtin_root, False),
+            ("global", self.global_root, False),
+        ]
+        if not self._custom_global_root:
+            roots.extend(
+                [
+                    ("global", Path.home() / ".agents" / "skills", True),
+                    ("global", Path.home() / ".openclaw" / "skills", True),
+                ]
+            )
+        configured_roots = os.environ.get("OPENWRITE_SKILL_DIRS", "").strip()
+        roots.extend(
+            ("global", Path(item).expanduser(), True)
+            for item in configured_roots.split(os.pathsep)
+            if item.strip()
         )
-        for layer, root in roots:
+        roots.extend(
+            [
+                ("project", self.project_root / "skills", True),
+                ("project", self.project_root / ".agents" / "skills", True),
+                ("project", self.project_root / ".openwrite" / "skills", False),
+            ]
+        )
+        for layer, root, prefer_standard in roots:
             if not root.is_dir():
                 continue
-            for skill_dir in sorted(root.iterdir()):
+            candidates = (
+                [root]
+                if (root / _STANDARD_SKILL_FILE).is_file()
+                else sorted(root.iterdir())
+            )
+            for skill_dir in candidates:
                 manifest_path = skill_dir / "manifest.yaml"
-                if not skill_dir.is_dir() or not manifest_path.is_file():
+                standard_path = skill_dir / _STANDARD_SKILL_FILE
+                if not skill_dir.is_dir():
                     continue
-                record = self._load_record(layer, skill_dir, manifest_path, diagnostics)
+                if standard_path.is_file() and prefer_standard:
+                    record = self._load_standard_record(
+                        layer, skill_dir, standard_path, diagnostics
+                    )
+                elif manifest_path.is_file():
+                    record = self._load_record(layer, skill_dir, manifest_path, diagnostics)
+                elif standard_path.is_file():
+                    record = self._load_standard_record(
+                        layer, skill_dir, standard_path, diagnostics
+                    )
+                else:
+                    continue
                 if record is None:
                     continue
                 previous = records.get(record.manifest.id)
@@ -112,6 +190,63 @@ class RuntimeSkillResolver:
                     )
                 records[record.manifest.id] = record
         return records, tuple(diagnostics)
+
+    def _load_standard_record(
+        self,
+        layer: str,
+        skill_dir: Path,
+        skill_path: Path,
+        diagnostics: list[SkillDiagnosticV1],
+    ) -> _SkillRecord | None:
+        source = str(skill_path)
+        try:
+            raw, body = _split_skill_markdown(skill_path.read_text(encoding="utf-8"))
+            skill_id = str(raw.get("id") or _slugify_skill_id(skill_dir.name)).lower()
+            if not _SKILL_ID_RE.fullmatch(skill_id):
+                raise ValueError(f"无效 Skill id: {skill_id}")
+            budget_raw = raw.get("budget") if isinstance(raw.get("budget"), dict) else {}
+            manifest = SkillManifestV1.model_validate(
+                {
+                    "schema_version": 1,
+                    "id": skill_id,
+                    "version": str(raw.get("version") or "1.0.0"),
+                    "name": str(raw.get("name") or skill_dir.name)[:120],
+                    "description": str(raw.get("description") or "")[:500],
+                    "enabled": bool(raw.get("enabled", True)),
+                    "agents": _as_str_tuple(raw.get("agents")),
+                    "tasks": _as_str_tuple(raw.get("tasks")),
+                    "intents": _as_str_tuple(raw.get("intents")),
+                    "document_types": _as_str_tuple(raw.get("document_types")),
+                    "allow_tools": _as_str_tuple(raw.get("allow_tools") or "*"),
+                    "requires": _as_str_tuple(raw.get("requires")),
+                    "conflicts_with": _as_str_tuple(raw.get("conflicts_with")),
+                    "instructions_file": _STANDARD_SKILL_FILE,
+                    "references": _as_str_tuple(raw.get("references")),
+                    "output_contract": str(raw.get("output_contract") or "text"),
+                    "budget": budget_raw,
+                }
+            )
+            paths = (manifest.instructions_file,) + manifest.references
+            if any(not _safe_relative(path) for path in paths):
+                raise ValueError("Skill 资源路径必须是当前 Skill 目录内的相对路径")
+        except (OSError, ValueError, ValidationError, yaml.YAMLError) as exc:
+            diagnostics.append(
+                SkillDiagnosticV1(
+                    code="invalid_manifest",
+                    message=f"无法读取标准 SKILL.md: {exc}",
+                    source=source,
+                )
+            )
+            return None
+        return _SkillRecord(
+            manifest=manifest,
+            root=skill_dir.resolve(),
+            layer=layer,
+            source=source,
+            source_format="standard-skill-md",
+            explicit_only=True,
+            instruction_text=body,
+        )
 
     def _load_record(
         self,
@@ -167,6 +302,8 @@ class RuntimeSkillResolver:
                     "output_contract": record.manifest.output_contract,
                     "budget": record.manifest.budget.model_dump(mode="json"),
                     "source": record.source,
+                    "source_format": record.source_format,
+                    "activation": "explicit" if record.explicit_only else "automatic",
                 }
                 for record in records.values()
             ],
@@ -213,7 +350,7 @@ class RuntimeSkillResolver:
                     or document_type in manifest.document_types
                 )
             )
-            if not requested and matches:
+            if not requested and matches and not record.explicit_only:
                 selected_ids.append(skill_id)
                 reasons.append(f"{skill_id}: agent/task/intent 匹配")
         if requested:
@@ -432,6 +569,8 @@ class RuntimeSkillResolver:
     def _read_resource(record: _SkillRecord, relative: str, limit: int) -> str:
         if not _safe_relative(relative):
             return ""
+        if relative == _STANDARD_SKILL_FILE and record.instruction_text:
+            return record.instruction_text[: max(0, limit)]
         path = (record.root / relative).resolve()
         try:
             path.relative_to(record.root)
@@ -486,6 +625,14 @@ def render_runtime_context(
     ]
     if resolution.instructions:
         lines.extend(("", "Runtime instructions:", resolution.instructions))
+    references = [
+        (skill.id, reference)
+        for skill in resolution.skills
+        for reference in skill.references
+    ]
+    if references:
+        lines.extend(("", "Runtime static references:"))
+        lines.extend(f"[{skill_id}] {reference}" for skill_id, reference in references)
     if rules is not None:
         lines.extend(("", f"Confirmed project rules revision: {rules.revision}"))
         if rules.mechanical_constraints:

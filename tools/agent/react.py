@@ -14,6 +14,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..outline_contract import OUTLINE_MARKDOWN_CONTRACT
+from ..shared_documents import CHARACTER_MARKDOWN_CONTRACT
+
 logger = logging.getLogger(__name__)
 
 
@@ -528,6 +531,11 @@ OPENWRITE_TOOLS = [
             "properties": {
                 "chapter_id": {"type": "string", "description": "章节 ID"},
                 "strict": {"type": "boolean", "description": "严格模式"},
+                "dimensions": {
+                    "type": "array",
+                    "items": {"type": "integer", "minimum": 1, "maximum": 37},
+                    "description": "只审查指定维度；省略时审查全部 37 个维度",
+                },
             },
             "required": [],
         },
@@ -863,9 +871,10 @@ OPENWRITE_TOOLS = [
                         "settings",
                         "continuity",
                         "chapters",
+                        "sources",
                     ],
                     "description": (
-                        "范围：all/outline/core/characters/settings/continuity/chapters；"
+                        "范围：all/outline/core/characters/settings/continuity/chapters/sources；"
                         "旧 story/world/assets 调用仍由运行时兼容"
                     ),
                 },
@@ -931,7 +940,10 @@ OPENWRITE_TOOLS = [
     ),
     ToolDefinition(
         name="list_chapters",
-        description="列出所有章节。",
+        description=(
+            "列出所有章节及其小说项目相对路径。读取正文时必须把返回的 path 原样传给"
+            " read_project_document，不要根据 chapter_id 猜测目录。"
+        ),
         parameters={
             "type": "object",
             "properties": {},
@@ -939,7 +951,7 @@ OPENWRITE_TOOLS = [
     ),
     ToolDefinition(
         name="create_outline",
-        description="创建或更新大纲。",
+        description="按系统提示中的大纲写入契约创建大纲；已有大纲应优先使用增量编辑工具。",
         parameters={
             "type": "object",
             "properties": {
@@ -967,6 +979,7 @@ OPENWRITE_TOOLS = [
         description=(
             "按 revision 增量编辑 Studio 同源的卷/幕/节/章树；支持重命名、"
             "修改节点内容、新增同级/下级和删除。修改内容只替换当前标题下、"
+            "新增或补全的节点内容必须遵守系统提示中的大纲写入契约。"
             "子标题前的正文块。删除会让后续卷/幕/节/章连续补位并在 diff 中"
             "完整预览。默认只返回 "
             "diff，用户确认后设置 confirm=true 才写入；若补位会改变已有正文的章节号或 "
@@ -1008,27 +1021,63 @@ OPENWRITE_TOOLS = [
     ),
     ToolDefinition(
         name="create_character",
-        description="创建角色。",
+        description="创建角色；content 可传入完整的 TOML front matter + Markdown 角色文档。",
         parameters={
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "角色名"},
                 "description": {"type": "string", "description": "角色描述"},
+                "content": {
+                    "type": "string",
+                    "description": "可选的完整角色文档；提供时会保留并规范化其结构",
+                },
             },
             "required": ["name"],
         },
     ),
     ToolDefinition(
         name="get_truth_files",
-        description="读取真相文件（世界状态、伏笔、摘要等）。",
+        description=(
+            "完整读取 runtime-delta-v1 的运行态投影：current_state、ledger、relationships，"
+            "并返回后续增量更新所需的 revision。"
+        ),
         parameters={
             "type": "object",
             "properties": {},
         },
     ),
     ToolDefinition(
+        name="get_character_state",
+        description=(
+            "按人物名查询内联状态批注。当前写作章节由系统自动推断；当前状态会追溯"
+            "全书，lookback 只限制返回的近期变化历史，不会截断仍然有效的旧状态。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "人物名"},
+                "field": {
+                    "type": "string",
+                    "description": "可选状态维度，如位置、伤势、与某人的关系",
+                },
+                "lookback": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "default": 50,
+                    "description": "返回最近多少章的变化历史；默认 50",
+                },
+            },
+            "required": ["name"],
+        },
+        required=["name"],
+    ),
+    ToolDefinition(
         name="update_truth_file",
-        description="更新真相文件。",
+        description=(
+            "向一个真相文件追加本章新增事实，不覆盖整份文件。默认仅预览 diff；"
+            "先用 get_truth_files 取得 source_revision，只有用户确认后才能设置 confirm=true 应用。"
+        ),
         parameters={
             "type": "object",
             "properties": {
@@ -1036,10 +1085,27 @@ OPENWRITE_TOOLS = [
                     "type": "string",
                     "description": "文件名（current_state/ledger/relationships）",
                 },
-                "content": {"type": "string", "description": "新内容"},
+                "content": {
+                    "type": "string",
+                    "description": "只含新增客观事实的追加内容，不得传入整份文件",
+                },
+                "chapter_id": {
+                    "type": "string",
+                    "description": "事实来源章节；省略时使用当前章节，无法推断时记为 manual",
+                },
+                "source_revision": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "get_truth_files 返回的 revision",
+                },
+                "confirm": {
+                    "type": "boolean",
+                    "description": "是否应用；默认 false，仅预览 diff",
+                },
             },
-            "required": ["file_name", "content"],
+            "required": ["file_name", "content", "source_revision"],
         },
+        required=["file_name", "content", "source_revision"],
     ),
     # 伏笔管理
     ToolDefinition(
@@ -1106,7 +1172,10 @@ OPENWRITE_TOOLS = [
     # 设定查询（工具名保留 world 以兼容既有调用）
     ToolDefinition(
         name="query_world",
-        description="查询设定实体（兼容工具名）。可列出所有实体或获取单个实体详情。",
+        description=(
+            "查询设定实体（兼容工具名）。不传 entity_id 时列出实体摘要；"
+            "传入 entity_id 时返回该实体的完整描述、规则、特征、关系和扩展段落。"
+        ),
         parameters={
             "type": "object",
             "properties": {
@@ -1123,7 +1192,8 @@ OPENWRITE_TOOLS = [
         name="get_world_relations",
         description=(
             "获取与 Studio 同源的关系图谱；包含 front matter、关联段落和人物关系段落。"
-            "需要按名称、ID 或关系文字定位时，先读取完整图谱再在结果中搜索。"
+            "返回全部节点和关系，不静默截断；需要按名称、ID 或关系文字定位时，"
+            "先读取完整图谱再在结果中搜索。"
         ),
         parameters={
             "type": "object",
@@ -1181,7 +1251,7 @@ OPENWRITE_TOOLS = [
         name="edit_world_relations",
         description=(
             "批量新增、更新或删除正式关系。默认只预览所有源文件 diff；"
-            "用户确认后传入 source_revisions/base_revisions 并设置 confirm=true 才写入。"
+            "预览会返回不可变 preview_token，用户确认后仅传该 token 并设置 confirm=true 才写入。"
         ),
         parameters={
             "type": "object",
@@ -1191,8 +1261,14 @@ OPENWRITE_TOOLS = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "source_id": {"type": "string", "description": "源实体 ID 或名称"},
-                            "target_id": {"type": "string", "description": "目标实体 ID 或名称"},
+                            "source_id": {
+                                "type": "string",
+                                "description": "源实体正式 ID；使用查询结果，不要凭名称转写",
+                            },
+                            "target_id": {
+                                "type": "string",
+                                "description": "目标实体正式 ID；使用查询结果，不要凭名称转写",
+                            },
                             "description": {"type": "string", "description": "关系说明"},
                             "action": {
                                 "type": "string",
@@ -1209,13 +1285,22 @@ OPENWRITE_TOOLS = [
                 },
                 "base_revisions": {
                     "type": "object",
-                    "description": "预览返回的 source_revisions；确认写入时传回",
+                    "description": "兼容旧调用；新确认流程使用 preview_token",
+                },
+                "preview_token": {
+                    "type": "string",
+                    "description": "预览返回的不可变凭据；确认时与 confirm=true 一起传入",
+                },
+                "preview_tokens": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "同一轮产生多批预览时的不可变凭据列表",
                 },
                 "confirm": {"type": "boolean", "description": "默认 false 只预览 diff"},
             },
-            "required": ["relations"],
+            "required": [],
         },
-        required=["relations"],
+        required=[],
     ),
     # 对话质量
     ToolDefinition(
@@ -1309,7 +1394,7 @@ OPENWRITE_TOOLS = [
 ]
 
 
-OPENWRITE_SYSTEM_PROMPT = """你是 OpenWrite 小说创作引擎的 Agent。
+OPENWRITE_SYSTEM_PROMPT = f"""你是 OpenWrite 小说创作引擎的 Agent。
 
 你的职责是帮用户完成小说创作任务，包括：
 - 写章节、审查章节
@@ -1336,18 +1421,19 @@ OPENWRITE_SYSTEM_PROMPT = """你是 OpenWrite 小说创作引擎的 Agent。
 | read_project_document | 读取作品资料文档 |
 | edit_project_document | 预览或确认修改作品资料文档 |
 | list_chapters | 列出章节 |
-| create_outline | 创建/更新大纲 |
+| create_outline | 仅在不存在大纲时创建符合四级契约的首版大纲 |
 | get_outline_structure | 读取卷/幕/节/章树并推荐下一章 |
 | edit_outline_structure | 按 revision 增量改名、增删卷幕节章 |
 | create_character | 创建角色 |
-| get_truth_files | 读取真相文件 |
-| update_truth_file | 更新真相文件 |
+| get_truth_files | 完整读取真相文件及 runtime revision |
+| get_character_state | 按人物名查询当前状态和近期变化，章节由系统推断 |
+| update_truth_file | 按 revision 预览或确认追加运行态事实 |
 | create_foreshadowing | 创建伏笔 |
 | list_foreshadowing | 列出伏笔 |
 | update_foreshadowing | 更新伏笔状态 |
 | validate_foreshadowing | 验证伏笔DAG |
-| query_world | 查询设定实体（兼容名称） |
-| get_world_relations | 获取关系图谱 |
+| query_world | 列出设定摘要或读取单个设定的完整详情 |
+| get_world_relations | 获取完整关系图谱 |
 | search_relation_targets | 搜索关系图候选节点 |
 | edit_world_relation | 预览或确认一个增量关系修改 |
 | edit_world_relations | 批量预览或确认关系修改 |
@@ -1383,5 +1469,13 @@ OPENWRITE_SYSTEM_PROMPT = """你是 OpenWrite 小说创作引擎的 Agent。
   edit_project_document(confirm=false) 预览 diff；只有用户明确确认后才写入
 - 连接人物、出身地点、能力设定、组织或物品时先 search_relation_targets /
   get_world_relations 定位候选，再 edit_world_relations(confirm=false) 预览 diff；
-  只有用户明确确认后才 confirm=true 写入
+  relations 使用查询返回的正式实体 ID；只有用户明确确认后才使用预览返回的
+  preview_token/preview_tokens 和 confirm=true 写入，不得重新生成 relations
+- 维护运行态真相时先 get_truth_files 读取完整投影和 revision；update_truth_file 的 content
+  只能包含新增客观事实，先 confirm=false 预览追加 diff，只有用户明确确认后才使用相同
+  source_revision 和 confirm=true 写入；禁止整份覆盖 current_state、ledger 或 relationships
+
+{OUTLINE_MARKDOWN_CONTRACT}
+
+{CHARACTER_MARKDOWN_CONTRACT}
 """

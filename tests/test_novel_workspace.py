@@ -89,6 +89,11 @@ def test_split_import_and_export_existing_manuscript(tmp_path: Path):
     )
     assert [item.chapter_id for item in imported] == ["ch_001", "ch_002"]
     assert imported[0].writing_units == count_writing_units("书名：雾城来信\n\n他推开门。")
+    imported[1].path.write_text(
+        imported[1].path.read_text(encoding="utf-8")
+        + "\n//**林舟[位置]：门外 -> 门后**\n",
+        encoding="utf-8",
+    )
 
     output = export_manuscript(
         tmp_path,
@@ -101,6 +106,7 @@ def test_split_import_and_export_existing_manuscript(tmp_path: Path):
     assert exported.startswith("雾城来信")
     assert "第一章 雨夜" in exported
     assert "第二章 回声" in exported
+    assert "//**" not in exported
     assert "#" not in exported
 
 

@@ -107,6 +107,10 @@ class GenerationContext(BaseModel):
 
     # 角色
     active_characters: List[Any] = Field(default_factory=list, description="出场角色列表")
+    character_states: str = Field(
+        default="",
+        description="由正文/大纲内联批注推导的当前人物状态",
+    )
 
     # 伏笔
     foreshadowing: ForeshadowingState = Field(
@@ -121,6 +125,14 @@ class GenerationContext(BaseModel):
 
     # 最近文本
     recent_text: str = Field(default="", description="最近章节文本（用于连贯性）")
+    semantic_references: str = Field(
+        default="",
+        description="由语义检索召回的远距离正文与参考资料片段",
+    )
+    semantic_retrieval: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="语义上下文检索诊断，不参与 prompt",
+    )
 
     # 真相文件
     current_state: str = Field(default="", description="世界当前状态（真相文件）")
@@ -201,6 +213,9 @@ class GenerationContext(BaseModel):
         if self.chapter_summaries:
             sections["历史章节记忆"] = self.chapter_summaries
 
+        if self.semantic_references:
+            sections["远程相关片段（不覆盖事实状态）"] = self.semantic_references
+
         if self.outline_window:
             outlines = []
             for node in self.outline_window:
@@ -223,6 +238,9 @@ class GenerationContext(BaseModel):
                     chars.append(f"- {c.name}")
             if chars:
                 sections["出场角色"] = "\n".join(chars)
+
+        if self.character_states:
+            sections["人物当前状态（内联批注）"] = self.character_states
 
         if self.foreshadowing and (self.foreshadowing.pending or self.foreshadowing.planted):
             sections["伏笔"] = self.foreshadowing.to_context_text(max_chars=500)

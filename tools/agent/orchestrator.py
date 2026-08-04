@@ -12,13 +12,15 @@ import yaml
 
 from ..context_builder import ContextBuilder
 from ..frontmatter import parse_toml_front_matter
+from ..library_catalog import query_library
+from ..outline_contract import OUTLINE_MARKDOWN_CONTRACT
 from ..source_sync import run_sync
-from ..style_synthesizer import render_style_manifest_summary
 from ..story_planning import StoryPlanningStore
+from ..style_synthesizer import render_style_manifest_summary
 from ..utils import parse_chapter_id
 from ..workflow_scheduler import WorkflowScheduler
-from .toolkits import ORCHESTRATOR_TOOLKIT, WRITING_TOOLKIT
 from .book_state import BookStage, BookState, BookStateStore
+from .toolkits import ORCHESTRATOR_TOOLKIT, WRITING_TOOLKIT
 
 
 @dataclass(frozen=True)
@@ -103,10 +105,10 @@ class OpenWriteOrchestrator:
             "creative_focus": getattr(context, "creative_focus", ""),
             "core_documents": core_documents,
             "story_background": self.story_planning_store.read_story_document(
-                "background", max_chars=2000
+                "background"
             ),
             "foundation": self.story_planning_store.read_story_document(
-                "foundation", max_chars=2000
+                "foundation"
             ),
             "previous_chapter_content": self._read_previous_chapter_content(chapter_id),
             "style_documents": self._build_style_documents(context, prompt_sections),
@@ -184,6 +186,10 @@ class OpenWriteOrchestrator:
         self.state = self.state_store.load_or_create()
         return self._handle_outline_confirmation()
 
+    def confirm_foundation(self) -> OrchestratorResult:
+        self.state = self.state_store.load_or_create()
+        return self._handle_foundation_confirmation()
+
     def confirm_outline_scope(self) -> OrchestratorResult:
         self.state = self.state_store.load_or_create()
         if self.state.pending_confirmation == "outline_scope":
@@ -214,7 +220,14 @@ class OpenWriteOrchestrator:
     def run_chapter_preflight(self, chapter_id: str) -> dict[str, Any]:
         return self.run_preflight(chapter_id)
 
-    def review_chapter(self, chapter_id: str, guidance: str = "") -> dict[str, Any]:
+    def review_chapter(
+        self,
+        chapter_id: str,
+        guidance: str = "",
+        *,
+        strict: bool = False,
+        dimensions: list[int] | None = None,
+    ) -> dict[str, Any]:
         self.state = self.state_store.load_or_create()
         try:
             executor = self._get_orchestrator_executor("review_chapter")
@@ -223,6 +236,8 @@ class OpenWriteOrchestrator:
                     {
                         "chapter_id": chapter_id,
                         "guidance": guidance,
+                        "strict": strict,
+                        "dimensions": dimensions,
                     }
                 )
             )
@@ -566,10 +581,10 @@ class OpenWriteOrchestrator:
             self.state.last_agent_action = "blocked_foundation_promotion_missing_drafts"
             self.state_store.save(self.state)
             return OrchestratorResult(
-                message="基础设定文档缺失。请先准备 src/story/background.md 与 src/story/foundation.md。",
+                message="基础设定草案缺失或辅助草案结构无效。请重新生成并检查 planning 草案。",
                 stage=self.state.stage,
                 blocked=True,
-                next_action="prepare_foundation_documents",
+                next_action="generate_foundation_draft",
             )
 
         self.state.stage = BookStage.ROLLING_OUTLINE
@@ -676,6 +691,15 @@ class OpenWriteOrchestrator:
         except Exception as exc:
             return self._stage_blocked_result(
                 f"大纲草案生成失败: {exc}",
+                next_action="generate_outline_failed",
+            )
+
+        from ..outline_contract import validate_outline_markdown
+
+        validation_errors = validate_outline_markdown(outline, self.novel_id)
+        if validation_errors:
+            return self._stage_blocked_result(
+                "大纲草案结构不完整：" + "；".join(validation_errors[:8]),
                 next_action="generate_outline_failed",
             )
 
@@ -1011,13 +1035,22 @@ class OpenWriteOrchestrator:
                 docs[f"craft.{path.stem}"] = self._read_text(path)
         return docs
 
-    def _build_character_documents(self, context: Any) -> list[str]:
-        documents: list[str] = []
-        for character in getattr(context, "active_characters", []):
+    def _build_character_documents(self, context: Any) -> dict[str, str]:
+        documents: dict[str, str] = {}
+        for index, character in enumerate(
+            getattr(context, "active_characters", []), start=1
+        ):
+            name = str(
+                getattr(character, "name", "")
+                or getattr(character, "character_id", "")
+                or f"角色{index}"
+            ).strip()
             if hasattr(character, "to_context_text"):
-                documents.append(character.to_context_text(max_chars=800))
+                content = str(character.to_context_text()).strip()
             else:
-                documents.append(str(character))
+                content = str(character).strip()
+            if content:
+                documents[name] = content
         return documents
 
     def _build_concept_documents(
@@ -1118,29 +1151,14 @@ class OpenWriteOrchestrator:
     def _generate_outline_draft(self, request_text: str) -> str:
         story_title = self._current_story_title()
         context = self._build_story_context()
-        system_prompt = """你是 OpenWrite 的小说规划师。
+        system_prompt = f"""你是 OpenWrite 的小说规划师。
 
 请输出一份可直接落盘的四级 Markdown 大纲草案，只输出 Markdown，不要解释，不要代码围栏。
 
-格式要求：
-- `# 作品名`
-- 总纲标题下先给 1-2 段故事简介，说明主角、核心冲突和整本书的大方向
-- `## 第X篇：篇标题`
-- `### 第X节：节标题`
-- `#### 第X章：章标题`
-- 每篇至少包含：
-  > 篇弧线:
-  > 篇情感:
-- 每节至少包含：
-  > 节结构:
-  > 节情感:
-  > 节张力:
-- 每章至少包含：
-  > 内容焦点:
-  > 预估字数:
-  > 出场角色:
+{OUTLINE_MARKDOWN_CONTRACT}
 
 约束：
+- 总纲标题下先给 1-2 段故事简介，说明主角、核心冲突和整本书的大方向
 - 输出 2-3 篇，每篇 2-3 节，每节 2-3 章
 - 采用滚动大纲思路，优先保证前半段可写
 - 保持中文网文风格，信息具体，不写空泛套话"""
@@ -1288,6 +1306,35 @@ class OpenWriteOrchestrator:
             parts.append(f"## 当前想法汇总\n{ideation_summary}")
         elif ideation:
             parts.append(f"## 灵感记录\n{ideation}")
+        catalogs = (
+            ("characters", "可用人物规范目录"),
+            ("settings", "可用设定规范目录"),
+        )
+        for scope, label in catalogs:
+            catalog = query_library(
+                self.story_planning_store.novel_root,
+                scope=scope,
+                limit=60,
+            )
+            lines: list[str] = []
+            for item in catalog.get("items", []):
+                if not isinstance(item, dict):
+                    continue
+                title = str(item.get("title") or "").strip()
+                asset_id = str(item.get("asset_id") or "").strip()
+                summary = " ".join(str(item.get("summary") or "").split())[:120]
+                identity = (
+                    f"{title} ({asset_id})"
+                    if asset_id and asset_id != title
+                    else title
+                )
+                if identity:
+                    lines.append(
+                        f"- {identity}: {summary}" if summary else f"- {identity}"
+                    )
+            rendered = "\n".join(lines)
+            if rendered:
+                parts.append(f"## {label}\n{rendered[:2400]}")
         return "\n\n".join(parts).strip() or "暂无现成设定，请根据用户请求自行补足。"
 
     def _ensure_ideation_summary_confirmation(self, *, blocked: bool) -> OrchestratorResult:

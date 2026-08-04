@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Mapping
 from typing import Any
 
 CONFIRMABLE_TOOLS = {
+    "apply_reference_adoption",
+    "confirm_character_draft",
+    "confirm_foundation",
     "confirm_outline_edits",
     "edit_outline_structure",
     "edit_project_document",
     "edit_world_relation",
     "edit_world_relations",
     "manage_manuscript_versions",
+    "promote_source_pack",
+    "update_truth_file",
     "update_chapter_intervention",
 }
 
 CONFIRMATION_BLOCK_ERROR = "explicit_user_confirmation_required"
+RELATION_PREVIEW_TOKENS_KEY = "pending_relation_preview_tokens"
+RELATION_PREVIEW_REQUEST_KEY = "pending_relation_preview_request"
 
 _OVERRIDE_NEGATIVE_MARKERS = (
     "不要再确认",
@@ -143,6 +151,91 @@ def guard_confirmable_executors(
     return guarded
 
 
+def remember_relation_previews(
+    executors: Mapping[str, Callable[[dict[str, Any]], Any]],
+    *,
+    working_memory: Callable[[], dict[str, Any]],
+    persist: Callable[[], None],
+    instruction: Callable[[], str],
+) -> dict[str, Callable[[dict[str, Any]], Any]]:
+    """Persist exact batch preview tokens and inject them on a later confirmation turn."""
+
+    wrapped = dict(executors)
+    executor = wrapped.get("edit_world_relations")
+    if executor is None:
+        return wrapped
+
+    def execute(args: dict[str, Any]) -> Any:
+        payload = dict(args) if isinstance(args, dict) else {}
+        memory = working_memory()
+        pending = _relation_preview_tokens(memory.get(RELATION_PREVIEW_TOKENS_KEY))
+        requested = _relation_preview_tokens(payload.get("preview_tokens"))
+        single_token = str(payload.get("preview_token") or "").strip()
+        if single_token:
+            requested.append(single_token)
+        requested = list(dict.fromkeys(requested))
+
+        if (
+            payload.get("confirm")
+            and pending
+            and (not requested or any(token not in pending for token in requested))
+        ):
+            payload.pop("relations", None)
+            payload.pop("base_revisions", None)
+            payload.pop("preview_token", None)
+            payload.pop("preview_tokens", None)
+            if len(pending) == 1:
+                payload["preview_token"] = pending[0]
+            else:
+                payload["preview_tokens"] = pending
+            requested = pending
+
+        result = executor(payload)
+        if not isinstance(result, Mapping):
+            return result
+
+        changed = False
+        preview_token = str(result.get("preview_token") or "").strip()
+        if result.get("ok") and not result.get("applied") and preview_token:
+            request_fingerprint = hashlib.sha256(
+                str(instruction() or "").strip().encode("utf-8")
+            ).hexdigest()[:16]
+            if memory.get(RELATION_PREVIEW_REQUEST_KEY) != request_fingerprint:
+                pending = []
+            if preview_token not in pending:
+                pending.append(preview_token)
+            memory[RELATION_PREVIEW_TOKENS_KEY] = pending[-12:]
+            memory[RELATION_PREVIEW_REQUEST_KEY] = request_fingerprint
+            changed = True
+        elif result.get("ok") and payload.get("confirm") and requested:
+            remaining = [token for token in pending if token not in requested]
+            if remaining:
+                memory[RELATION_PREVIEW_TOKENS_KEY] = remaining
+            else:
+                memory.pop(RELATION_PREVIEW_TOKENS_KEY, None)
+                memory.pop(RELATION_PREVIEW_REQUEST_KEY, None)
+            changed = True
+
+        if changed:
+            persist()
+        return result
+
+    wrapped["edit_world_relations"] = execute
+    return wrapped
+
+
+def _relation_preview_tokens(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(
+        dict.fromkeys(
+            str(item).strip()
+            for item in value
+            if str(item or "").strip()
+        )
+    )
+
+
 def _guard_executor(
     name: str,
     executor: Callable[[dict[str, Any]], Any],
@@ -150,7 +243,13 @@ def _guard_executor(
 ) -> Callable[[dict[str, Any]], Any]:
     def guarded(args: dict[str, Any]) -> Any:
         payload = args if isinstance(args, dict) else {}
-        applying = name == "confirm_outline_edits" or bool(payload.get("confirm"))
+        applying = name in {
+            "apply_reference_adoption",
+            "confirm_character_draft",
+            "confirm_foundation",
+            "confirm_outline_edits",
+            "promote_source_pack",
+        } or bool(payload.get("confirm"))
         if not applying or is_explicit_mutation_confirmation(instruction()):
             return executor(payload)
         return {

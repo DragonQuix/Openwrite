@@ -72,12 +72,23 @@ class StructuredAssetService:
     def list(self, kind: str = "") -> list[dict[str, Any]]:
         kinds = [self._kind(kind)] if kind else sorted(ASSET_KINDS)
         result: list[dict[str, Any]] = []
+        locations: dict[tuple[str, str], Path] = {}
         for asset_kind in kinds:
             for path in self._paths(asset_kind):
                 try:
-                    result.append(self._summary(asset_kind, path))
-                except (OSError, yaml.YAMLError):
+                    summary = self._summary(asset_kind, path)
+                except (OSError, StructuredAssetError, yaml.YAMLError):
                     continue
+                key = (asset_kind, summary["id"])
+                previous = locations.get(key)
+                if previous is not None:
+                    raise self._duplicate_id_error(
+                        asset_kind,
+                        summary["id"],
+                        [previous, path],
+                    )
+                locations[key] = path
+                result.append(summary)
         return sorted(result, key=lambda item: (item["kind"], item["name"], item["id"]))
 
     def read(self, kind: str, asset_id: str) -> dict[str, Any]:
@@ -225,7 +236,7 @@ class StructuredAssetService:
             stages = data.get("stages") if isinstance(data.get("stages"), list) else []
             return {
                 "kind": kind,
-                "id": str(data.get("id") or path.stem),
+                "id": self._asset_id(data.get("id") or path.stem),
                 "name": str(data.get("name") or path.stem),
                 "summary": str(data.get("summary") or ""),
                 "stage_count": len(stages),
@@ -234,7 +245,7 @@ class StructuredAssetService:
         meta, _ = parse_toml_front_matter(content)
         return {
             "kind": kind,
-            "id": str(meta.get("id") or path.stem),
+            "id": self._asset_id(meta.get("id") or path.stem),
             "name": str(meta.get("name") or self._markdown_title(content) or path.stem),
             "summary": str(meta.get("summary") or ""),
             "path": self._relative(path),
@@ -247,19 +258,43 @@ class StructuredAssetService:
 
     def _find(self, kind: str, asset_id: str) -> Path | None:
         clean_id = self._asset_id(asset_id)
+        matches: list[Path] = []
         for path in self._paths(kind):
             try:
                 summary = self._summary(kind, path)
-            except (OSError, yaml.YAMLError):
+            except (OSError, StructuredAssetError, yaml.YAMLError):
                 continue
             if summary["id"] == clean_id:
-                return path
-        return None
+                matches.append(path)
+        if len(matches) > 1:
+            raise self._duplicate_id_error(kind, clean_id, matches)
+        return matches[0] if matches else None
 
     def _paths(self, kind: str) -> list[Path]:
         directory = self._directory(kind)
-        pattern = "*.yaml" if kind == "progression" else "*.md"
-        return sorted(directory.glob(pattern)) if directory.is_dir() else []
+        if not directory.is_dir():
+            return []
+        suffixes = {".yaml", ".yml"} if kind == "progression" else {".md"}
+        return sorted(
+            path
+            for path in directory.rglob("*")
+            if path.is_file()
+            and not path.is_symlink()
+            and path.suffix.lower() in suffixes
+        )
+
+    def _duplicate_id_error(
+        self,
+        kind: str,
+        asset_id: str,
+        paths: list[Path],
+    ) -> StructuredAssetError:
+        locations = "、".join(self._relative(path) for path in paths)
+        return StructuredAssetError(
+            f"{kind} 资产 ID {asset_id} 在多个文件中重复：{locations}",
+            code="ASSET_CONFLICT",
+            recoverable=True,
+        )
 
     def _directory(self, kind: str) -> Path:
         return {

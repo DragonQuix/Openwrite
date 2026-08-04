@@ -14,6 +14,8 @@ from pathlib import Path
 
 import yaml
 
+from tools.character_state_index import strip_character_state_annotations
+
 CHAPTER_FILE_RE = re.compile(r"^ch_(\d+)\.md$")
 CHAPTER_HEADING_RE = re.compile(
     r"^\s*(?:#{1,6}\s*)?"
@@ -170,7 +172,8 @@ def count_writing_units(text: str) -> int:
     Markdown headings and lightweight markup are excluded.
     """
 
-    prose = re.sub(r"^\s{0,3}#{1,6}\s+.*$", "", text, flags=re.MULTILINE)
+    prose = strip_character_state_annotations(text)
+    prose = re.sub(r"^\s{0,3}#{1,6}\s+.*$", "", prose, flags=re.MULTILINE)
     prose = re.sub(r"<!--.*?-->", "", prose, flags=re.DOTALL)
     prose = re.sub(r"[`*_~>#\[\](){|}]", " ", prose)
     cjk = re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", prose)
@@ -282,7 +285,9 @@ def export_manuscript(
     book_title = title.strip() or novel_id
     parts: list[str] = [f"# {book_title}" if format_name == "md" else book_title]
     for chapter in chapters:
-        text = chapter.path.read_text(encoding="utf-8").strip()
+        text = strip_character_state_annotations(
+            chapter.path.read_text(encoding="utf-8")
+        ).strip()
         if format_name == "txt":
             text = re.sub(r"^\s{0,3}#{1,6}\s+", "", text, flags=re.MULTILINE)
         parts.append(text)
@@ -321,7 +326,8 @@ def build_workspace_snapshot(project_root: Path, config: dict[str, object]) -> W
             state = yaml.safe_load(state_path.read_text(encoding="utf-8")) or {}
             state_stage = str(state.get("stage") or state_stage)
             current_arc = str(state.get("current_arc") or current_arc)
-            current_chapter = str(state.get("current_chapter") or current_chapter)
+            if "current_chapter" in state:
+                current_chapter = str(state.get("current_chapter") or "")
         except (OSError, yaml.YAMLError):
             pass
 

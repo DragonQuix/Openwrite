@@ -109,6 +109,17 @@ OBJECT_VALUE_COLLECTIONS = {
     "open_threads",
     "foreshadowing_refs",
     "proposed_entities",
+    "timeline",
+}
+
+RUNTIME_VALUE_MODELS = {
+    "characters": CharacterRuntimeState,
+    "resources": ResourceRuntimeState,
+    "relationship_states": RelationshipRuntimeState,
+    "open_threads": OpenThreadRuntimeState,
+    "foreshadowing_refs": ForeshadowingRuntimeReference,
+    "proposed_entities": ProposedEntity,
+    "timeline": TimelineRuntimeEvent,
 }
 
 
@@ -132,6 +143,16 @@ class RuntimeDeltaOperation(StrictModel):
             and not isinstance(self.value, dict)
         ):
             raise ValueError(f"{self.collection} operation requires an object value")
+        if (
+            self.op in {"set", "append", "propose"}
+            and self.collection in RUNTIME_VALUE_MODELS
+        ):
+            try:
+                RUNTIME_VALUE_MODELS[self.collection].model_validate(self.value)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{self.collection} operation has an invalid value schema: {exc}"
+                ) from exc
         return self
 
 

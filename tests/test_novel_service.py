@@ -5,6 +5,7 @@ import pytest
 
 from tools.agent.book_state import BookStage, BookStateStore
 from tools.cli import _save_chapter
+from tools.context_builder import ContextBuilder
 from tools.init_project import init_project
 from tools.novel_service import NovelApplicationService, NovelServiceError
 from tools.workflow_scheduler import WorkflowScheduler
@@ -42,6 +43,37 @@ def test_service_unifies_context_sync_and_writer_contract(tmp_path: Path):
     workflow = WorkflowScheduler(tmp_path, "demo").load_workflow("ch_001")
     assert workflow is not None and workflow.current_stage == "review"
     assert BookStateStore(tmp_path, "demo").load_or_create().stage == BookStage.REVIEW_AND_REVISE
+
+
+def test_context_preview_exposes_dynamic_state_and_semantic_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    init_project(tmp_path, "demo", "上下文预览")
+
+    def fake_generation_context(self, chapter_id):
+        assert chapter_id == "ch_001"
+        return SimpleNamespace(
+            character_states="【沈烬】\n- 位置：旧钟楼（ch_001，正文）",
+            semantic_references="### [历史正文] 雨夜\n来源：ch_001.md:3\n他藏起了旧信。",
+            semantic_retrieval={
+                "status": "ready",
+                "results": 1,
+                "excluded_recent_chapters": 2,
+            },
+        )
+
+    monkeypatch.setattr(
+        ContextBuilder,
+        "build_generation_context",
+        fake_generation_context,
+    )
+
+    preview = NovelApplicationService(tmp_path).context_preview("ch_001")
+
+    assert preview["semantic_retrieval"]["status"] == "ready"
+    assert "他藏起了旧信" in preview["semantic_references"]
+    assert "旧钟楼" in preview["character_states"]
 
 
 def test_service_unifies_review_persistence_and_lifecycle(tmp_path: Path):

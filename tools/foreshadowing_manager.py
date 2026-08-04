@@ -267,6 +267,25 @@ class ForeshadowingDAGManager:
         results.sort(key=lambda n: n.weight, reverse=True)
         return results
 
+    def get_nodes(
+        self,
+        *,
+        status: Optional[str] = None,
+        min_weight: int = 1,
+        layer: Optional[str] = None,
+    ) -> List[ForeshadowingNode]:
+        """List nodes with the filters exposed by the public tool contract."""
+        dag = self._load_dag()
+        results = [
+            node
+            for node_id, node in dag.nodes.items()
+            if (not status or dag.status.get(node_id, node.status) == status)
+            and node.weight >= min_weight
+            and (not layer or node.layer == layer)
+        ]
+        results.sort(key=lambda node: node.weight, reverse=True)
+        return results
+
     def get_nodes_for_chapter(self, chapter_id: str) -> List[ForeshadowingNode]:
         """获取某章节相关的伏笔
 

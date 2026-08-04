@@ -45,6 +45,15 @@ class StoryPlanningStore:
         self.ideation_summary_path = self.runtime_planning_dir / "ideation_summary.md"
         self.background_draft_path = self.runtime_planning_dir / "background_draft.md"
         self.foundation_draft_path = self.runtime_planning_dir / "foundation_draft.md"
+        self.volume_outline_draft_path = (
+            self.runtime_planning_dir / "volume_outline_draft.md"
+        )
+        self.current_state_draft_path = (
+            self.runtime_planning_dir / "current_state_draft.md"
+        )
+        self.foreshadowing_draft_path = (
+            self.runtime_planning_dir / "foreshadowing_draft.yaml"
+        )
         self.outline_draft_path = self.runtime_planning_dir / "outline_draft.md"
         self.outline_edit_state_path = self.runtime_planning_dir / "outline_edit.yaml"
         self.goethe_handoff_md_path = self.workflow_dir / "goethe_handoff.md"
@@ -153,17 +162,45 @@ class StoryPlanningStore:
         self._atomic_write_text(foundation_path, content)
         return True
 
-    def save_foundation_draft(self, background: str, foundation: str) -> None:
-        """保存基础设定草案，并同步刷新 canonical `src/story/*` 镜像。"""
+    def save_foundation_draft(
+        self,
+        background: str,
+        foundation: str,
+        *,
+        volume_outline: str = "",
+        current_state: str = "",
+        foreshadowing: str | dict[str, Any] | None = None,
+    ) -> None:
+        """保存基础设定草案；确认前不修改 canonical ``src/story/*``。"""
+        graph = (
+            self._parse_foreshadowing_graph(foreshadowing)
+            if foreshadowing not in (None, "")
+            else None
+        )
         self.runtime_planning_dir.mkdir(parents=True, exist_ok=True)
-        self.story_src_dir.mkdir(parents=True, exist_ok=True)
         background_content = self._normalize_story_document("background", background)
         foundation_content = self._normalize_story_document("foundation", foundation)
-        self.background_draft_path.write_text(background_content, encoding="utf-8")
-        self.foundation_draft_path.write_text(foundation_content, encoding="utf-8")
-        # 背景/设定这两类文档已经统一成单一文本真源，因此 draft 与 src 保持同内容镜像。
-        (self.story_src_dir / "background.md").write_text(background_content, encoding="utf-8")
-        (self.story_src_dir / "foundation.md").write_text(foundation_content, encoding="utf-8")
+        self._atomic_write_text(self.background_draft_path, background_content)
+        self._atomic_write_text(self.foundation_draft_path, foundation_content)
+        if str(volume_outline or "").strip():
+            self._atomic_write_text(
+                self.volume_outline_draft_path,
+                str(volume_outline).strip() + "\n",
+            )
+        if str(current_state or "").strip():
+            self._atomic_write_text(
+                self.current_state_draft_path,
+                str(current_state).strip() + "\n",
+            )
+        if graph is not None:
+            self._atomic_write_text(
+                self.foreshadowing_draft_path,
+                yaml.safe_dump(
+                    graph.model_dump(by_alias=True),
+                    allow_unicode=True,
+                    sort_keys=False,
+                ),
+            )
 
     def promote_foundation(self) -> bool:
         """将 background/foundation 的当前版本收口成 draft 与 src 的一致镜像。"""
@@ -173,23 +210,17 @@ class StoryPlanningStore:
         background_src = self.story_src_dir / "background.md"
         foundation_src = self.story_src_dir / "foundation.md"
 
-        # 优先相信 src 里的 canonical 文档；如果它们已存在，就把 draft 校正回同一份内容。
-        if background_src.exists() and foundation_src.exists():
-            background_content = self._normalize_story_document(
-                "background",
-                background_src.read_text(encoding="utf-8"),
-            )
-            foundation_content = self._normalize_story_document(
-                "foundation",
-                foundation_src.read_text(encoding="utf-8"),
-            )
-            background_src.write_text(background_content, encoding="utf-8")
-            foundation_src.write_text(foundation_content, encoding="utf-8")
-            self.background_draft_path.write_text(background_content, encoding="utf-8")
-            self.foundation_draft_path.write_text(foundation_content, encoding="utf-8")
-            return True
+        # 在写任何 canonical 文件前先验证全部结构化草案。
+        foreshadowing_graph = None
+        if self.foreshadowing_draft_path.exists():
+            try:
+                foreshadowing_graph = self._parse_foreshadowing_graph(
+                    self.foreshadowing_draft_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError, yaml.YAMLError):
+                return False
 
-        # 只有 draft 存在时，才把它们晋升成 canonical story 文档。
+        # 有草案时以草案为待确认版本，确认后再覆盖 canonical 文档。
         if self.background_draft_path.exists() and self.foundation_draft_path.exists():
             background_content = self._normalize_story_document(
                 "background",
@@ -199,13 +230,97 @@ class StoryPlanningStore:
                 "foundation",
                 self.foundation_draft_path.read_text(encoding="utf-8"),
             )
-            background_src.write_text(background_content, encoding="utf-8")
-            foundation_src.write_text(foundation_content, encoding="utf-8")
-            self.background_draft_path.write_text(background_content, encoding="utf-8")
-            self.foundation_draft_path.write_text(foundation_content, encoding="utf-8")
-            return True
+            self._atomic_write_text(background_src, background_content)
+            self._atomic_write_text(foundation_src, foundation_content)
+            self._atomic_write_text(self.background_draft_path, background_content)
+            self._atomic_write_text(self.foundation_draft_path, foundation_content)
+        elif background_src.exists() and foundation_src.exists():
+            # 没有待确认草案时，只接受已经存在的 canonical 文档。
+            background_content = self._normalize_story_document(
+                "background",
+                background_src.read_text(encoding="utf-8"),
+            )
+            foundation_content = self._normalize_story_document(
+                "foundation",
+                foundation_src.read_text(encoding="utf-8"),
+            )
+            self._atomic_write_text(background_src, background_content)
+            self._atomic_write_text(foundation_src, foundation_content)
+        else:
+            return False
 
-        return False
+        if self.current_state_draft_path.exists():
+            from .truth_manager import TruthFilesManager
+
+            state_text = self.current_state_draft_path.read_text(encoding="utf-8")
+            state_meta, state_body = parse_toml_front_matter(state_text)
+            truth = TruthFilesManager(
+                self.project_root, self.novel_id
+            ).load_truth_files()
+            truth.current_state = strip_front_matter_padding(
+                state_body if state_meta else state_text
+            ).strip()
+            TruthFilesManager(self.project_root, self.novel_id).save_truth_files(truth)
+
+        if foreshadowing_graph is not None:
+            dag_path = (
+                self.novel_root / "data" / "foreshadowing" / "dag.yaml"
+            )
+            self._atomic_write_text(
+                dag_path,
+                yaml.safe_dump(
+                    foreshadowing_graph.model_dump(by_alias=True),
+                    allow_unicode=True,
+                    sort_keys=False,
+                ),
+            )
+
+        return True
+
+    @staticmethod
+    def _parse_foreshadowing_graph(value: str | dict[str, Any]) -> Any:
+        from models.foreshadowing import ForeshadowingGraph
+
+        if isinstance(value, dict):
+            payload = value
+        else:
+            text = str(value or "").strip()
+            fenced = re.match(r"^```(?:yaml|yml)?\s*\n(?P<body>.*)\n```$", text, re.DOTALL)
+            if fenced:
+                text = fenced.group("body").strip()
+            payload = yaml.safe_load(text) or {}
+        if not isinstance(payload, dict):
+            raise ValueError("foreshadowing draft must be a YAML object")
+        graph = ForeshadowingGraph.model_validate(payload)
+        for node_id, node in graph.nodes.items():
+            if node_id != node.id:
+                raise ValueError(f"foreshadowing node key does not match id: {node_id}")
+            if graph.status.get(node_id, node.status) != node.status:
+                raise ValueError(f"foreshadowing status mismatch: {node_id}")
+        known = set(graph.nodes)
+        adjacency = {node_id: [] for node_id in known}
+        for edge in graph.edges:
+            if edge.from_ not in known:
+                raise ValueError(f"foreshadowing edge source does not exist: {edge.from_}")
+            if edge.to in known:
+                adjacency[edge.from_].append(edge.to)
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(node_id: str) -> None:
+            if node_id in visiting:
+                raise ValueError(f"foreshadowing graph contains a cycle: {node_id}")
+            if node_id in visited:
+                return
+            visiting.add(node_id)
+            for target in adjacency[node_id]:
+                visit(target)
+            visiting.remove(node_id)
+            visited.add(node_id)
+
+        for node_id in known:
+            visit(node_id)
+        return graph
 
     def save_outline_draft(self, content: str, *, mode: str = "generated") -> None:
         """暂存大纲草稿，不在用户确认前改写 canonical outline。"""

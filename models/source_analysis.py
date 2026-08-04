@@ -36,8 +36,15 @@ class SourceFindingV2(BaseModel):
         "promise",
         "structure",
         "character",
+        "world",
+        "relationship",
+        "progression",
+        "timeline",
         "conflict",
         "hook",
+        "thread",
+        "arc_summary",
+        "chapter_summary",
         "pacing",
         "voice",
         "reader_drive",
@@ -137,9 +144,13 @@ class SourceReportV2(BaseModel):
 class ProfileItemV1(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    item_id: str = ""
+    category: str = "method"
     claim: str
     source_ids: list[str] = Field(min_length=1)
     evidence: list[EvidenceRef] = Field(min_length=1)
+    reusable: bool = True
+    source_bound: bool = False
 
 
 class ReferenceProfileV1(BaseModel):
@@ -149,6 +160,7 @@ class ReferenceProfileV1(BaseModel):
     profile_id: str
     source_ids: list[str] = Field(min_length=1)
     source_revisions: dict[str, str]
+    source_intents: dict[str, str] = Field(default_factory=dict)
     common_methods: list[ProfileItemV1]
     differences: list[ProfileItemV1]
     optional_variants: list[ProfileItemV1]
@@ -170,4 +182,133 @@ class PromotionPreviewV1(BaseModel):
     unified_diff: str
     included_claims: list[str]
     excluded_claims: list[str]
+    created_at: str
+
+
+class ReferenceStructureUnitV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    unit_id: str
+    kind: Literal["front_matter", "volume", "chapter", "appendix", "body"]
+    title: str
+    start: int = Field(ge=0)
+    end: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> ReferenceStructureUnitV1:
+        if self.end <= self.start:
+            raise ValueError("structure unit end must be greater than start")
+        return self
+
+
+class ReferenceStructureV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    source_id: str
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: Literal["awaiting_confirmation", "confirmed"]
+    units: list[ReferenceStructureUnitV1] = Field(min_length=1)
+    generated_at: str
+    confirmed_at: str = ""
+
+    @model_validator(mode="after")
+    def validate_coverage(self) -> ReferenceStructureV1:
+        cursor = 0
+        for unit in self.units:
+            if unit.start != cursor:
+                raise ValueError("structure units must be ordered and contiguous")
+            cursor = unit.end
+        return self
+
+
+class ReferenceLibraryRecordV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    source_id: str
+    title: str
+    relative_name: str
+    intent: Literal["reference", "continuation", "canon", "migration"] = "reference"
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_snapshot_ref: str
+    total_chars: int = Field(ge=0)
+    created_at: str
+    updated_at: str
+
+
+class StyleFingerprintV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    source_id: str
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sentence_count: int = Field(ge=0)
+    paragraph_count: int = Field(ge=0)
+    avg_sentence_chars: float = Field(ge=0)
+    sentence_stddev: float = Field(ge=0)
+    avg_paragraph_chars: float = Field(ge=0)
+    paragraph_min_chars: int = Field(ge=0)
+    paragraph_max_chars: int = Field(ge=0)
+    dialogue_ratio: float = Field(ge=0, le=1)
+    short_paragraph_ratio: float = Field(ge=0, le=1)
+    punctuation_per_1000: dict[str, float]
+    pov_markers: dict[str, int]
+    generated_at: str
+
+
+class ReferenceAdoptionSelectionV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str
+    claim: str
+    target: Literal["style", "rules", "inspiration", "setting_candidates"]
+    dimension: Literal[
+        "narration",
+        "language",
+        "dialogue",
+        "rhythm",
+        "emotion",
+        "structure",
+        "craft",
+        "avoid",
+    ] = "craft"
+    role: Literal["primary", "auxiliary", "validation_only", "avoid"] = "auxiliary"
+    scope: Literal["project", "arc", "chapter"] = "project"
+    scope_id: str = ""
+    source_ids: list[str] = Field(min_length=1)
+    evidence: list[EvidenceRef] = Field(min_length=1)
+    source_bound: bool = False
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> ReferenceAdoptionSelectionV1:
+        if self.scope != "project" and not self.scope_id.strip():
+            raise ValueError("arc/chapter selections require scope_id")
+        if self.target != "style" and self.role == "validation_only":
+            raise ValueError("validation_only is only valid for style selections")
+        return self
+
+
+class ReferenceAdoptionV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    adoption_id: str
+    novel_id: str
+    profile_id: str
+    source_revisions: dict[str, str]
+    selections: list[ReferenceAdoptionSelectionV1] = Field(min_length=1)
+    rejected_item_ids: list[str]
+    created_at: str
+
+
+class ReferenceAdoptionPreviewV1(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    preview_id: str
+    adoption: ReferenceAdoptionV1
+    baseline_revisions: dict[str, str]
+    proposed_files: dict[str, str]
+    unified_diff: str
     created_at: str

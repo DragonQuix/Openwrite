@@ -185,7 +185,12 @@ def _restore(path: Path, previous: bytes | None) -> None:
         _atomic_write(path, previous)
 
 
-def _style_profile(documents: Any, max_chars: int) -> str:
+def _style_profile(
+    documents: Any,
+    max_chars: int,
+    *,
+    include_fingerprint: bool = True,
+) -> str:
     if not isinstance(documents, dict):
         return ""
     labels = (
@@ -193,6 +198,7 @@ def _style_profile(documents: Any, max_chars: int) -> str:
         ("prompt_section", "风格指南", 800),
         ("work.manifest", "风格合成清单", 1200),
         ("work.composed", "作品合成风格", 1200),
+        ("work.scoped", "当前范围风格覆盖", 900),
         ("work.fingerprint", "作品风格指纹", 800),
         ("craft.dialogue_craft", "对话技法", 700),
         ("craft.scene_craft", "场景技法", 700),
@@ -209,6 +215,9 @@ def _style_profile(documents: Any, max_chars: int) -> str:
     parts: list[str] = []
     used: set[str] = set()
     for key, label, limit in labels:
+        if key == "work.fingerprint" and not include_fingerprint:
+            used.add(key)
+            continue
         raw = documents.get(key, "")
         value = (
             render_style_manifest_summary(raw)
@@ -269,7 +278,7 @@ def _render_outline(sections: Any) -> str:
 def _characters(documents: Any) -> list[dict[str, str]]:
     if isinstance(documents, dict):
         return [
-            {"name": str(name), "description": str(content)[:1200]}
+            {"name": str(name), "description": str(content)}
             for name, content in documents.items()
             if str(content).strip()
         ]
@@ -288,8 +297,60 @@ def _characters(documents: Any) -> list[dict[str, str]]:
             ),
             f"角色{index}",
         )
-        characters.append({"name": heading, "description": text[:1200]})
+        characters.append({"name": heading, "description": text})
     return characters
+
+
+def _context_characters(context: Any) -> list[dict[str, str]]:
+    characters: list[dict[str, str]] = []
+    for index, item in enumerate(getattr(context, "active_characters", []) or [], start=1):
+        name = str(
+            getattr(item, "name", "")
+            or getattr(item, "character_id", "")
+            or f"角色{index}"
+        ).strip()
+        if hasattr(item, "to_context_text"):
+            description = str(item.to_context_text()).strip()
+        elif isinstance(item, dict):
+            description = str(item.get("description") or item).strip()
+            name = str(item.get("name") or name).strip()
+        else:
+            description = str(item or "").strip()
+        if description:
+            characters.append({"name": name, "description": description})
+    return characters
+
+
+def _render_current_chapter(context: Any) -> str:
+    """Render the parser-backed current chapter instead of a whole agent packet."""
+    chapter = getattr(context, "current_chapter", None)
+    if chapter is None:
+        return ""
+    parts: list[str] = []
+    title = str(getattr(chapter, "title", "") or "").strip()
+    if title:
+        parts.append(f"# {title}")
+    for label, attribute in (
+        ("戏剧位置", "dramatic_position"),
+        ("内容焦点", "content_focus"),
+        ("情感弧线", "emotional_arc"),
+    ):
+        value = str(getattr(chapter, attribute, "") or "").strip()
+        if value:
+            parts.append(f"{label}: {value}")
+    for label, attribute in (
+        ("本章目标", "goals"),
+        ("章内节拍", "beats"),
+        ("章末悬念", "hooks"),
+    ):
+        values = getattr(chapter, attribute, []) or []
+        normalized = [str(item).strip() for item in values if str(item).strip()]
+        if normalized:
+            parts.append(f"{label}:\n" + "\n".join(f"- {item}" for item in normalized))
+    summary = str(getattr(chapter, "summary", "") or "").strip()
+    if summary:
+        parts.append("章节摘要:\n" + summary)
+    return "\n\n".join(parts)
 
 
 def build_writer_payload(
@@ -300,24 +361,35 @@ def build_writer_payload(
     guidance: str,
     target_words: int,
 ) -> dict[str, Any]:
+    current_chapter = getattr(context, "current_chapter", None)
     payload: dict[str, Any] = {
         "target_words": target_words or getattr(context, "target_words", 0),
         "author_intent": getattr(context, "author_intent", ""),
         "creative_focus": getattr(context, "creative_focus", ""),
         "chapter_goals": getattr(context, "chapter_goals", []),
+        "chapter_beats": getattr(current_chapter, "beats", []) if current_chapter else [],
+        "chapter_hooks": getattr(current_chapter, "hooks", []) if current_chapter else [],
+        "emotion_arc": getattr(context, "emotion_arc", ""),
         "dramatic_context": getattr(context, "dramatic_context", {}),
+        "character_states": getattr(context, "character_states", ""),
         "current_state": getattr(context, "current_state", ""),
         "foreshadowing_summary": getattr(context, "foreshadowing_summary", ""),
         "ledger": getattr(context, "ledger", ""),
-        "relationships": getattr(truth, "relationships", ""),
+        "relationships": getattr(context, "relationships", "")
+        or getattr(truth, "relationships", ""),
         "recent_chapters": getattr(context, "recent_text", ""),
+        "semantic_references": getattr(context, "semantic_references", ""),
         "chapter_summaries": getattr(context, "chapter_summaries", ""),
+        "active_characters": _context_characters(context),
     }
+    chapter_outline = _render_current_chapter(context)
+    if chapter_outline:
+        payload["outline"] = chapter_outline
     if packet:
         sections = packet.get("prompt_sections", {})
         legacy_concepts = packet.get("concept_documents", {})
         settings = packet.get("setting_documents") or legacy_concepts
-        continuity = packet.get("continuity_documents") or legacy_concepts
+        continuity = packet.get("continuity_documents") or {}
         core_documents = packet.get("core_documents", {})
         styles = packet.get("style_documents", {})
         if not isinstance(sections, dict):
@@ -326,6 +398,22 @@ def build_writer_payload(
             settings = {}
         if not isinstance(continuity, dict):
             continuity = {}
+        continuity = {
+            **{
+                key: legacy_concepts.get(key) or packet.get(key)
+                for key in (
+                    "current_state",
+                    "ledger",
+                    "relationships",
+                    "character_states",
+                    "foreshadowing_summary",
+                    "pending_hooks",
+                )
+                if isinstance(legacy_concepts, dict)
+                and (legacy_concepts.get(key) or packet.get(key))
+            },
+            **continuity,
+        }
         if not isinstance(core_documents, dict):
             core_documents = {}
         payload["author_intent"] = str(
@@ -341,19 +429,31 @@ def build_writer_payload(
         payload["chapter_summaries"] = str(
             sections.get("历史章节记忆") or payload["chapter_summaries"]
         )
-        outline = str(packet.get("outline") or "").strip() or _render_outline(sections)
-        if outline:
-            payload["outline"] = outline
-        style = _style_profile(styles, 4000)
+        if not payload.get("outline"):
+            outline = _render_outline(sections) or str(packet.get("outline") or "").strip()
+            if outline:
+                payload["outline"] = outline
+        style = _style_profile(styles, 4000, include_fingerprint=False)
         if style:
             payload["style_profile"] = style
         active = _characters(packet.get("character_documents", {}))
         if active:
-            payload["active_characters"] = active
+            packet_by_name = {item["name"]: item for item in active}
+            merged_characters = [
+                packet_by_name.pop(item["name"], item)
+                for item in payload.get("active_characters", [])
+            ]
+            merged_characters.extend(packet_by_name.values())
+            payload["active_characters"] = merged_characters
         for key in ("current_state", "ledger", "relationships"):
             payload[key] = str(continuity.get(key) or payload.get(key) or "")
+        payload["character_states"] = str(
+            continuity.get("character_states") or payload.get("character_states") or ""
+        )
         payload["foreshadowing_summary"] = str(
-            continuity.get("pending_hooks") or payload["foreshadowing_summary"]
+            continuity.get("foreshadowing_summary")
+            or continuity.get("pending_hooks")
+            or payload["foreshadowing_summary"]
         )
         payload["recent_chapters"] = str(packet.get("previous_chapter_content") or "")
         extra = []
@@ -382,7 +482,11 @@ def build_writer_payload(
     )
 
 
-def build_review_payload(packet: dict[str, Any]) -> dict[str, Any]:
+def build_review_payload(
+    packet: dict[str, Any],
+    *,
+    context: Any | None = None,
+) -> dict[str, Any]:
     continuity = packet.get("continuity_documents") or packet.get("concept_documents", {})
     sections = packet.get("prompt_sections", {})
     if not isinstance(continuity, dict):
@@ -395,7 +499,9 @@ def build_review_payload(packet: dict[str, Any]) -> dict[str, Any]:
         if isinstance(characters, dict)
         else ""
     )
-    outline = _render_outline(sections)
+    outline = _render_current_chapter(context) if context is not None else ""
+    if not outline:
+        outline = _render_outline(sections)
     if not outline:
         section_items = packet.get("current_arc_sections")
         if isinstance(section_items, list):
@@ -411,8 +517,12 @@ def build_review_payload(packet: dict[str, Any]) -> dict[str, Any]:
     if not outline:
         outline = str(packet.get("outline") or "").strip()
     payload: dict[str, Any] = {
-        "target_words": int(packet.get("target_words") or 0),
-        "character_profiles": character_text[:4000],
+        "target_words": int(
+            (getattr(context, "target_words", 0) if context is not None else 0)
+            or packet.get("target_words")
+            or 0
+        ),
+        "character_profiles": character_text,
         "current_state": str(
             continuity.get("current_state") or packet.get("current_state") or ""
         ),
@@ -428,14 +538,39 @@ def build_review_payload(packet: dict[str, Any]) -> dict[str, Any]:
             or ""
         ),
     }
+    if context is not None:
+        payload.update(
+            {
+                "author_intent": getattr(context, "author_intent", "")
+                or payload["author_intent"],
+                "creative_focus": getattr(context, "creative_focus", "")
+                or payload["creative_focus"],
+                "chapter_goals": getattr(context, "chapter_goals", []),
+                "chapter_beats": getattr(
+                    getattr(context, "current_chapter", None), "beats", []
+                ),
+                "chapter_hooks": getattr(
+                    getattr(context, "current_chapter", None), "hooks", []
+                ),
+                "emotion_arc": getattr(context, "emotion_arc", ""),
+                "foreshadowing_summary": getattr(
+                    context, "foreshadowing_summary", ""
+                ),
+                "ledger": getattr(context, "ledger", ""),
+                "relationships": getattr(context, "relationships", "")
+                or payload["relationships"],
+                "current_state": getattr(context, "current_state", "")
+                or payload["current_state"],
+            }
+        )
     if outline:
-        payload["outline"] = outline[:4000]
+        payload["outline"] = outline
     style = _style_profile(packet.get("style_documents", {}), 2500)
     if style:
-        payload["style_profile"] = style[:2000]
+        payload["style_profile"] = style
     previous = str(packet.get("previous_chapter_content") or "").strip()
     if previous:
-        payload["recent_chapters"] = previous[:2000]
+        payload["recent_chapters"] = previous
     return {key: value for key, value in payload.items() if value}
 
 
@@ -972,6 +1107,7 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
     from tools.chapter_assembler import ChapterAssemblerV2
     from tools.chapter_run_store import ChapterRunStore
     from tools.chapter_run_v2 import ChapterRunV2Store
+    from tools.context_builder import ContextBuilder
     from tools.llm import LLMClient, LLMConfig
     from tools.project_lock import ProjectBusyError, ProjectWriteLock
     from tools.review_store import ReviewStore
@@ -984,6 +1120,17 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
         return {"ok": False, "error": "未找到项目配置", "code": "INVALID_PROJECT"}
     novel_id = str(config.get("novel_id") or "")
     chapter_id = str(args.get("chapter_id") or "ch_001")
+    dimensions = args.get("dimensions")
+    if dimensions is not None and (
+        not isinstance(dimensions, list)
+        or any(not isinstance(item, int) or item < 1 or item > 37 for item in dimensions)
+    ):
+        return {
+            "ok": False,
+            "chapter_id": chapter_id,
+            "error": "dimensions 必须是 1-37 的整数数组",
+            "code": "INVALID_INPUT",
+        }
     scheduler = WorkflowScheduler(project_root, novel_id)
     workflow = scheduler.load_or_create(chapter_id)
     run_store = ChapterRunStore(project_root, novel_id)
@@ -1061,7 +1208,13 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
                 novel_id=novel_id,
                 style_id=str(config.get("style_id") or novel_id),
             ).assemble(chapter_id)
-            review_context = build_review_payload(_packet_payload(packet))
+            generation_context = ContextBuilder(
+                project_root, novel_id
+            ).build_generation_context(chapter_id)
+            review_context = build_review_payload(
+                _packet_payload(packet),
+                context=generation_context,
+            )
             if run_manifest is not None and run_manifest.effective_target_words > 0:
                 review_context["target_words"] = run_manifest.effective_target_words
             prewrite = TruthFilesManager(project_root, novel_id).load_snapshot_before(
@@ -1082,7 +1235,15 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
                     model_profile=str(getattr(llm_config, "model", "")),
                 )
             _task_phase(args, "model", "执行章节审稿")
-            result = asyncio.run(reviewer.review(content=content, context=review_context))
+            strict = bool(args.get("strict", False))
+            result = asyncio.run(
+                reviewer.review(
+                    content=content,
+                    context=review_context,
+                    dimensions=dimensions,
+                    strict=strict,
+                )
+            )
             if run_v2_manifest is not None:
                 run_v2_store.assert_accepts_result(run_v2_manifest)
             issues: list[dict[str, Any]] = [
@@ -1092,6 +1253,11 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
                     "description": str(getattr(issue, "description", "")),
                     "suggestion": str(getattr(issue, "suggestion", "")),
                     "dimension": getattr(issue, "dimension", None),
+                    "evidence": {
+                        "quote": str(getattr(issue, "evidence", "")),
+                        "context_before": "",
+                        "context_after": "",
+                    },
                 }
                 for issue in result.issues
             ]
@@ -1106,6 +1272,8 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
                 "run_id": run_manifest.run_id if run_manifest else "",
                 "run_id_v2": run_v2_manifest.run_id if run_v2_manifest else "",
                 "effective_target_words": int(review_context.get("target_words") or 0),
+                "strict": strict,
+                "dimensions": dimensions,
             }
             _task_phase(args, "validating", "整理审稿问题")
             _raise_if_task_cancelled(args)
@@ -1199,6 +1367,17 @@ def execute_multi_agent_chapter(
         return {"ok": False, "error": "未找到项目配置", "code": "INVALID_PROJECT"}
     novel_id = str(config.get("novel_id") or "")
     chapter_id = str(args.get("chapter_id") or "ch_001")
+    dimensions = args.get("dimensions")
+    if dimensions is not None and (
+        not isinstance(dimensions, list)
+        or any(not isinstance(item, int) or item < 1 or item > 37 for item in dimensions)
+    ):
+        return {
+            "ok": False,
+            "chapter_id": chapter_id,
+            "error": "dimensions 必须是 1-37 的整数数组",
+            "code": "INVALID_INPUT",
+        }
     scheduler = WorkflowScheduler(project_root, novel_id)
     workflow = scheduler.load_or_create(chapter_id)
     active_stage = ""
@@ -1251,11 +1430,23 @@ def execute_multi_agent_chapter(
             )
             active_stage = "writing"
             scheduler.start_stage(workflow, active_stage)
+            director_options: dict[str, Any] = {}
+            guidance = str(args.get("guidance") or "").strip()
+            target_words = int(args.get("target_words") or 0)
+            if guidance:
+                director_options["guidance"] = guidance
+            if target_words > 0:
+                director_options["target_words"] = target_words
+            if dimensions is not None:
+                director_options["dimensions"] = dimensions
+            if bool(args.get("strict", False)):
+                director_options["strict"] = True
             result = asyncio.run(
                 director.run(
                     chapter_id=chapter_id,
                     temperature=float(args.get("temperature") or 0.7),
                     run_review=not bool(args.get("no_review")),
+                    **director_options,
                 )
             )
             if not result.draft:
@@ -1283,6 +1474,11 @@ def execute_multi_agent_chapter(
                         "description": str(getattr(issue, "description", "")),
                         "suggestion": str(getattr(issue, "suggestion", "")),
                         "dimension": getattr(issue, "dimension", None),
+                        "evidence": {
+                            "quote": str(getattr(issue, "evidence", "")),
+                            "context_before": "",
+                            "context_after": "",
+                        },
                     }
                     for issue in result.review.issues
                 ]
@@ -1294,6 +1490,8 @@ def execute_multi_agent_chapter(
                     "issues": len(issues),
                     "summary": str(getattr(result.review, "summary", "") or ""),
                     "issue_details": issues,
+                    "strict": bool(args.get("strict", False)),
+                    "dimensions": dimensions,
                 }
                 ReviewStore(project_root, novel_id).save(chapter_id, review_payload)
                 scheduler.start_stage(workflow, "review")

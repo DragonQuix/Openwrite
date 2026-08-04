@@ -109,7 +109,18 @@ def test_runtime_apply_is_immutable(tmp_path: Path):
         state,
         {
             "chapter_id": "ch_001",
-            "operations": [{"op": "append", "collection": "timeline", "value": "钟楼敲响"}],
+            "operations": [
+                {
+                    "op": "append",
+                    "collection": "timeline",
+                    "value": {
+                        "id": "event_ch_001_01",
+                        "chapter_id": "ch_001",
+                        "event": "钟楼敲响",
+                        "story_time": "雨夜",
+                    },
+                }
+            ],
         },
     )
 

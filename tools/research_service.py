@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.llm.response import redact_sensitive_text
+from tools.studio_preferences import StudioResearchSettingsStore
 from tools.task_runner import TaskCancelled, TaskContext
 
 MAX_PROCESS_OUTPUT_BYTES = 2_000_000
@@ -32,7 +33,13 @@ class ResearchServiceError(RuntimeError):
 class ResearchService:
     """Run the vendored TypeScript framework and archive its report in the novel."""
 
-    def __init__(self, novel_root: Path, *, framework_root: Path | None = None):
+    def __init__(
+        self,
+        novel_root: Path,
+        *,
+        framework_root: Path | None = None,
+        settings_store: StudioResearchSettingsStore | None = None,
+    ):
         self.novel_root = Path(novel_root).resolve()
         self.framework_root = (
             framework_root
@@ -41,6 +48,7 @@ class ResearchService:
         self.research_root = self.novel_root / "data" / "research"
         self.report_root = self.research_root / "reports"
         self.artifact_root = self.research_root / "artifacts"
+        self.settings_store = settings_store or StudioResearchSettingsStore()
 
     def status(self) -> dict[str, Any]:
         node = shutil.which("node")
@@ -58,8 +66,15 @@ class ResearchService:
                 if package_ready and not dependencies_ready
                 else ""
             ),
+            "settings": self.settings_store.surface(),
             "reports": self.list_reports(),
         }
+
+    def save_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self.settings_store.save(payload)
+        except ValueError as exc:
+            raise ResearchServiceError(str(exc), code="INVALID_RESEARCH_SETTINGS") from exc
 
     def list_reports(self) -> list[dict[str, Any]]:
         if not self.report_root.is_dir():
@@ -105,7 +120,13 @@ class ResearchService:
             ) from exc
         return {"id": report_id, "metadata": metadata, "content": content}
 
-    def run(self, payload: dict[str, Any], context: TaskContext) -> dict[str, Any]:
+    def run(
+        self,
+        payload: dict[str, Any],
+        context: TaskContext,
+        *,
+        model_profile: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         prompt = str(payload.get("prompt") or "").strip()
         if not prompt:
             raise ResearchServiceError("研究问题不能为空", code="INVALID_INPUT")
@@ -129,6 +150,13 @@ class ResearchService:
         self.report_root.mkdir(parents=True, exist_ok=True)
         episode_dir = self.artifact_root / f"episode_{int(time.time())}_{uuid.uuid4().hex[:8]}"
         session_id = f"S_openwrite_{uuid.uuid4().hex[:16]}"
+        search = str(
+            payload.get("search")
+            or self.settings_store.load_settings().get("search_provider")
+            or "bocha"
+        ).strip().lower()
+        if search not in {"bocha", "bing", "jina", "none"}:
+            raise ResearchServiceError("深度研究搜索提供方无效", code="INVALID_INPUT")
         command = [
             pnpm,
             "research",
@@ -144,7 +172,7 @@ class ResearchService:
             "--quality",
             str(payload.get("quality") or "balanced"),
             "--search",
-            str(payload.get("search") or "bocha"),
+            search,
         ]
         llm = str(payload.get("llm") or "").strip().lower()
         if llm:
@@ -156,7 +184,9 @@ class ResearchService:
             if payload.get(payload_key) not in {None, ""}:
                 command.extend([flag, str(payload[payload_key])])
 
-        env = self._research_environment(payload)
+        env = self._research_environment(
+            {**payload, "search": search}, model_profile=model_profile
+        )
         context.phase("preparing", "准备 DeepResearch 运行环境")
         context.checkpoint()
         process = subprocess.Popen(
@@ -249,8 +279,39 @@ class ResearchService:
             "metrics": metadata["metrics"],
         }
 
-    def _research_environment(self, payload: dict[str, Any]) -> dict[str, str]:
+    def _research_environment(
+        self,
+        payload: dict[str, Any],
+        *,
+        model_profile: dict[str, Any] | None = None,
+    ) -> dict[str, str]:
         env = {key: value for key, value in os.environ.items() if isinstance(value, str)}
+        search = str(payload.get("search") or "bocha").strip().lower()
+        try:
+            env.update(self.settings_store.environment(search))
+        except ValueError as exc:
+            raise ResearchServiceError(
+                str(exc), code="RESEARCH_SEARCH_CREDENTIAL_MISSING"
+            ) from exc
+        if model_profile is not None:
+            profile_provider = str(model_profile.get("provider") or "openai").strip().lower()
+            if profile_provider == "anthropic":
+                raise ResearchServiceError(
+                    "DeepResearch 当前需要 OpenAI-compatible 模型档案；"
+                    "请为深度研究路由选择其他档案",
+                    code="RESEARCH_MODEL_UNSUPPORTED",
+                )
+            env["AGENT_PROVIDER"] = "openai"
+            env["OPENAI_API_KEY"] = str(model_profile.get("api_key") or "").strip()
+            env["OPENAI_BASE_URL"] = str(model_profile.get("base_url") or "").strip()
+            env["AGENT_MODEL"] = str(model_profile.get("model") or "").strip()
+            env["OPENAI_WIRE_API"] = (
+                "responses"
+                if str(model_profile.get("api_format") or "chat").strip().lower()
+                == "responses"
+                else "chat_completions"
+            )
+            return env
         provider = str(payload.get("llm") or "").strip().lower()
         if not provider:
             provider = str(env.get("LLM_PROVIDER") or "bigmodel").strip().lower()

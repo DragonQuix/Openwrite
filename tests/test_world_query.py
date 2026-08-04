@@ -762,13 +762,14 @@ summary = "能够察觉旧案残留的异常回响。"
         assert 'target = "birth_city"' in preview["diff"]
         assert 'target = "echo_ability"' in preview["diff"]
         assert preview["source_revisions"]["hero"]
+        assert preview["preview_token"]
         assert source.read_text(encoding="utf-8") == original
 
         applied = edit_world_relations(
             "test",
-            relations,
+            [{"source_id": "模型重新生成的错误实体", "target_id": "partner"}],
             project_root=relation_project,
-            base_revisions=preview["source_revisions"],
+            preview_token=preview["preview_token"],
             confirm=True,
         )
 
@@ -784,6 +785,122 @@ summary = "能够察觉旧案残留的异常回响。"
         }
         assert ("hero", "birth_city") in edges
         assert ("hero", "echo_ability") in edges
+        reused = edit_world_relations(
+            "test",
+            project_root=relation_project,
+            preview_token=preview["preview_token"],
+            confirm=True,
+        )
+        assert reused["ok"] is False
+        assert "已使用" in reused["error"]
+
+    def test_missing_relation_entity_suggests_canonical_name_and_id(
+        self, relation_project
+    ):
+        entities = (
+            relation_project
+            / "data"
+            / "novels"
+            / "test"
+            / "src"
+            / "world"
+            / "entities"
+        )
+        entities.mkdir(parents=True)
+        (entities / "bamu_canji.md").write_text(
+            """+++
+id = "bamu_canji"
+name = "魃母残脊"
+alias = "妖魃遗骸"
++++
+
+# 妖魃遗骸·魃母残脊
+""",
+            encoding="utf-8",
+        )
+
+        result = edit_world_relations(
+            "test",
+            [{"source_id": "骼母残脊", "target_id": "partner"}],
+            project_root=relation_project,
+        )
+
+        assert result["ok"] is False
+        assert "第 1 条关系源实体不存在: 骼母残脊" in result["error"]
+        assert "魃母残脊（ID: bamu_canji）" in result["error"]
+
+    def test_confirmation_combines_multiple_immutable_previews(self, relation_project):
+        first = edit_world_relations(
+            "test",
+            [{"source_id": "hero", "target_id": "partner", "description": "搭档"}],
+            project_root=relation_project,
+        )
+        second = edit_world_relations(
+            "test",
+            [{"source_id": "partner", "target_id": "hero", "description": "搭档"}],
+            project_root=relation_project,
+        )
+
+        applied = edit_world_relations(
+            "test",
+            project_root=relation_project,
+            preview_tokens=[first["preview_token"], second["preview_token"]],
+            confirm=True,
+        )
+
+        assert applied["ok"] is True
+        assert applied["applied"] is True
+        character_root = (
+            relation_project / "data" / "novels" / "test" / "src" / "characters"
+        )
+        assert 'target = "partner"' in (character_root / "hero.md").read_text(
+            encoding="utf-8"
+        )
+        assert 'target = "hero"' in (character_root / "partner.md").read_text(
+            encoding="utf-8"
+        )
+
+    def test_tampered_relation_preview_is_rejected(self, relation_project):
+        source = (
+            relation_project
+            / "data"
+            / "novels"
+            / "test"
+            / "src"
+            / "characters"
+            / "hero.md"
+        )
+        original = source.read_text(encoding="utf-8")
+        preview = edit_world_relations(
+            "test",
+            [{"source_id": "hero", "target_id": "partner"}],
+            project_root=relation_project,
+        )
+        preview_path = (
+            relation_project
+            / "data"
+            / "novels"
+            / "test"
+            / "data"
+            / "workflows"
+            / "relation_previews"
+            / f"{preview['preview_token']}.json"
+        )
+        preview_path.write_text(
+            preview_path.read_text(encoding="utf-8").replace('"partner"', '"hero"'),
+            encoding="utf-8",
+        )
+
+        result = edit_world_relations(
+            "test",
+            project_root=relation_project,
+            preview_token=preview["preview_token"],
+            confirm=True,
+        )
+
+        assert result["ok"] is False
+        assert "校验失败" in result["error"]
+        assert source.read_text(encoding="utf-8") == original
 
     def test_confirmation_rejects_stale_revision(self, relation_project):
         source = (

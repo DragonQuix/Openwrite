@@ -14,6 +14,7 @@ from tools.agent.book_state import BookStage, BookStateStore
 from tools.cli import _save_chapter
 from tools.context_builder import ContextBuilder
 from tools.init_project import init_project
+from tools.model_profiles import ModelProfileStore
 from tools.project_registry import ProjectRegistry
 from tools.studio import (
     StudioApplication,
@@ -43,8 +44,8 @@ def test_studio_assets_load_shared_core_as_an_es_module():
     tasks = (assets / "js" / "tasks.js").read_text(encoding="utf-8")
     structured_assets = (assets / "js" / "assets.js").read_text(encoding="utf-8")
 
-    assert '<script type="module" src="/app.js?v=outline-6"></script>' in html
-    assert 'import "/js/application.js?v=outline-6"' in app
+    assert '<script type="module" src="/app.js?v=chapter-delete-1"></script>' in html
+    assert 'import "/js/application.js?v=chapter-delete-1"' in app
     assert 'from "/js/core.js"' in application
     assert "export const state" in core
     assert "export async function api" in core
@@ -73,6 +74,8 @@ def test_studio_writer_workspace_keeps_primary_navigation_and_contextual_tools()
 
     assert primary_nav.count('class="nav-item') == 6
     assert 'data-view="research"' in html
+    assert 'id="research-settings-open"' in html
+    assert 'id="research-settings-dialog"' in html
     assert 'id="library-tabs"' in html
     assert 'id="editor-find-panel"' in html
     assert 'id="editor-reading-toggle"' in html
@@ -81,24 +84,38 @@ def test_studio_writer_workspace_keeps_primary_navigation_and_contextual_tools()
     assert 'id="inspector-backdrop"' in html
     assert 'class="mobile-compact-icon"' in html
     assert 'id="revision-hunks-list"' in html
-    assert 'id="source-synthesize"' in html
-    assert 'id="source-promotion-preview"' in html
-    assert 'id="source-promotion-apply"' in html
+    assert 'id="delete-chapter"' in html
+    assert 'id="chapter-delete-dialog"' in html
+    assert 'id="reference-synthesize"' in html
+    assert 'id="reference-structure-confirm"' in html
+    assert 'id="reference-send-goethe"' in html
+    assert 'id="reference-adoption-preview"' in html
+    assert 'id="reference-adoption-apply"' in html
+    assert '"character", "world", "relationship", "progression", "timeline"' in application
+    assert 'role.value = item.category === "risk" ? "avoid" : "auxiliary"' in application
+    assert 'world: ["setting_candidates", "craft"]' in application
+    assert "标准 SKILL.md" in application
+    assert "useRuntimeSkill" in application
     assert "function scheduleAutoSave()" in application
     assert "if (!state.workspace) return;" in application
     assert "toggleMobileNavigation(false, false)" in application
     assert "toggleInspector(false, false)" in application
-    assert 'action: "analyze_v2"' in application
-    assert "renderSourceAnalysis" in application
-    assert "retrySourceChunk" in application
-    assert "synthesizeSelectedSources" in application
-    assert "previewSourcePromotion" in application
-    assert "applySourcePromotion" in application
+    assert 'action: "prepare"' in application
+    assert "renderReferenceStructure" in application
+    assert "enqueueReferenceAnalysis" in application
+    assert "synthesizeReferenceProfile" in application
+    assert "previewReferenceAdoption" in application
+    assert "applyReferenceAdoption" in application
     assert "inspector.contains(document.activeElement)" in application
     assert "sidebar.contains(document.activeElement)" in application
     assert "saveDocument({ silent: true })" in application
     assert "function findNextEditorMatch()" in application
+    assert "function openChapterDeleteDialog()" in application
+    assert 'api("/api/chapter/delete"' in application
     assert 'api("/api/chat"' in application
+    assert "【精确人物状态】" in application
+    assert "【语义远距记忆（仅供参考）】" in application
+    assert "语义召回" in application
     assert ".app.editor-focus .workspace-shell" in styles
     assert ".editor-view.reading-width .document-editor" in styles
     assert ".inspector-backdrop:not([hidden])" in styles
@@ -110,6 +127,7 @@ def test_studio_structured_asset_ui_keeps_raw_mode_and_explicit_import_decisions
     assets = Path(__file__).parent.parent / "tools" / "studio_assets"
     html = (assets / "index.html").read_text(encoding="utf-8")
     javascript = _studio_javascript(assets)
+    styles = (assets / "styles.css").read_text(encoding="utf-8")
     styles = (assets / "styles.css").read_text(encoding="utf-8")
 
     assert 'id="library-navigation"' in html
@@ -161,19 +179,86 @@ def test_studio_model_form_uses_valid_output_step_and_interface_presets():
     assets = Path(__file__).parent.parent / "tools" / "studio_assets"
     html = (assets / "index.html").read_text(encoding="utf-8")
     javascript = _studio_javascript(assets)
+    styles = (assets / "styles.css").read_text(encoding="utf-8")
 
     assert (
-        'id="model-max-tokens" type="number" min="256" max="131072" step="1" value="24000"'
+        'id="model-max-tokens" type="number" min="256" max="384000" step="1" value="24000"'
     ) in html
-    assert 'value="deepseek-pro">DeepSeek · V4 Pro<' in html
-    assert 'value="deepseek-flash">DeepSeek · V4 Flash<' in html
+    assert (
+        'id="model-context-tokens" type="number" min="12000" max="10000000" '
+        'step="1000" value="64000"'
+    ) in html
     assert 'value="openai">OpenAI 格式接口<' in html
     assert 'value="anthropic">Anthropic 格式接口<' in html
+    assert 'id="model-preset-help"' in html
     assert 'id="model-remember-key" type="checkbox" checked' in html
-    assert 'model: "deepseek-v4-pro"' in javascript
-    assert 'model: "deepseek-v4-flash"' in javascript
+    assert 'id="model-embedding-provider"' in html
+    assert 'value="local">本地 FastEmbed<' in html
+    assert 'id="model-embedding-preset"' in html
+    assert 'id="model-embedding-preset-help"' in html
+    assert 'id="model-embedding-test"' in html
+    assert "/api/model/embedding/test" in javascript
+    assert 'model: "jinaai/jina-embeddings-v2-base-zh"' in javascript
+    assert 'model: "intfloat/multilingual-e5-large"' in javascript
+    assert 'model: "text-embedding-v3"' in javascript
+    assert 'model: "Qwen/Qwen3-Embedding-0.6B"' in javascript
+    assert "function applyEmbeddingPreset()" in javascript
+    assert "function syncEmbeddingPreset()" in javascript
+    assert "[data-embedding-cloud][hidden]" in styles
+    assert "function renderPresetOptions(" in javascript
+    assert "function renderPresetHelp(" in javascript
+    assert "接口模板；当前容量以下方数值为准" in javascript
+    assert "(surface().presets || []).forEach" in javascript
+    assert 'interfaces.label = "接口模板"' in javascript
+    assert 'model: "gpt-5.6-sol"' in javascript
+    assert 'model: "claude-sonnet-5"' in javascript
     assert "remember_api_key" in javascript
-    assert 'return name === "deepseek-v4-flash" ? "deepseek-flash" : "deepseek-pro";' in javascript
+    assert "Number(preset.context_tokens) === Number(profile?.context_tokens)" in javascript
+    assert "Number(preset.max_tokens) === Number(profile?.max_output_tokens)" in javascript
+    assert "if (exact) return exact.id;" in javascript
+    assert (
+        'return name === "deepseek-v4-flash" ? "deepseek-flash" : "deepseek-pro";'
+        not in javascript
+    )
+
+
+def test_studio_local_embedding_probe_does_not_require_a_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    captured = {}
+
+    def fake_probe(settings):
+        captured["settings"] = settings
+        return {
+            "ok": True,
+            "provider": "local",
+            "model": settings.model,
+            "dimension": settings.dimension,
+            "latency_ms": 1,
+        }
+
+    monkeypatch.setattr("tools.embedding_runtime.run_embedding_probe", fake_probe)
+    app = StudioApplication(
+        tmp_path,
+        model_profile_store=ModelProfileStore(tmp_path / "profiles"),
+    )
+    result = app.test_embedding_connection(
+        {
+            "id": "local-search",
+            "label": "Local Search",
+            "provider": "openai",
+            "base_url": "https://models.example/v1",
+            "model": "chat-model",
+            "embedding_provider": "local",
+            "embedding_model": "BAAI/bge-small-zh-v1.5",
+            "embedding_dimension": 512,
+            "embedding_max_tokens": 512,
+        }
+    )
+
+    assert result["ok"] is True
+    assert captured["settings"].provider == "local"
+    assert captured["settings"].api_key == ""
 
 
 def test_studio_onboarding_ui_guides_new_projects_and_next_actions():
@@ -798,7 +883,9 @@ def test_studio_model_configuration_persists_local_settings_and_never_echoes_key
     assert str(settings_store.directory) not in payload_json
     assert "session-test-secret" not in (tmp_path / "novel_config.yaml").read_text(encoding="utf-8")
     assert settings_store.load_credential() == "session-test-secret"
-    assert ContextBuilder(tmp_path, "demo").MAX_TOKENS == 160000
+    builder = ContextBuilder(tmp_path, "demo")
+    assert builder.CONTEXT_WINDOW_TOKENS == 160000
+    assert builder.MAX_TOKENS == 131200
 
 
 def test_studio_model_configuration_does_not_persist_inherited_process_key(
@@ -954,6 +1041,81 @@ def test_studio_document_write_is_atomic_and_version_checked(tmp_path: Path):
     with pytest.raises(StudioError) as conflict:
         app.write_document(document["path"], "旧内容", document["version"])
     assert conflict.value.status == HTTPStatus.CONFLICT
+
+
+def test_studio_manual_chapter_delete_is_latest_only_and_cleans_derived_data(
+    tmp_path: Path,
+):
+    from tools.chapter_memory import ChapterMemoryStore
+    from tools.review_store import ReviewStore
+
+    init_project(tmp_path, "demo")
+    registry = ProjectRegistry(tmp_path / "registry" / "recent.yaml", allow_ephemeral=True)
+    app = StudioApplication(
+        tmp_path,
+        project_registry=registry,
+        model_settings_store=StudioModelSettingsStore(tmp_path / "prefs"),
+    )
+    first_path = _save_chapter(tmp_path, "demo", "ch_001", "第一章", "旧雨落城。")
+    latest_path = _save_chapter(tmp_path, "demo", "ch_002", "第二章", "钟声停了。")
+    memory = ChapterMemoryStore(tmp_path, "demo")
+    memory.save(
+        chapter_id="ch_002",
+        title="第二章",
+        summary="钟声停了。",
+        word_count=5,
+    )
+    reviews = ReviewStore(tmp_path, "demo")
+    reviews.save("ch_002", {"score": 90, "passed": True, "issues": 0})
+    novel_root = tmp_path / "data" / "novels" / "demo"
+    revision_root = novel_root / "data" / "revisions" / "ch_002"
+    annotation_root = novel_root / "data" / "annotations" / "ch_002"
+    revision_root.mkdir(parents=True)
+    annotation_root.mkdir(parents=True)
+    (revision_root / "derived.json").write_text("{}", encoding="utf-8")
+    (annotation_root / "derived.json").write_text("{}", encoding="utf-8")
+
+    first = app.read_document(first_path.relative_to(novel_root).as_posix())
+    with pytest.raises(StudioError, match="最新章节") as not_latest:
+        app.delete_chapter(
+            {"path": first["path"], "version": first["version"], "confirm": "ch_001"}
+        )
+    assert not_latest.value.status == HTTPStatus.CONFLICT
+
+    latest = app.read_document(latest_path.relative_to(novel_root).as_posix())
+    with pytest.raises(StudioError, match="请输入 ch_002") as unconfirmed:
+        app.delete_chapter(
+            {"path": latest["path"], "version": latest["version"], "confirm": "wrong"}
+        )
+    assert unconfirmed.value.status == HTTPStatus.PRECONDITION_REQUIRED
+
+    result = app.delete_chapter(
+        {"path": latest["path"], "version": latest["version"], "confirm": "ch_002"}
+    )
+
+    assert result["chapter_id"] == "ch_002"
+    assert result["previous_chapter"] == "ch_001"
+    assert result["backup"]["label"] == "Studio 删除前自动备份"
+    backup = novel_root / result["backup"]["content_file"]
+    assert "钟声停了" in backup.read_text(encoding="utf-8")
+    assert latest_path.exists() is False
+    assert memory.path_for("ch_002").exists() is False
+    assert reviews.path_for("ch_002").exists() is False
+    assert revision_root.exists() is False
+    assert annotation_root.exists() is False
+    assert app.workspace()["snapshot"]["current_chapter"] == "ch_001"
+
+    remaining = app.read_document(first_path.relative_to(novel_root).as_posix())
+    cleared = app.delete_chapter(
+        {"path": remaining["path"], "version": remaining["version"], "confirm": "ch_001"}
+    )
+    cleared_workspace = cleared["workspace"]
+    cleared_state = BookStateStore(tmp_path, "demo").load_or_create()
+    assert cleared["previous_chapter"] == ""
+    assert cleared["runtime_restored"] is True
+    assert cleared_workspace["documents"]["chapters"] == []
+    assert cleared_workspace["snapshot"]["current_chapter"] == ""
+    assert cleared_state.stage == BookStage.ROLLING_OUTLINE
 
 
 def test_studio_rejects_paths_outside_novel_documents(tmp_path: Path):

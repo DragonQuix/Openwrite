@@ -13,6 +13,19 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from tools.embedding_runtime import (
+    DEFAULT_CLOUD_MODEL,
+    DEFAULT_LOCAL_DIMENSION,
+    DEFAULT_LOCAL_MAX_TOKENS,
+    DEFAULT_LOCAL_MODEL,
+    EmbeddingRuntimeError,
+    normalize_embedding_provider,
+)
+from tools.llm.model_catalog import (
+    MAX_CONTEXT_TOKENS,
+    MAX_OUTPUT_TOKENS,
+    model_preset_catalog,
+)
 from tools.studio_preferences import StudioModelSettingsStore, default_studio_preferences_dir
 
 PROFILE_VERSION = 1
@@ -24,6 +37,7 @@ ROUTE_KEYS = (
     "source_extract",
     "revision",
     "search",
+    "research",
 )
 PROFILE_FIELDS = (
     "id",
@@ -37,15 +51,21 @@ PROFILE_FIELDS = (
     "temperature",
     "timeout_seconds",
     "credential_ref",
+    "embedding_provider",
     "embedding_base_url",
     "embedding_model",
     "embedding_dimension",
     "embedding_max_tokens",
     "embedding_credential_ref",
+    "search_mode",
 )
 
 _ACTIVE_PROFILE: ContextVar[dict[str, Any] | None] = ContextVar(
     "openwrite_active_model_profile",
+    default=None,
+)
+_ACTIVE_SEARCH_PROFILE: ContextVar[dict[str, Any] | None] = ContextVar(
+    "openwrite_active_search_model_profile",
     default=None,
 )
 
@@ -119,15 +139,19 @@ class ModelProfileStore:
             "temperature": float(os.environ.get("LLM_TEMPERATURE", "0.7")),
             "timeout_seconds": float(os.environ.get("LLM_TIMEOUT_SECONDS", "120")),
             "credential_ref": "key_default",
+            "embedding_provider": os.environ.get(
+                "OPENWRITE_LIGHTRAG_EMBEDDING_PROVIDER", "openai"
+            ).strip(),
             "embedding_base_url": os.environ.get(
                 "OPENWRITE_LIGHTRAG_EMBEDDING_BASE_URL", ""
             ).strip(),
             "embedding_model": os.environ.get(
-                "OPENWRITE_LIGHTRAG_EMBEDDING_MODEL", "text-embedding-3-small"
+                "OPENWRITE_LIGHTRAG_EMBEDDING_MODEL", DEFAULT_CLOUD_MODEL
             ).strip(),
             "embedding_dimension": 1536,
             "embedding_max_tokens": 8192,
             "embedding_credential_ref": "embedding_key_default",
+            "search_mode": "vector",
         }
         credential = self.legacy.load_credential()
         if credential:
@@ -163,7 +187,11 @@ class ModelProfileStore:
                 {
                     **profile,
                     "configured": configured,
-                    "embedding_configured": separate_embedding_key or configured,
+                    "embedding_configured": (
+                        profile.get("embedding_provider") == "local"
+                        or separate_embedding_key
+                        or configured
+                    ),
                     "embedding_key_configured": separate_embedding_key,
                 }
             )
@@ -174,6 +202,7 @@ class ModelProfileStore:
             routes.setdefault(key, default_id)
         return {
             "profiles": profiles,
+            "presets": model_preset_catalog(),
             "routes": routes,
             "default_profile_id": default_id,
             "legacy_mapped": not self.profiles_path.is_file() and bool(profiles),
@@ -269,6 +298,41 @@ class ModelProfileStore:
             )
         return {**metadata, "api_key": secret}
 
+    def test_embedding_candidate(
+        self,
+        profile: dict[str, Any],
+        *,
+        api_key: str = "",
+        embedding_api_key: str = "",
+    ) -> dict[str, Any]:
+        """Resolve an embedding probe without requiring a chat-model request."""
+        metadata = self._profile_metadata(profile)
+        if metadata["embedding_provider"] == "local":
+            return {**metadata, "embedding_api_key": ""}
+
+        credential_ref = str(metadata.get("credential_ref") or "")
+        embedding_credential_ref = str(metadata.get("embedding_credential_ref") or "")
+        secret = (
+            str(embedding_api_key or "").strip()
+            or str(api_key or "").strip()
+            or self._session_credentials.get(embedding_credential_ref, "")
+            or self._credentials().get(embedding_credential_ref, "")
+            or self._session_credentials.get(credential_ref, "")
+            or self._credentials().get(credential_ref, "")
+            or (
+                os.environ.get("OPENWRITE_LIGHTRAG_EMBEDDING_API_KEY", "").strip()
+                or os.environ.get("LLM_API_KEY", "").strip()
+                if metadata["id"] == "default"
+                else ""
+            )
+        )
+        if not secret:
+            raise ModelProfileError(
+                f"模型档案 {metadata['label']} 缺少 Embedding API Key",
+                code="MODEL_CREDENTIAL_MISSING",
+            )
+        return {**metadata, "embedding_api_key": secret}
+
     def delete_profile(
         self,
         profile_id: str,
@@ -348,7 +412,10 @@ class ModelProfileStore:
             or self._credentials().get(credential_ref)
             or (os.environ.get("LLM_API_KEY", "").strip() if profile["id"] == "default" else "")
         )
-        if not api_key:
+        vector_search_without_chat = (
+            operation == "search" and profile.get("search_mode") == "vector"
+        )
+        if not api_key and not vector_search_without_chat:
             raise ModelProfileError(
                 f"模型档案 {profile['label']} 缺少 API Key",
                 code="MODEL_CREDENTIAL_MISSING",
@@ -406,13 +473,18 @@ class ModelProfileStore:
                 code="INVALID_MODEL_PROFILE",
             )
         context_tokens = ModelProfileStore._bounded_number(
-            value.get("context_tokens"), 64000, 12000, 512000, int, "上下文预算"
+            value.get("context_tokens"),
+            64000,
+            12000,
+            MAX_CONTEXT_TOKENS,
+            int,
+            "上下文预算",
         )
         max_output_tokens = ModelProfileStore._bounded_number(
             value.get("max_output_tokens", value.get("max_tokens")),
             24000,
             256,
-            131072,
+            MAX_OUTPUT_TOKENS,
             int,
             "最大输出",
         )
@@ -422,8 +494,14 @@ class ModelProfileStore:
         timeout_seconds = ModelProfileStore._bounded_number(
             value.get("timeout_seconds"), 120, 1, 1800, float, "超时"
         )
+        try:
+            embedding_provider = normalize_embedding_provider(
+                value.get("embedding_provider") or "openai"
+            )
+        except EmbeddingRuntimeError as exc:
+            raise ModelProfileError(str(exc), code="INVALID_MODEL_PROFILE") from exc
         embedding_base_url = str(value.get("embedding_base_url") or "").strip().rstrip("/")
-        if embedding_base_url:
+        if embedding_provider == "openai" and embedding_base_url:
             parsed_embedding_url = urlparse(embedding_base_url)
             if (
                 parsed_embedding_url.scheme not in {"http", "https"}
@@ -434,7 +512,8 @@ class ModelProfileStore:
                     code="INVALID_MODEL_PROFILE",
                 )
         embedding_model = str(
-            value.get("embedding_model") or "text-embedding-3-small"
+            value.get("embedding_model")
+            or (DEFAULT_LOCAL_MODEL if embedding_provider == "local" else DEFAULT_CLOUD_MODEL)
         ).strip()
         if not embedding_model or len(embedding_model) > 120:
             raise ModelProfileError(
@@ -442,16 +521,24 @@ class ModelProfileStore:
                 code="INVALID_MODEL_PROFILE",
             )
         embedding_dimension = ModelProfileStore._bounded_number(
-            value.get("embedding_dimension"), 1536, 1, 65536, int, "Embedding 维度"
+            value.get("embedding_dimension"),
+            DEFAULT_LOCAL_DIMENSION if embedding_provider == "local" else 1536,
+            1,
+            65536,
+            int,
+            "Embedding 维度",
         )
         embedding_max_tokens = ModelProfileStore._bounded_number(
             value.get("embedding_max_tokens"),
-            8192,
+            DEFAULT_LOCAL_MAX_TOKENS if embedding_provider == "local" else 8192,
             256,
             131072,
             int,
             "Embedding Token 上限",
         )
+        search_mode = str(value.get("search_mode") or "vector").strip().lower()
+        if search_mode not in {"vector", "graph"}:
+            raise ModelProfileError("检索策略无效", code="INVALID_MODEL_PROFILE")
         return {
             "id": profile_id,
             "label": str(value.get("label") or profile_id).strip()[:80],
@@ -464,6 +551,7 @@ class ModelProfileStore:
             "temperature": temperature,
             "timeout_seconds": timeout_seconds,
             "credential_ref": str(value.get("credential_ref") or f"key_{profile_id}"),
+            "embedding_provider": embedding_provider,
             "embedding_base_url": embedding_base_url,
             "embedding_model": embedding_model,
             "embedding_dimension": embedding_dimension,
@@ -471,6 +559,7 @@ class ModelProfileStore:
             "embedding_credential_ref": str(
                 value.get("embedding_credential_ref") or f"embedding_key_{profile_id}"
             ),
+            "search_mode": search_mode,
         }
 
     @staticmethod
@@ -551,14 +640,27 @@ class ModelProfileStore:
 
 
 @contextmanager
-def activate_model_profile(profile: dict[str, Any]) -> Iterator[dict[str, Any]]:
+def activate_model_profile(
+    profile: dict[str, Any],
+    *,
+    search_profile: dict[str, Any] | None = None,
+) -> Iterator[dict[str, Any]]:
     token = _ACTIVE_PROFILE.set(dict(profile))
+    search_token = _ACTIVE_SEARCH_PROFILE.set(
+        dict(search_profile) if search_profile else None
+    )
     try:
         yield profile
     finally:
+        _ACTIVE_SEARCH_PROFILE.reset(search_token)
         _ACTIVE_PROFILE.reset(token)
 
 
 def active_model_profile() -> dict[str, Any] | None:
     profile = _ACTIVE_PROFILE.get()
+    return dict(profile) if profile else None
+
+
+def active_search_model_profile() -> dict[str, Any] | None:
+    profile = _ACTIVE_SEARCH_PROFILE.get()
     return dict(profile) if profile else None

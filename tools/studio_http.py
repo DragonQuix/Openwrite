@@ -37,15 +37,20 @@ POST_ROUTES = {
     "/api/focus": StudioPostRoute("update_focus", requires_project=False),
     "/api/model": StudioPostRoute("configure_model", requires_project=False),
     "/api/model/test": StudioPostRoute("test_model_connection", requires_project=False),
+    "/api/model/embedding/test": StudioPostRoute(
+        "test_embedding_connection", requires_project=False
+    ),
     "/api/model/profiles": StudioPostRoute("save_model_profile", requires_project=False),
     "/api/model/profiles/delete": StudioPostRoute(
         "delete_model_profile", requires_project=False
     ),
     "/api/model/routes": StudioPostRoute("save_model_routes", requires_project=False),
+    "/api/research/settings": StudioPostRoute("save_research_settings"),
     "/api/project/init": StudioPostRoute("initialize_project", requires_project=False),
     "/api/project/open": StudioPostRoute("open_project", requires_project=False),
     "/api/project/delete": StudioPostRoute("delete_project", requires_project=False),
     "/api/write": StudioPostRoute("write_next_chapter"),
+    "/api/chapter/delete": StudioPostRoute("delete_chapter"),
     "/api/outline/edit": StudioPostRoute("edit_outline_structure"),
     "/api/review": StudioPostRoute("review_chapter"),
     "/api/revisions/selection": StudioPostRoute(
@@ -72,6 +77,7 @@ POST_ROUTES = {
     "/api/agent/session": StudioPostRoute("create_agent_session"),
     "/api/agent/session/delete": StudioPostRoute("delete_agent_session"),
     "/api/source": StudioPostRoute("source_action"),
+    "/api/reference-library": StudioPostRoute("reference_library_action"),
     "/api/runtime-skills": StudioPostRoute("runtime_skill_action"),
     "/api/rules": StudioPostRoute("rule_action"),
     "/api/chapter-runs-v2": StudioPostRoute("chapter_run_v2_action"),

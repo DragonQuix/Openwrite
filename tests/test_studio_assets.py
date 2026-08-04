@@ -35,6 +35,21 @@ def test_studio_id_patterns_escape_hyphens_for_browser_v_mode():
     assert 'pattern="[A-Za-z0-9][A-Za-z0-9_-]' not in html
 
 
+def test_studio_checkboxes_are_not_stretched_by_dialog_input_styles():
+    styles_path = Path(__file__).parents[1] / "tools" / "studio_assets" / "styles.css"
+    styles = styles_path.read_text(encoding="utf-8")
+
+    assert '.write-dialog input:not([type="checkbox"]),' in styles
+    assert '.write-dialog input:not([type="checkbox"]) {' in styles
+    assert ".write-dialog input {" not in styles
+    checkbox_rule = styles.split('input[type="checkbox"] {', maxsplit=1)[1].split(
+        "}", maxsplit=1
+    )[0]
+    assert "width: 16px;" in checkbox_rule
+    assert "height: 16px;" in checkbox_rule
+    assert "padding: 0;" in checkbox_rule
+
+
 def test_studio_structured_assets_support_fields_and_validated_raw_mode(tmp_path: Path):
     init_project(tmp_path, "demo")
     app = StudioApplication(tmp_path)
@@ -91,6 +106,52 @@ def test_studio_structured_assets_preserve_legacy_markdown_titles(tmp_path: Path
         assert asset["name"] == "林舟"
         assert asset["data"]["name"] == "林舟"
         assert app.asset_surface("character")["assets"][0]["name"] == "林舟"
+    finally:
+        if app._task_runner is not None:
+            app._task_runner.shutdown(wait=True)
+
+
+def test_studio_structured_assets_read_and_update_nested_world_files_in_place(
+    tmp_path: Path,
+):
+    init_project(tmp_path, "demo")
+    nested = (
+        tmp_path
+        / "data"
+        / "novels"
+        / "demo"
+        / "src"
+        / "world"
+        / "entities"
+        / "antagonists"
+        / "chaos_beast.md"
+    )
+    nested.parent.mkdir(parents=True)
+    nested.write_text(
+        '+++\nid = "chaos_beast"\nname = "乱律者"\nkind = "threat"\n'
+        'summary = "让规则失效"\n+++\n\n# 乱律者\n\n旧版本。\n',
+        encoding="utf-8",
+    )
+    app = StudioApplication(tmp_path)
+    try:
+        listed = app.asset_surface("world")["assets"]
+        summary = next(item for item in listed if item["id"] == "chaos_beast")
+        loaded = app.read_asset("world", "chaos_beast")
+        updated = app.update_asset(
+            {
+                "kind": "world",
+                "id": "chaos_beast",
+                "revision": loaded["revision"],
+                "data": {"summary": "让一切规则自相矛盾"},
+            }
+        )["asset"]
+
+        assert summary["path"].endswith("antagonists/chaos_beast.md")
+        assert loaded["path"] == summary["path"]
+        assert updated["path"] == summary["path"]
+        assert updated["data"]["summary"] == "让一切规则自相矛盾"
+        assert 'summary = "让一切规则自相矛盾"' in nested.read_text(encoding="utf-8")
+        assert not (nested.parent.parent / "chaos_beast.md").exists()
     finally:
         if app._task_runner is not None:
             app._task_runner.shutdown(wait=True)

@@ -7,9 +7,16 @@ import pytest
 import yaml
 
 from models.runtime_skills import SkillManifestV1
+from tools.agent.dante import DanteChatAgent
 from tools.agent.toolkits import DANTE_DIRECT_TOOLKIT
+from tools.goethe import GoetheChatAgent
 from tools.init_project import init_project
-from tools.runtime_skills import RuleCompiler, RuntimeSkillResolver
+from tools.runtime_skills import (
+    RuleCompiler,
+    RuntimeSkillResolver,
+    extract_explicit_skill_mentions,
+    render_runtime_context,
+)
 from tools.runtime_skills.resolver import RuntimeSkillError
 from tools.studio_application import StudioApplication
 
@@ -30,6 +37,32 @@ def _write_skill(root: Path, skill_id: str, **manifest: object) -> Path:
         yaml.safe_dump(data, allow_unicode=True, sort_keys=False), encoding="utf-8"
     )
     (skill / "instructions.md").write_text("执行边界。", encoding="utf-8")
+    return skill
+
+
+def _write_standard_skill(root: Path, skill_id: str) -> Path:
+    skill = root / skill_id
+    references = skill / "references"
+    references.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text(
+        """---
+name: 场景诊断
+description: 用因果链和人物选择检查场景。
+version: 1.2.0
+allow_tools: [get_status]
+references: [references/checklist.md]
+---
+
+先列出场景目标，再检查阻力、选择、代价和结果。
+""",
+        encoding="utf-8",
+    )
+    (references / "checklist.md").write_text(
+        "每项结论必须引用当前场景证据。", encoding="utf-8"
+    )
+    scripts = skill / "scripts"
+    scripts.mkdir()
+    (scripts / "unsafe.sh").write_text("exit 99\n", encoding="utf-8")
     return skill
 
 
@@ -68,6 +101,65 @@ def test_wildcard_still_intersects_with_baseline(tmp_path: Path) -> None:
         explicit_skills=["wild"],
     )
     assert set(resolution.allowed_tools) == {"get_status", "write_chapter"}
+
+
+def test_standard_skill_is_explicit_only_and_references_are_bounded(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    _write_standard_skill(project_root / ".agents" / "skills", "scene-diagnosis")
+    resolver = RuntimeSkillResolver(project_root, global_root=tmp_path / "global")
+
+    listed = resolver.list_skills()
+    standard = next(item for item in listed["skills"] if item["id"] == "scene-diagnosis")
+    assert standard["source_format"] == "standard-skill-md"
+    assert standard["activation"] == "explicit"
+
+    automatic = resolver.resolve(
+        agent="dante",
+        task="chapter.write",
+        base_tools={"get_status", "write_chapter"},
+    )
+    assert "scene-diagnosis" not in {item.id for item in automatic.skills}
+
+    explicit = resolver.resolve(
+        agent="dante",
+        task="chapter.write",
+        base_tools={"get_status", "write_chapter"},
+        explicit_skills=["scene-diagnosis"],
+    )
+    assert [item.id for item in explicit.skills] == ["scene-diagnosis"]
+    assert set(explicit.allowed_tools) == {"get_status"}
+    assert "先列出场景目标" in explicit.instructions
+    rendered = render_runtime_context(explicit)
+    assert "每项结论必须引用当前场景证据" in rendered
+    assert "unsafe.sh" not in rendered
+
+
+def test_skill_mentions_are_stable_and_do_not_match_email_addresses() -> None:
+    assert extract_explicit_skill_mentions(
+        "请用@scene-diagnosis 和 @dialogue，再用一次 @scene-diagnosis"
+    ) == ("scene-diagnosis", "dialogue")
+    assert extract_explicit_skill_mentions("writer@example.com") == ()
+
+
+def test_goethe_and_dante_apply_standard_skill_for_one_turn(tmp_path: Path) -> None:
+    init_project(tmp_path, "demo", "标准 Skill")
+    _write_standard_skill(tmp_path / ".agents" / "skills", "scene-diagnosis")
+
+    dante = DanteChatAgent(tmp_path, "demo")
+    dante._active_user_instruction = "@scene-diagnosis 检查第一章"
+    dante_tools, dante_prompt = dante._runtime_surface()
+    assert dante_tools == {"get_status"}
+    assert "scene-diagnosis@1.2.0" in dante_prompt
+    dante._active_user_instruction = "普通讨论"
+    default_tools, default_prompt = dante._runtime_surface()
+    assert "get_context" in default_tools
+    assert "scene-diagnosis@1.2.0" not in default_prompt
+
+    goethe = GoetheChatAgent(tmp_path, "demo")
+    goethe._active_user_instruction = "@scene-diagnosis 检查规划"
+    goethe_tools, goethe_prompt = goethe._runtime_surface()
+    assert goethe_tools == {"get_status"}
+    assert "scene-diagnosis@1.2.0" in goethe_prompt
 
 
 def test_global_and_project_layers_project_wins(tmp_path: Path) -> None:

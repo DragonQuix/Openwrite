@@ -261,6 +261,15 @@ def _add_multi_write_command(subparsers):
     p.add_argument("chapter", nargs="?", default="next", help="章节 ID 或 'next'")
     p.add_argument("--temperature", "-T", type=float, default=0.7, help="写作温度")
     p.add_argument("--no-review", action="store_true", help="跳过审查")
+    p.add_argument("--strict", action="store_true", help="严格审稿（警告也不通过）")
+    p.add_argument(
+        "--dimensions",
+        nargs="+",
+        type=int,
+        help="仅审查指定维度（1-37）",
+    )
+    p.add_argument("--target-words", type=int, default=0, help="临时目标字数")
+    p.add_argument("--guidance", default="", help="本次额外写作要求")
     p.add_argument("--show-packet", action="store_true", help="先输出组装包")
     p.add_argument("--packet-output-dir", help="组装包测试输出目录（自动命名）")
 
@@ -356,8 +365,15 @@ def _add_source_command(subparsers):
             "promise",
             "structure",
             "character",
+            "world",
+            "relationship",
+            "progression",
+            "timeline",
             "conflict",
             "hook",
+            "thread",
+            "arc_summary",
+            "chapter_summary",
             "pacing",
             "voice",
             "reader_drive",
@@ -822,6 +838,10 @@ def _cmd_multi_write(args) -> int:
                 "chapter_id": args.chapter,
                 "temperature": args.temperature,
                 "no_review": bool(args.no_review),
+                "strict": bool(getattr(args, "strict", False)),
+                "dimensions": getattr(args, "dimensions", None),
+                "target_words": int(getattr(args, "target_words", 0) or 0),
+                "guidance": str(getattr(args, "guidance", "") or ""),
                 "show_packet": bool(args.show_packet),
                 "packet_output_dir": args.packet_output_dir,
             }

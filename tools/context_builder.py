@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 import yaml
 import re
 
@@ -39,9 +39,16 @@ from .resources import resolve_craft_dir
 from .chapter_memory import ChapterMemoryStore
 from .frontmatter import parse_toml_front_matter
 from .outline_cache import deserialize_outline_hierarchy
-from .shared_documents import render_indexed_document, resolve_shared_document_path
+from .shared_documents import (
+    render_indexed_document,
+    resolve_shared_document_path,
+    shared_document_lookup_keys,
+)
 from .source_sync import ensure_runtime_fresh
 from .outline_parser import OutlineMdParser
+from .llm.context import ContextBudgetPlan, ContextBudgetPolicy
+from .llm.model_catalog import MAX_CONTEXT_TOKENS
+from .character_state_index import CharacterStateIndex, strip_character_state_annotations
 
 
 class ContextBuilder:
@@ -58,18 +65,35 @@ class ContextBuilder:
         prompt_context = context.to_prompt_context()
     """
 
-    # Token 总预算。具体内容不再使用固定槽位硬切，而是在超限时按
-    # 记忆 -> 大纲 -> 运行态 -> 硬适配四级渐进压缩。
-    # Internal prompt budget.  This is deliberately below the provider's full
-    # context window and can be raised for long-context models such as DeepSeek.
-    # Keep the output budget separate via LLM_MAX_TOKENS.
+    # The public setting is the provider's complete context window. The actual
+    # prompt cap is calculated per instance after reserving output and safety.
     try:
-        MAX_TOKENS = max(12000, min(512000, int(os.getenv("OPENWRITE_CONTEXT_TOKENS", "64000"))))
+        CONTEXT_WINDOW_TOKENS = max(
+            12000,
+            min(
+                MAX_CONTEXT_TOKENS,
+                int(os.getenv("OPENWRITE_CONTEXT_TOKENS", "64000")),
+            ),
+        )
     except ValueError:
-        MAX_TOKENS = 64000
-    COMPRESSION_STRATEGY = "tiered-hierarchical-v2"
+        CONTEXT_WINDOW_TOKENS = 64000
+    try:
+        MAX_OUTPUT_TOKENS = max(256, int(os.getenv("LLM_MAX_TOKENS", "24000")))
+    except ValueError:
+        MAX_OUTPUT_TOKENS = 24000
+    MAX_TOKENS = ContextBudgetPolicy(
+        CONTEXT_WINDOW_TOKENS, MAX_OUTPUT_TOKENS
+    ).input_budget_tokens
+    COMPRESSION_STRATEGY = "staircase-proportional-v3"
 
-    def __init__(self, project_root: Path, novel_id: str, reference_style: str = ""):
+    def __init__(
+        self,
+        project_root: Path,
+        novel_id: str,
+        reference_style: str = "",
+        *,
+        search_index_factory: Callable[[Path], Any] | None = None,
+    ):
         """初始化构建器
 
         Args:
@@ -87,18 +111,31 @@ class ContextBuilder:
             from .model_profiles import active_model_profile
 
             active_profile = active_model_profile() or {}
-            self.MAX_TOKENS = max(
+            self.CONTEXT_WINDOW_TOKENS = max(
                 12000,
                 min(
-                    512000,
+                    MAX_CONTEXT_TOKENS,
                     int(
                         active_profile.get("context_tokens")
                         or os.getenv("OPENWRITE_CONTEXT_TOKENS", "64000")
                     ),
                 ),
             )
-        except ValueError:
-            self.MAX_TOKENS = 64000
+            self.MAX_OUTPUT_TOKENS = max(
+                256,
+                int(
+                    active_profile.get("max_output_tokens")
+                    or os.getenv("LLM_MAX_TOKENS", "24000")
+                ),
+            )
+        except (TypeError, ValueError):
+            self.CONTEXT_WINDOW_TOKENS = 64000
+            self.MAX_OUTPUT_TOKENS = 24000
+        self._context_policy = ContextBudgetPolicy(
+            self.CONTEXT_WINDOW_TOKENS,
+            self.MAX_OUTPUT_TOKENS,
+        )
+        self.MAX_TOKENS = self._context_policy.input_budget_tokens
 
         # 数据路径（仅支持新布局）
         self.novel_dir = project_root / "data" / "novels" / novel_id
@@ -112,6 +149,7 @@ class ContextBuilder:
         # 真相文件管理器
         self.truth_manager = TruthFilesManager(project_root, novel_id)
         self.chapter_memory = ChapterMemoryStore(project_root, novel_id)
+        self._search_index_factory = search_index_factory
 
         # 缓存
         self._outline_cache: Optional[Dict[str, Any]] = None
@@ -136,6 +174,9 @@ class ContextBuilder:
 
         # 3. 加载出场角色
         active_characters = self._get_active_characters(chapter_id, hierarchy)
+        character_states = self._get_inline_character_states(
+            active_characters, chapter_id
+        )
 
         # 4. 加载伏笔状态
         foreshadowing = self._get_foreshadowing_state(chapter_id)
@@ -170,6 +211,12 @@ class ContextBuilder:
         # 9. 加载运行时状态文件
         truth = self.truth_manager.load_truth_files()
         chapter_summaries = self.chapter_memory.render_context(chapter_id, max_chars=4000)
+        semantic_references, semantic_retrieval = self._get_semantic_references(
+            chapter_id,
+            current_chapter=current_chapter,
+            active_characters=active_characters,
+            character_states=character_states,
+        )
 
         # 10. pending_hooks 现在从 foreshadowing state 获取
         # 伏笔状态已在前面加载到 foreshadowing 变量中
@@ -192,10 +239,13 @@ class ContextBuilder:
             outline_window=outline_window,
             current_chapter=current_chapter,
             active_characters=active_characters,
+            character_states=character_states,
             foreshadowing=foreshadowing,
             style_profile=style_profile,
             world_rules=world_rules,
             recent_text=recent_text,
+            semantic_references=semantic_references,
+            semantic_retrieval=semantic_retrieval,
             chapter_goals=chapter_goals,
             target_words=target_words,
             emotion_arc=emotion_arc,
@@ -211,6 +261,137 @@ class ContextBuilder:
         context = self._compress_if_needed(context)
 
         return context
+
+    def _get_semantic_references(
+        self,
+        chapter_id: str,
+        *,
+        current_chapter: Optional[OutlineNode],
+        active_characters: List[CharacterProfile],
+        character_states: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        """Recall distant prose and reference material without treating it as truth."""
+        enabled = os.environ.get("OPENWRITE_SEMANTIC_CONTEXT", "1").strip().lower()
+        if enabled in {"0", "false", "no", "off"}:
+            return "", {"status": "disabled", "results": 0}
+
+        target_number = self._parse_chapter_index(chapter_id)
+        query_parts: List[str] = []
+        if current_chapter is not None:
+            query_parts.extend(
+                str(value or "").strip()
+                for value in (
+                    current_chapter.title,
+                    current_chapter.summary,
+                    current_chapter.content_focus,
+                    current_chapter.emotional_arc,
+                    *current_chapter.goals,
+                    *current_chapter.beats,
+                    *current_chapter.hooks,
+                )
+                if str(value or "").strip()
+            )
+        character_names = [
+            profile.name or profile.character_id for profile in active_characters
+        ]
+        query_parts.extend(character_names)
+        if character_states:
+            query_parts.append(character_states[:800])
+        query = "\n".join(dict.fromkeys(query_parts)).strip()
+        if not query:
+            return "", {"status": "no_query", "results": 0}
+
+        if self._search_index_factory is None:
+            from tools.project_search import ProjectSearchIndex
+
+            search_index = ProjectSearchIndex(self.novel_dir)
+        else:
+            search_index = self._search_index_factory(self.novel_dir)
+
+        requests = [("chapters", query, 8)]
+        sources_root = self.data_dir / "sources"
+        style_root = self.data_dir / "style"
+        if sources_root.is_dir() or style_root.is_dir():
+            source_query = (
+                "寻找与当前章节具有相似叙事功能、冲突升级、信息揭示或节奏组织的参考片段。\n"
+                + query
+            )
+            requests.append(("sources", source_query, 6))
+
+        selected: List[dict[str, Any]] = []
+        diagnostics: List[dict[str, Any]] = []
+        embedding: dict[str, Any] = {}
+        seen_paths: set[str] = set()
+        scope_limits = {"chapters": 4, "sources": 2}
+        for scope, search_query, search_limit in requests:
+            try:
+                payload = search_index.search(
+                    search_query,
+                    scope=scope,
+                    limit=search_limit,
+                )
+            except Exception as exc:
+                logger.warning("Semantic context retrieval failed for %s", scope, exc_info=True)
+                diagnostics.append(
+                    {"scope": scope, "engine": "error", "warning_code": type(exc).__name__}
+                )
+                continue
+            diagnostics.append(
+                {
+                    "scope": scope,
+                    "engine": str(payload.get("engine") or "none"),
+                    "warning_code": str(payload.get("warning_code") or ""),
+                    "semantic_hits": int(
+                        (payload.get("retrieval_stats") or {}).get("semantic") or 0
+                    ),
+                }
+            )
+            if payload.get("embedding") and not embedding:
+                embedding = dict(payload["embedding"])
+            count = 0
+            for item in payload.get("results", []):
+                if not isinstance(item, dict) or "semantic" not in item.get("retrieval", []):
+                    continue
+                path = str(item.get("path") or "")
+                if not path or path in seen_paths:
+                    continue
+                if scope == "chapters":
+                    chapter_number = self._parse_chapter_index(Path(path).stem)
+                    if (
+                        chapter_number <= 0
+                        or chapter_number >= target_number
+                        or chapter_number >= max(1, target_number - 2)
+                    ):
+                        continue
+                selected.append(item)
+                seen_paths.add(path)
+                count += 1
+                if count >= scope_limits[scope]:
+                    break
+
+        parts: List[str] = []
+        for item in selected:
+            label = "历史正文" if item.get("scope") == "chapters" else "参考资料"
+            location = f"{item.get('path')}:{item.get('line') or 1}"
+            excerpt = str(item.get("excerpt") or item.get("snippet") or "").strip()
+            if not excerpt:
+                continue
+            parts.append(
+                f"### [{label}] {item.get('title') or Path(str(item.get('path'))).stem}\n"
+                f"来源：{location}\n{excerpt[:900]}"
+            )
+        status = "ready" if parts else (
+            "unavailable"
+            if any(item.get("warning_code") for item in diagnostics)
+            else "no_match"
+        )
+        return "\n\n".join(parts), {
+            "status": status,
+            "results": len(parts),
+            "queries": diagnostics,
+            "embedding": embedding,
+            "excluded_recent_chapters": 2,
+        }
 
     def _load_story_control(self, filename: str, *, max_chars: int) -> str:
         """加载人类维护的书级控制面，不读取运行态草稿。"""
@@ -293,45 +474,38 @@ class ContextBuilder:
         if not chapter:
             return profiles
 
-        character_ids = list(chapter.involved_characters)
-        if not character_ids:
-            section = hierarchy.get_parent_section(chapter_id)
-            if section:
-                agg: List[str] = []
-                for ch_id in section.children_ids:
-                    node = hierarchy.get_node(ch_id)
-                    if node and node.involved_characters:
-                        agg.extend(node.involved_characters)
-                character_ids = list(dict.fromkeys(agg))
-
         profiles_dir = self.src_dir / "characters"
-        if not character_ids:
-            chapter_text = "\n".join(
-                [
-                    chapter.title,
-                    chapter.summary,
-                    chapter.content_focus,
-                    *chapter.goals,
-                    *chapter.beats,
-                    *chapter.hooks,
-                ]
-            )
-            for profile_path in sorted(profiles_dir.glob("*.md")):
-                profile = self._parse_character_profile(
-                    profile_path, profile_path.stem
+        character_ids = list(chapter.involved_characters)
+        chapter_text = "\n".join(
+            [
+                chapter.title,
+                chapter.summary,
+                chapter.content_focus,
+                *chapter.goals,
+                *chapter.beats,
+                *chapter.hooks,
+                self._get_current_chapter_content(chapter_id),
+            ]
+        )
+        inferred: list[tuple[int, str]] = []
+        for profile_path in sorted(profiles_dir.glob("*.md")):
+            text = self._load_text(profile_path)
+            profile = self._parse_character_profile(profile_path, profile_path.stem)
+            if not profile:
+                continue
+            positions = [
+                chapter_text.find(identifier)
+                for identifier in shared_document_lookup_keys(
+                    profile_path, content=text
                 )
-                if not profile:
-                    continue
-                identifiers = {
-                    profile_path.stem,
-                    profile.character_id,
-                    profile.name,
-                }
-                if any(
-                    identifier and identifier in chapter_text
-                    for identifier in identifiers
-                ):
-                    character_ids.append(profile.name or profile.character_id)
+                if identifier and identifier in chapter_text
+            ]
+            if positions:
+                inferred.append(
+                    (min(positions), profile.name or profile.character_id)
+                )
+        character_ids.extend(name for _, name in sorted(inferred))
+        character_ids = list(dict.fromkeys(character_ids))
 
         if not character_ids:
             return profiles
@@ -339,6 +513,7 @@ class ContextBuilder:
         # 加载角色档案（静态信息）
         cards_dir = self.data_dir / "characters" / "cards"
 
+        loaded_ids: set[str] = set()
         for char_id in character_ids:
             # 尝试加载 profile (markdown)
             profile_path = resolve_shared_document_path(profiles_dir, char_id) or (
@@ -346,8 +521,9 @@ class ContextBuilder:
             )
             if profile_path.exists():
                 profile = self._parse_character_profile(profile_path, profile_path.stem)
-                if profile:
+                if profile and profile.character_id not in loaded_ids:
                     profiles.append(profile)
+                    loaded_ids.add(profile.character_id)
                     continue
 
             # 尝试加载 card (yaml)
@@ -355,8 +531,9 @@ class ContextBuilder:
             if card_path.exists():
                 card_data = self._load_yaml(card_path)
                 profile = self._card_to_profile(card_data, char_id)
-                if profile:
+                if profile and profile.character_id not in loaded_ids:
                     profiles.append(profile)
+                    loaded_ids.add(profile.character_id)
 
         # 从真相文件获取动态状态并合并
         if profiles:
@@ -385,6 +562,37 @@ class ContextBuilder:
                 profile.current_location = state.get("location", "")
                 profile.current_status = state.get("status", "")
                 # current_location 和 current_status 会用于 to_context_text()
+
+    def _get_inline_character_states(
+        self,
+        profiles: List[CharacterProfile],
+        chapter_id: str,
+    ) -> str:
+        """Render exact latest annotations for characters active in this chapter."""
+        names = [profile.name or profile.character_id for profile in profiles]
+        if not names:
+            return ""
+        results = CharacterStateIndex(self.project_root, self.novel_id).query_many(
+            names,
+            target_chapter=chapter_id,
+        )
+        parts: List[str] = []
+        source_labels = {
+            "actual": "正文",
+            "planned": "大纲计划",
+            "reference": "资料批注",
+        }
+        for result in results:
+            lines = [f"【{result['name']}】"]
+            for item in result.get("current", [])[:10]:
+                source = source_labels.get(str(item.get("source_kind") or ""), "批注")
+                lines.append(
+                    f"- {item['field']}：{item['state']}"
+                    f"（{item['chapter_id']}，{source}）"
+                )
+            if len(lines) > 1:
+                parts.append("\n".join(lines))
+        return "\n\n".join(parts)
 
     def _parse_current_state_for_characters(
         self, current_state: str, relationships: str
@@ -493,6 +701,9 @@ class ContextBuilder:
             appearance=appearance,
             personality=personality,
             faction=str(meta.get("faction", "")).strip(),
+            aliases=list(meta.get("aliases", []))
+            if isinstance(meta.get("aliases"), list)
+            else [],
             tags=list(meta.get("tags", [])) if isinstance(meta.get("tags"), list) else [],
             detail_refs=list(meta.get("detail_refs", []))
             if isinstance(meta.get("detail_refs"), list)
@@ -520,6 +731,9 @@ class ContextBuilder:
             backstory=static.get("background", ""),
             personality=static.get("personality", []),
             faction=static.get("faction", ""),
+            aliases=static.get("aliases", [])
+            if isinstance(static.get("aliases"), list)
+            else [],
             related=static.get("relationships", []),
         )
 
@@ -865,14 +1079,29 @@ class ContextBuilder:
                 if matches:
                     text = self._load_text(matches[0])
                     if text:
+                        text = strip_character_state_annotations(text)
                         # 只取最后 500 字符
                         texts.insert(0, text[-500:] if len(text) > 500 else text)
                     break
 
         return "\n\n...\n\n".join(texts)
 
+    def _get_current_chapter_content(self, chapter_id: str) -> str:
+        """Load an existing draft so explicit character mentions can repair old outlines."""
+
+        manuscript_dir = self.data_dir / "manuscript"
+        if not manuscript_dir.exists():
+            return ""
+        for pattern in (f"{chapter_id}.md", f"{chapter_id}_*.md"):
+            matches = sorted(manuscript_dir.rglob(pattern))
+            if matches:
+                return strip_character_state_annotations(
+                    self._load_text(matches[0])
+                )
+        return ""
+
     def _compress_if_needed(self, context: GenerationContext) -> GenerationContext:
-        """按信息层级渐进压缩，并保证最终估算值不超过总预算。
+        """按占用阶梯和信息层级压缩，并保证不超过输入预算。
 
         L1 先压可从正文重建的历史章节记忆；L2 缩减大纲细节但始终
         保留以当前章为中心的窗口；L3 才压缩运行态、人物与精确上文；
@@ -880,13 +1109,15 @@ class ContextBuilder:
         在前三层中不会被删除。
         """
         original_tokens = context.estimate_tokens()
-        if original_tokens <= self.MAX_TOKENS:
+        plan = self._budget_plan(original_tokens)
+        if not plan.requires_compression:
             context.compression = self._compression_report(
                 applied=False,
                 level=0,
                 original_tokens=original_tokens,
                 final_tokens=original_tokens,
                 actions=[],
+                plan=plan,
             )
             return context
 
@@ -895,53 +1126,67 @@ class ContextBuilder:
         compressed = context.model_copy(deep=True)
         actions: List[str] = []
 
-        # L1 — old/rebuildable memory.  Keep recent prose exact at this level.
-        memory_target = self._token_share_as_chars(0.12, minimum=1200)
+        # L1 - old/rebuildable memory. Keep recent prose exact at this level.
+        semantic_target = self._token_share_as_chars(0.05, minimum=900)
+        if self._compress_text_field(
+            compressed, "semantic_references", semantic_target
+        ):
+            actions.append("L1: 压缩可重新检索的远程相关片段")
+        memory_target = self._token_share_as_chars(plan.memory_ratio, minimum=1200)
         if self._compress_text_field(
             compressed, "chapter_summaries", memory_target, prefer_tail=True
         ):
             actions.append("L1: 压缩较旧章节记忆")
-        if self._fits(compressed):
-            return self._finish_compression(compressed, 1, original_tokens, actions)
+        if plan.level <= 1 and self._fits(compressed):
+            return self._finish_compression(
+                compressed, 1, original_tokens, actions, plan
+            )
 
-        # L2 — structural summaries.  Preserve current chapter and neighbours.
-        if self._compress_outline(compressed, window=7, summary_chars=600):
-            actions.append("L2: 大纲缩为当前章居中的 7 节点窗口并压缩摘要")
-        if self._fits(compressed):
-            return self._finish_compression(compressed, 2, original_tokens, actions)
+        # L2 - structural summaries. Tighten the window in proportion to pressure.
+        outline_window = 7 if plan.level == 2 else 5
+        outline_chars = 600 if plan.level == 2 else 320
+        if self._compress_outline(
+            compressed, window=outline_window, summary_chars=outline_chars
+        ):
+            actions.append(
+                f"L2: 大纲缩为当前章居中的 {outline_window} 节点窗口并压缩摘要"
+            )
+        if plan.level <= 2 and self._fits(compressed):
+            return self._finish_compression(
+                compressed, 2, original_tokens, actions, plan
+            )
 
-        if self._compress_outline(compressed, window=5, summary_chars=320):
-            actions.append("L2: 大纲进一步缩为 5 节点窗口")
-        if self._fits(compressed):
-            return self._finish_compression(compressed, 2, original_tokens, actions)
-
-        # L3 — live working set.  Truth files are summarized, not silently
+        # L3 - live working set. Truth files are summarized, not silently
         # dropped; the exact prose keeps its tail because continuity is local.
         live_targets = {
-            "current_state": self._token_share_as_chars(0.08, minimum=800),
-            "relationships": self._token_share_as_chars(0.08, minimum=800),
-            "ledger": self._token_share_as_chars(0.05, minimum=500),
-            "foreshadowing_summary": self._token_share_as_chars(0.05, minimum=500),
+            "character_states": self._token_share_as_chars(0.04, minimum=500),
+            "current_state": self._token_share_as_chars(0.07, minimum=800),
+            "relationships": self._token_share_as_chars(0.07, minimum=800),
+            "ledger": self._token_share_as_chars(0.04, minimum=500),
+            "foreshadowing_summary": self._token_share_as_chars(0.04, minimum=500),
         }
         changed_live = False
         for field, target in live_targets.items():
             changed_live |= self._compress_text_field(compressed, field, target)
         if changed_live:
             actions.append("L3: 压缩真相状态、关系、账本和伏笔摘要")
-        if len(compressed.recent_text) > 2000:
+        recent_target = self._token_share_as_chars(plan.recent_ratio, minimum=600)
+        if len(compressed.recent_text) > recent_target:
             compressed.recent_text = self._fit_text(
-                compressed.recent_text, 2000, prefer_tail=True
+                compressed.recent_text, recent_target, prefer_tail=True
             )
-            actions.append("L3: 精确上文仅保留最近 2000 字符")
+            actions.append(f"L3: 精确上文按比例保留最近 {recent_target} 字符")
         if len(compressed.active_characters) > 5:
             compressed.active_characters = self._prioritize_characters(
                 compressed.active_characters, 5
             )
             actions.append("L3: 活跃人物缩为最高相关的 5 人")
-        if self._fits(compressed):
-            return self._finish_compression(compressed, 3, original_tokens, actions)
+        if plan.level <= 3 and self._fits(compressed):
+            return self._finish_compression(
+                compressed, 3, original_tokens, actions, plan
+            )
 
-        # L4 — deterministic provider guard.  This pass intentionally becomes
+        # L4 - deterministic provider guard. This pass intentionally becomes
         # terse, but still keeps the current chapter identity and core controls.
         self._compress_outline(compressed, window=3, summary_chars=160)
         compressed.active_characters = self._prioritize_characters(
@@ -954,6 +1199,8 @@ class ContextBuilder:
             compressed.chapter_summaries, 900, prefer_tail=True
         )
         for field, target in (
+            ("character_states", 500),
+            ("semantic_references", 700),
             ("current_state", 700),
             ("relationships", 700),
             ("ledger", 400),
@@ -967,7 +1214,9 @@ class ContextBuilder:
         }
         actions.append("L4: 应用最小工作集硬适配")
         self._force_fit(compressed, actions)
-        return self._finish_compression(compressed, 4, original_tokens, actions)
+        return self._finish_compression(
+            compressed, 4, original_tokens, actions, plan
+        )
 
     def _compression_report(
         self,
@@ -977,14 +1226,23 @@ class ContextBuilder:
         original_tokens: int,
         final_tokens: int,
         actions: List[str],
+        plan: ContextBudgetPlan,
     ) -> Dict[str, Any]:
         return {
             "strategy": self.COMPRESSION_STRATEGY,
             "applied": applied,
             "level": level,
-            "budget_tokens": self.MAX_TOKENS,
+            "planned_level": plan.level,
+            "context_window_tokens": plan.context_window_tokens,
+            "reserved_output_tokens": plan.reserved_output_tokens,
+            "safety_tokens": plan.safety_tokens,
+            "budget_tokens": plan.input_budget_tokens,
+            "target_tokens": plan.target_tokens,
+            "target_ratio": plan.target_ratio,
+            "usage_ratio": round(plan.usage_ratio, 4),
             "original_estimated_tokens": original_tokens,
             "final_estimated_tokens": final_tokens,
+            "within_budget": final_tokens <= plan.input_budget_tokens,
             "actions": list(actions),
         }
 
@@ -994,14 +1252,16 @@ class ContextBuilder:
         level: int,
         original_tokens: int,
         actions: List[str],
+        plan: ContextBudgetPlan,
     ) -> GenerationContext:
         final_tokens = context.estimate_tokens()
         context.compression = self._compression_report(
-            applied=True,
+            applied=bool(actions),
             level=level,
             original_tokens=original_tokens,
             final_tokens=final_tokens,
             actions=actions,
+            plan=plan,
         )
         logger.info(
             "上下文分级压缩 L%s: %s -> %s tokens (budget=%s)",
@@ -1011,6 +1271,18 @@ class ContextBuilder:
             self.MAX_TOKENS,
         )
         return context
+
+    def _budget_plan(self, used_tokens: int) -> ContextBudgetPlan:
+        policy = self._context_policy
+        if self.MAX_TOKENS != policy.input_budget_tokens:
+            # Tests and library callers have historically overridden MAX_TOKENS
+            # on an instance. Preserve that supported escape hatch.
+            policy = ContextBudgetPolicy(
+                self.CONTEXT_WINDOW_TOKENS,
+                self.MAX_OUTPUT_TOKENS,
+                input_budget_override=self.MAX_TOKENS,
+            )
+        return policy.plan(used_tokens)
 
     def _fits(self, context: GenerationContext) -> bool:
         return context.estimate_tokens() <= self.MAX_TOKENS
@@ -1151,6 +1423,8 @@ class ContextBuilder:
     def _force_fit(self, context: GenerationContext, actions: List[str]) -> None:
         """Last-resort loop that makes the configured cap an actual invariant."""
         optional_fields = [
+            "character_states",
+            "semantic_references",
             "chapter_summaries",
             "relationships",
             "current_state",
@@ -1239,6 +1513,8 @@ class ContextBuilder:
         # smaller instance budget: the provider cap remains a hard invariant.
         if not self._fits(context):
             context.chapter_summaries = ""
+            context.character_states = ""
+            context.semantic_references = ""
             context.relationships = ""
             context.current_state = ""
             context.ledger = ""

@@ -245,6 +245,7 @@ class RadarAgent:
 
         rankings_text = self._format_rankings(rankings)
         recommendations = await self._analyze_with_llm(rankings_text, top_n)
+        recommendations = self._limit_recommendations(recommendations, top_n)
         trends = self._extract_trends(recommendations)
 
         return MarketAnalysisResult(
@@ -301,7 +302,7 @@ class RadarAgent:
 ]
 ```
 
-推荐 3-5 个，按 confidence 降序排列。只返回 JSON。"""
+每个平台最多推荐 {top_n} 个，按 confidence 降序排列。只返回 JSON。"""
 
         user_prompt = "请基于上面的实时排行榜数据，分析当前网文市场热度，给出开书建议。"
 
@@ -319,6 +320,26 @@ class RadarAgent:
         except Exception as e:
             self.log.error(f"LLM analysis failed: {e}")
             return []
+
+    @staticmethod
+    def _limit_recommendations(
+        recommendations: list[PlatformRecommendation],
+        top_n: int,
+    ) -> list[PlatformRecommendation]:
+        limit = max(1, int(top_n or 1))
+        counts: dict[str, int] = {}
+        selected: list[PlatformRecommendation] = []
+        for item in sorted(
+            recommendations,
+            key=lambda recommendation: recommendation.confidence,
+            reverse=True,
+        ):
+            platform = str(item.platform or "unknown")
+            if counts.get(platform, 0) >= limit:
+                continue
+            counts[platform] = counts.get(platform, 0) + 1
+            selected.append(item)
+        return selected
 
     def _parse_recommendations(self, content: str) -> list[PlatformRecommendation]:
         """解析 LLM 输出"""

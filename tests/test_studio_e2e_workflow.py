@@ -210,7 +210,9 @@ def test_studio_end_to_end_novel_crud_lifecycle(tmp_path: Path, monkeypatch: pyt
 
     review = app.review_chapter({"path": "data/manuscript/arc_001/ch_001.md"})
     assert review["result"]["score"] == 91
-    assert review_calls == [{"chapter_id": "ch_001"}]
+    assert review_calls == [
+        {"chapter_id": "ch_001", "strict": False, "dimensions": None}
+    ]
     assert (
         BookStateStore(project_root, "e2e_novel").load_or_create().stage
         == BookStage.CHAPTER_PREFLIGHT

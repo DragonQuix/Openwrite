@@ -26,6 +26,7 @@ CANONICAL_SEARCH_SCOPES = {
     "settings",
     "continuity",
     "chapters",
+    "sources",
 }
 LEGACY_SCOPE_ALIASES = {
     "story": "core",
@@ -42,6 +43,7 @@ SCOPE_LABELS = {
     "settings": "设定",
     "continuity": "连续性",
     "chapters": "正文",
+    "sources": "参考资料",
 }
 
 CATEGORY_LABELS = {
@@ -62,6 +64,8 @@ CATEGORY_LABELS = {
     "continuity_state": "当前状态",
     "continuity_relations": "关系与资源",
     "continuity_clues": "伏笔与线索",
+    "source_text": "参考原文",
+    "source_analysis": "拆书分析",
 }
 
 CATEGORY_ORDER = {key: index for index, key in enumerate(CATEGORY_LABELS)}
@@ -105,6 +109,8 @@ def scope_for_path(relative: str) -> str:
         return "outline"
     if path.startswith("data/manuscript/"):
         return "chapters"
+    if path.startswith(("data/sources/", "data/style/")):
+        return "sources"
     if path.startswith(("data/world/", "data/foreshadowing/")):
         return "continuity"
     if path.startswith("src/characters/"):
@@ -122,6 +128,7 @@ def describe_document(relative: str, content: str = "") -> LibraryDescriptor:
     metadata = _metadata(content)
     path = Path(relative)
     asset_id = str(metadata.get("id") or path.stem).strip()
+    valid_asset_id = _is_structured_asset_id(asset_id)
 
     if scope == "core":
         category = _core_category(path)
@@ -131,9 +138,9 @@ def describe_document(relative: str, content: str = "") -> LibraryDescriptor:
         return _descriptor(
             scope,
             category,
-            asset_kind="character",
-            asset_id=asset_id,
-            structured=True,
+            asset_kind="character" if valid_asset_id else "",
+            asset_id=asset_id if valid_asset_id else "",
+            structured=valid_asset_id,
         )
     if scope == "settings":
         category = _settings_category(relative, metadata, content)
@@ -145,13 +152,24 @@ def describe_document(relative: str, content: str = "") -> LibraryDescriptor:
         return _descriptor(
             scope,
             category,
-            asset_kind=asset_kind,
-            asset_id=asset_id if asset_kind else "",
-            structured=bool(asset_kind),
+            asset_kind=asset_kind if valid_asset_id else "",
+            asset_id=asset_id if asset_kind and valid_asset_id else "",
+            structured=bool(asset_kind and valid_asset_id),
         )
     if scope == "continuity":
         return _descriptor(scope, _continuity_category(relative))
+    if scope == "sources":
+        category = "source_analysis" if "/analysis_v2/" in relative else "source_text"
+        return _descriptor(scope, category)
     return _descriptor(scope, "core_reference")
+
+
+def _is_structured_asset_id(value: str) -> bool:
+    asset_id = str(value or "").strip()
+    return bool(
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,79}", asset_id)
+        and ".." not in asset_id
+    )
 
 
 def iter_library_paths(novel_root: Path) -> Iterable[Path]:

@@ -328,6 +328,57 @@ summary = "谨慎的磁带修复师。"
         assert context.target_words == 800
         assert [profile.name for profile in context.active_characters] == ["沈砚"]
 
+    def test_active_characters_merge_outline_and_current_manuscript_alias_mentions(
+        self, builder, project_dir
+    ):
+        root, novel_id = project_dir
+        novel_root = root / "data" / "novels" / novel_id
+        (novel_root / "src" / "characters" / "shen_jin.md").write_text(
+            """+++
+id = "shen_jin"
+name = "沈烬"
+tier = "主角"
+summary = "机械师。"
++++
+
+# 沈烬
+""",
+            encoding="utf-8",
+        )
+        (novel_root / "src" / "characters" / "xing_wujiu.md").write_text(
+            """+++
+id = "xing_wujiu"
+name = "刑无咎"
+aliases = ["老刑"]
+tier = "重要配角"
+summary = "第七回收科顾问。"
++++
+
+# 刑无咎
+""",
+            encoding="utf-8",
+        )
+        (novel_root / "data" / "manuscript" / "arc_001" / "ch_001.md").write_text(
+            "# 第一章\n\n沈烬听完老刑的最后一课，提交了实习申请。\n",
+            encoding="utf-8",
+        )
+        hierarchy = OutlineHierarchy(
+            novel_id=novel_id,
+            chapters=[
+                OutlineNode(
+                    node_id="ch_001",
+                    node_type=OutlineNodeType.CHAPTER,
+                    title="第一章",
+                    involved_characters=["沈烬"],
+                )
+            ],
+        )
+
+        profiles = builder._get_active_characters("ch_001", hierarchy)
+
+        assert [profile.name for profile in profiles] == ["沈烬", "刑无咎"]
+        assert profiles[1].aliases == ["老刑"]
+
 
 # ── Chapter index parsing ────────────────────────────────────
 
@@ -500,7 +551,7 @@ class TestDynamicCompression:
         context = GenerationContext(
             novel_id="test",
             chapter_id="ch_001",
-            chapter_summaries="旧记忆。" * 1200,
+            chapter_summaries="旧记忆。" * 500,
             recent_text="刚刚发生的场景。" * 50,
         )
         recent = context.recent_text
@@ -563,15 +614,22 @@ class TestDynamicCompression:
 
         result = builder._compress_if_needed(context)
 
-        assert result.compression == {
-            "strategy": "tiered-hierarchical-v2",
-            "applied": False,
-            "level": 0,
-            "budget_tokens": builder.MAX_TOKENS,
-            "original_estimated_tokens": result.compression["final_estimated_tokens"],
-            "final_estimated_tokens": result.compression["final_estimated_tokens"],
-            "actions": [],
-        }
+        assert result.compression["strategy"] == "staircase-proportional-v3"
+        assert result.compression["applied"] is False
+        assert result.compression["level"] == 0
+        assert result.compression["planned_level"] == 0
+        assert result.compression["budget_tokens"] == builder.MAX_TOKENS
+        assert result.compression["target_tokens"] == builder.MAX_TOKENS
+        assert result.compression["reserved_output_tokens"] == min(
+            builder.MAX_OUTPUT_TOKENS,
+            builder.CONTEXT_WINDOW_TOKENS // 2,
+        )
+        assert result.compression["within_budget"] is True
+        assert (
+            result.compression["original_estimated_tokens"]
+            == result.compression["final_estimated_tokens"]
+        )
+        assert result.compression["actions"] == []
 
     def test_truth_files_count_toward_context_budget(self):
         plain = GenerationContext(current_state="")
@@ -614,6 +672,79 @@ class TestBuildGenerationContext:
         context = builder.build_generation_context("ch_001")
         assert context.novel_id == "test_novel"
         assert context.chapter_id == "ch_001"
+
+    def test_semantic_context_excludes_recent_chapters_and_keeps_sources(
+        self, project_dir
+    ):
+        root, novel_id = project_dir
+        calls = []
+
+        class FakeSearchIndex:
+            def search(self, query, *, scope, limit):
+                calls.append((scope, query, limit))
+                results = {
+                    "chapters": [
+                        {
+                            "path": "data/manuscript/arc_001/ch_068.md",
+                            "title": "过近章节",
+                            "line": 3,
+                            "scope": "chapters",
+                            "retrieval": ["semantic"],
+                            "excerpt": "不应重复注入最近两章。",
+                        },
+                        {
+                            "path": "data/manuscript/arc_001/ch_040.md",
+                            "title": "旧日决裂",
+                            "line": 8,
+                            "scope": "chapters",
+                            "retrieval": ["semantic"],
+                            "excerpt": "沈烬曾经主动疏远同伴。",
+                        },
+                    ],
+                    "sources": [
+                        {
+                            "path": "data/sources/demo/analysis_v2/report.json",
+                            "title": "参考拆书",
+                            "line": 1,
+                            "scope": "sources",
+                            "retrieval": ["semantic"],
+                            "excerpt": "先压低选择空间，再揭示隐藏筹码。",
+                        }
+                    ],
+                }[scope]
+                return {
+                    "engine": "lightrag",
+                    "warning_code": "",
+                    "retrieval_stats": {"semantic": len(results)},
+                    "embedding": {"provider": "local", "model": "test-local"},
+                    "results": results,
+                }
+
+        builder = ContextBuilder(
+            root,
+            novel_id,
+            search_index_factory=lambda novel_root: FakeSearchIndex(),
+        )
+        chapter = OutlineNode(
+            node_id="ch_070",
+            node_type=OutlineNodeType.CHAPTER,
+            title="筹码反转",
+            goals=["让沈烬反客为主"],
+        )
+
+        text, diagnostic = builder._get_semantic_references(
+            "ch_070",
+            current_chapter=chapter,
+            active_characters=[],
+            character_states="",
+        )
+
+        assert "旧日决裂" in text
+        assert "参考拆书" in text
+        assert "过近章节" not in text
+        assert diagnostic["status"] == "ready"
+        assert diagnostic["results"] == 2
+        assert [item[0] for item in calls] == ["chapters", "sources"]
 
     def test_build_with_outline(self, builder, project_dir):
         root, novel_id = project_dir

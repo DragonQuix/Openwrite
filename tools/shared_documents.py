@@ -10,6 +10,14 @@ from .frontmatter import compose_toml_document, parse_toml_front_matter, strip_f
 DEFAULT_CHARACTER_DETAIL_REFS = ["基本信息", "背景", "外貌", "性格", "关系"]
 DEFAULT_ENTITY_DETAIL_REFS = ["规则", "特征", "关联"]
 
+CHARACTER_MARKDOWN_CONTRACT = """## OpenWrite 角色文档契约
+
+创建完整角色资产时，`content` 必须包含 TOML front matter 与 Markdown 正文。front matter 至少包含
+`id`、`name`、`tier`、`summary`、`tags`，关系引用放在 `related`。正文必须使用一级角色名标题，
+并填写 `## 基本信息`、`## 背景`、`## 外貌`、`## 性格`、`## 与主角关系`、
+`## 说话风格`、`## 当前戏剧用途`；有能力体系时再填写 `## 特殊能力`。
+未知信息写“待作者确认”，不能省略结构，也不能只传一句 description 充当完整角色卡。"""
+
 
 def normalize_character_document(
     content: str,
@@ -187,11 +195,26 @@ def resolve_shared_document_path(directory: Path, reference: str) -> Path | None
             text = path.read_text(encoding="utf-8")
         except Exception:
             continue
-        meta, body = parse_toml_front_matter(text)
-        for candidate in _iter_document_lookup_keys(path, meta, body):
+        for candidate in shared_document_lookup_keys(path, content=text):
             if _normalize_lookup_key(candidate) == ref_key:
                 return path
     return None
+
+
+def shared_document_lookup_keys(
+    path: Path,
+    *,
+    content: str | None = None,
+) -> list[str]:
+    """Return canonical IDs, display names, headings, and aliases for a document."""
+
+    if content is None:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except Exception:
+            return []
+    meta, body = parse_toml_front_matter(content)
+    return _iter_document_lookup_keys(path, meta, body)
 
 
 def _normalize_character_body(body: str, *, name: str, fallback_description: str) -> str:

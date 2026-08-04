@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib.util
 import json
 import logging
 import os
@@ -12,11 +13,21 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Coroutine, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Protocol, TypeVar
 
+from tools.embedding_runtime import (
+    DEFAULT_CLOUD_MODEL,
+    DEFAULT_LOCAL_DIMENSION,
+    DEFAULT_LOCAL_MAX_TOKENS,
+    DEFAULT_LOCAL_MODEL,
+    EmbeddingRuntime,
+    EmbeddingRuntimeError,
+    EmbeddingSettings,
+    normalize_embedding_provider,
+)
 from tools.library_catalog import (
     SCOPE_LABELS,
     describe_document,
@@ -30,7 +41,7 @@ MAX_QUERY_CHARS = 200
 LIGHTRAG_MODES = {"local", "global", "hybrid", "naive", "mix"}
 # Bump whenever the indexed representation changes. The version participates
 # in the LightRAG workspace key, forcing a clean rebuild for existing projects.
-MANIFEST_VERSION = 3
+MANIFEST_VERSION = 7
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -59,6 +70,8 @@ class SearchResult:
     category: str
     category_label: str
     score: float
+    retrieval: tuple[str, ...] = ()
+    excerpt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +85,8 @@ class SearchResult:
             "category": self.category,
             "category_label": self.category_label,
             "score": self.score,
+            "retrieval": list(self.retrieval),
+            "excerpt": self.excerpt or self.snippet,
         }
 
 
@@ -101,6 +116,7 @@ class BackendSearchResult:
     inserted: int = 0
     updated: int = 0
     deleted: int = 0
+    backend: dict[str, Any] | None = None
 
 
 class SearchBackend(Protocol):
@@ -122,6 +138,7 @@ class LightRAGConfiguration:
     llm_base_url: str
     llm_api_key: str
     timeout_seconds: int
+    embedding_provider: str
     embedding_model: str
     embedding_base_url: str
     embedding_api_key: str
@@ -132,16 +149,43 @@ class LightRAGConfiguration:
     @classmethod
     def from_runtime(cls) -> LightRAGConfiguration:
         from tools.llm.client import LLMConfig
-        from tools.model_profiles import active_model_profile
+        from tools.model_profiles import active_model_profile, active_search_model_profile
 
+        search_profile = active_search_model_profile()
+        active = search_profile or active_model_profile() or {}
         llm = LLMConfig.from_env()
-        active = active_model_profile() or {}
-        if not llm.api_key.strip():
+        if search_profile:
+            llm = LLMConfig(
+                provider=search_profile.get("provider") or "openai",
+                api_key=str(search_profile.get("api_key") or ""),
+                base_url=str(search_profile.get("base_url") or ""),
+                model=str(search_profile.get("model") or ""),
+                api_format=search_profile.get("api_format") or "chat",
+                timeout_seconds=float(search_profile.get("timeout_seconds") or 120),
+            )
+        explicit_query_mode = os.environ.get("OPENWRITE_LIGHTRAG_MODE", "").strip().lower()
+        profile_search_mode = str(active.get("search_mode") or "vector").strip().lower()
+        query_mode = explicit_query_mode or (
+            "mix" if profile_search_mode == "graph" else "naive"
+        )
+        if query_mode not in LIGHTRAG_MODES:
+            raise SearchConfigurationError("OPENWRITE_LIGHTRAG_MODE 配置无效")
+        requires_chat_model = query_mode != "naive"
+        if requires_chat_model and not llm.api_key.strip():
             raise SearchConfigurationError("LightRAG 需要已配置的模型 API Key")
-        if llm.api_format == "responses":
+        if requires_chat_model and llm.api_format == "responses":
             raise SearchConfigurationError(
                 "LightRAG 搜索需要 Chat Completions 兼容的模型路由"
             )
+
+        try:
+            embedding_provider = normalize_embedding_provider(
+                os.environ.get("OPENWRITE_LIGHTRAG_EMBEDDING_PROVIDER", "").strip()
+                or active.get("embedding_provider")
+                or "openai"
+            )
+        except EmbeddingRuntimeError as exc:
+            raise SearchConfigurationError(str(exc)) from exc
 
         explicit_embedding_key = os.environ.get(
             "OPENWRITE_LIGHTRAG_EMBEDDING_API_KEY", ""
@@ -151,12 +195,15 @@ class LightRAGConfiguration:
             "OPENWRITE_LIGHTRAG_EMBEDDING_BASE_URL", ""
         ).strip()
         profile_embedding_base = str(active.get("embedding_base_url") or "").strip()
-        embedding_base_url = (
-            explicit_embedding_base or profile_embedding_base or llm.base_url
-        ).rstrip("/")
-        embedding_api_key = explicit_embedding_key or profile_embedding_key or llm.api_key
+        embedding_base_url = ""
+        embedding_api_key = ""
+        if embedding_provider == "openai":
+            embedding_base_url = (
+                explicit_embedding_base or profile_embedding_base or llm.base_url
+            ).rstrip("/")
+            embedding_api_key = explicit_embedding_key or profile_embedding_key or llm.api_key
 
-        if llm.provider == "anthropic" and not (
+        if embedding_provider == "openai" and llm.provider == "anthropic" and not (
             (explicit_embedding_key or profile_embedding_key)
             and (explicit_embedding_base or profile_embedding_base)
         ):
@@ -164,43 +211,46 @@ class LightRAGConfiguration:
                 "Anthropic 不提供 embedding；请在模型档案中配置独立的 "
                 "Embedding Base URL 和 API Key"
             )
-        if "deepseek.com" in embedding_base_url.casefold():
+        if embedding_provider == "openai" and "deepseek.com" in embedding_base_url.casefold():
             raise SearchConfigurationError(
                 "DeepSeek 接口不提供 embedding；请在模型档案中配置独立的 "
                 "Embedding Base URL"
             )
-        if not embedding_api_key:
+        if embedding_provider == "openai" and not embedding_api_key:
             raise SearchConfigurationError("LightRAG 需要可用的 Embedding API Key")
+        if embedding_provider == "local" and importlib.util.find_spec("fastembed") is None:
+            raise SearchConfigurationError(
+                "本地 Embedding 依赖未安装，请重新运行 OpenWrite 启动器"
+            )
 
         embedding_model = (
             os.environ.get("OPENWRITE_LIGHTRAG_EMBEDDING_MODEL", "").strip()
             or str(active.get("embedding_model") or "").strip()
-            or "text-embedding-3-small"
+            or (DEFAULT_LOCAL_MODEL if embedding_provider == "local" else DEFAULT_CLOUD_MODEL)
         )
         embedding_dimension = _bounded_env_int(
             "OPENWRITE_LIGHTRAG_EMBEDDING_DIM",
             active.get("embedding_dimension"),
-            default=1536,
+            default=DEFAULT_LOCAL_DIMENSION if embedding_provider == "local" else 1536,
             minimum=1,
             maximum=65536,
         )
         embedding_max_tokens = _bounded_env_int(
             "OPENWRITE_LIGHTRAG_EMBEDDING_MAX_TOKENS",
             active.get("embedding_max_tokens"),
-            default=8192,
+            default=(
+                DEFAULT_LOCAL_MAX_TOKENS if embedding_provider == "local" else 8192
+            ),
             minimum=256,
             maximum=131072,
         )
-        query_mode = os.environ.get("OPENWRITE_LIGHTRAG_MODE", "mix").strip().lower()
-        if query_mode not in LIGHTRAG_MODES:
-            raise SearchConfigurationError("OPENWRITE_LIGHTRAG_MODE 配置无效")
-
         return cls(
             provider=llm.provider,
             llm_model=llm.model,
             llm_base_url=llm.base_url.rstrip("/"),
             llm_api_key=llm.api_key,
             timeout_seconds=max(1, int(llm.timeout_seconds)),
+            embedding_provider=embedding_provider,
             embedding_model=embedding_model,
             embedding_base_url=embedding_base_url,
             embedding_api_key=embedding_api_key,
@@ -213,15 +263,39 @@ class LightRAGConfiguration:
     def workspace(self) -> str:
         payload = {
             "schema": MANIFEST_VERSION,
-            "provider": self.provider,
-            "llm_model": self.llm_model,
-            "llm_base_url": self.llm_base_url,
+            "embedding_provider": self.embedding_provider,
             "embedding_model": self.embedding_model,
             "embedding_base_url": self.embedding_base_url,
             "embedding_dimension": self.embedding_dimension,
+            "query_mode": self.query_mode,
         }
+        if self.query_mode != "naive":
+            payload.update(
+                provider=self.provider,
+                llm_model=self.llm_model,
+                llm_base_url=self.llm_base_url,
+            )
         encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
         return f"search-{hashlib.sha256(encoded).hexdigest()[:16]}"
+
+    @property
+    def embedding_settings(self) -> EmbeddingSettings:
+        return EmbeddingSettings(
+            provider=self.embedding_provider,
+            model=self.embedding_model,
+            dimension=self.embedding_dimension,
+            max_tokens=self.embedding_max_tokens,
+            base_url=self.embedding_base_url,
+            api_key=self.embedding_api_key,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+    def public_payload(self) -> dict[str, Any]:
+        return {
+            **self.embedding_settings.public_payload(),
+            "query_mode": self.query_mode,
+            "workspace": self.workspace,
+        }
 
 
 class LightRAGSearchBackend:
@@ -281,7 +355,11 @@ class LightRAGSearchBackend:
                     ),
                 )
                 chunks = self._chunks_from_payload(payload)
-                return BackendSearchResult(chunks=chunks, **stats)
+                return BackendSearchResult(
+                    chunks=chunks,
+                    backend=self.configuration.public_payload(),
+                    **stats,
+                )
             finally:
                 if initialized:
                     await rag.finalize_storages()
@@ -294,7 +372,11 @@ class LightRAGSearchBackend:
                 await rag.initialize_storages()
                 initialized = True
                 stats = await self._sync_documents(rag, documents)
-                return BackendSearchResult(chunks=[], **stats)
+                return BackendSearchResult(
+                    chunks=[],
+                    backend=self.configuration.public_payload(),
+                    **stats,
+                )
             finally:
                 if initialized:
                     await rag.finalize_storages()
@@ -303,14 +385,14 @@ class LightRAGSearchBackend:
         config = self.configuration
         try:
             from lightrag import LightRAG
-            from lightrag.llm.openai import openai_complete_if_cache, openai_embed
+            from lightrag.llm.openai import openai_complete_if_cache
             from lightrag.utils import EmbeddingFunc
         except ImportError as exc:
             raise SearchConfigurationError(
                 "LightRAG 依赖未安装，请重新运行 OpenWrite 启动器安装依赖"
             ) from exc
         anthropic_complete_if_cache = None
-        if config.provider == "anthropic":
+        if config.provider == "anthropic" and config.query_mode != "naive":
             try:
                 from lightrag.llm.anthropic import anthropic_complete_if_cache
             except ImportError as exc:
@@ -350,16 +432,11 @@ class LightRAGSearchBackend:
                 **kwargs,
             )
 
+        embedding_runtime = EmbeddingRuntime(config.embedding_settings)
+
         async def embedding_func(texts: list[str], **kwargs: Any) -> Any:
             context = str(kwargs.pop("context", "document"))
-            return await openai_embed.func(
-                texts,
-                model=config.embedding_model,
-                base_url=config.embedding_base_url,
-                api_key=config.embedding_api_key,
-                max_token_size=config.embedding_max_tokens,
-                context=context,
-            )
+            return await embedding_runtime.embed(texts, context=context)
 
         return LightRAG(
             working_dir=str(self.working_dir),
@@ -376,6 +453,7 @@ class LightRAGSearchBackend:
             tiktoken_model_name="gpt-4o-mini",
             chunk_token_size=900,
             chunk_overlap_token_size=120,
+            cosine_better_than_threshold=0.3,
             llm_model_max_async=2,
             embedding_func_max_async=4,
             addon_params={"language": "Chinese"},
@@ -386,12 +464,15 @@ class LightRAGSearchBackend:
         rag: Any,
         documents: list[IndexedDocument],
     ) -> dict[str, int]:
+        if self.configuration.query_mode == "naive":
+            return await self._sync_vector_documents(rag, documents)
         manifest = self._load_manifest()
         indexed = manifest["documents"]
         current = {document.path: document for document in documents}
         inserted = 0
         updated = 0
         deleted = 0
+        pending: list[IndexedDocument] = []
 
         for path in sorted(set(indexed) - set(current)):
             await self._delete_document(rag, str(indexed[path].get("doc_id") or ""))
@@ -410,12 +491,18 @@ class LightRAGSearchBackend:
                 self._write_manifest(manifest)
             else:
                 inserted += 1
+            pending.append(document)
 
+        if pending:
+            # LightRAG can process a document list with its bounded parallel
+            # insertion pipeline. Calling it once per file serializes graph
+            # extraction and makes a first novel index unnecessarily slow.
             await rag.ainsert(
-                self._rag_document_body(document),
-                ids=document.doc_id,
-                file_paths=document.source_key,
+                [self._rag_document_body(document) for document in pending],
+                ids=[document.doc_id for document in pending],
+                file_paths=[document.source_key for document in pending],
             )
+        for document in pending:
             indexed[document.path] = {
                 "revision": document.revision,
                 "doc_id": document.doc_id,
@@ -425,9 +512,180 @@ class LightRAGSearchBackend:
                 "category_label": document.category_label,
                 "title": document.title,
             }
+        if pending:
             self._write_manifest(manifest)
 
         return {"inserted": inserted, "updated": updated, "deleted": deleted}
+
+    async def _sync_vector_documents(
+        self,
+        rag: Any,
+        documents: list[IndexedDocument],
+    ) -> dict[str, int]:
+        """Maintain LightRAG chunk vectors without chat-model graph extraction."""
+        manifest = self._load_manifest()
+        indexed = manifest["documents"]
+        current = {document.path: document for document in documents}
+        inserted = 0
+        updated = 0
+        deleted = 0
+        storage_changed = False
+
+        async def delete_entry(entry: dict[str, Any]) -> None:
+            nonlocal storage_changed
+            chunk_ids = [str(item) for item in entry.get("chunk_ids", []) if str(item)]
+            if chunk_ids:
+                await asyncio.gather(
+                    rag.chunks_vdb.delete(chunk_ids),
+                    rag.text_chunks.delete(chunk_ids),
+                )
+            doc_id = str(entry.get("doc_id") or "")
+            if doc_id:
+                await rag.full_docs.delete([doc_id])
+            storage_changed = storage_changed or bool(chunk_ids or doc_id)
+
+        for path in sorted(set(indexed) - set(current)):
+            await delete_entry(indexed[path])
+            indexed.pop(path, None)
+            deleted += 1
+
+        pending: list[IndexedDocument] = []
+        for document in documents:
+            previous = indexed.get(document.path)
+            if previous and previous.get("revision") == document.revision:
+                continue
+            if previous:
+                await delete_entry(previous)
+                indexed.pop(document.path, None)
+                updated += 1
+            else:
+                inserted += 1
+            pending.append(document)
+
+        all_chunks: dict[str, dict[str, Any]] = {}
+        full_docs: dict[str, dict[str, Any]] = {}
+        chunk_limit = max(256, min(900, self.configuration.embedding_max_tokens - 32))
+        overlap = min(100, max(32, chunk_limit // 6))
+        for document in pending:
+            body = self._rag_document_body(document)
+            chunk_rows = self._unicode_safe_token_chunks(
+                rag.tokenizer,
+                body,
+                chunk_token_size=chunk_limit,
+                chunk_overlap_token_size=overlap,
+            )
+            chunk_ids: list[str] = []
+            for index, row in enumerate(chunk_rows):
+                content = str(row.get("content") or "").strip()
+                if not content:
+                    continue
+                digest = hashlib.sha256(
+                    f"{document.doc_id}\0{index}\0{content}".encode()
+                ).hexdigest()
+                chunk_id = f"chunk-{digest}"
+                chunk_ids.append(chunk_id)
+                all_chunks[chunk_id] = {
+                    "content": content,
+                    "full_doc_id": document.doc_id,
+                    "tokens": len(rag.tokenizer.encode(content)),
+                    "chunk_order_index": index,
+                    "file_path": document.source_key,
+                }
+            full_docs[document.doc_id] = {
+                "content": body,
+                "file_path": document.source_key,
+            }
+            indexed[document.path] = {
+                "revision": document.revision,
+                "doc_id": document.doc_id,
+                "source_key": document.source_key,
+                "scope": document.scope,
+                "category": document.category,
+                "category_label": document.category_label,
+                "title": document.title,
+                "chunk_ids": chunk_ids,
+            }
+
+        if all_chunks:
+            await asyncio.gather(
+                rag.chunks_vdb.upsert(all_chunks),
+                rag.text_chunks.upsert(all_chunks),
+                rag.full_docs.upsert(full_docs),
+            )
+            storage_changed = True
+        if storage_changed:
+            await asyncio.gather(
+                rag.chunks_vdb.index_done_callback(),
+                rag.text_chunks.index_done_callback(),
+                rag.full_docs.index_done_callback(),
+            )
+        if pending or deleted:
+            manifest["index_kind"] = "vector"
+            self._write_manifest(manifest)
+        return {"inserted": inserted, "updated": updated, "deleted": deleted}
+
+    @staticmethod
+    def _unicode_safe_token_chunks(
+        tokenizer: Any,
+        content: str,
+        *,
+        chunk_token_size: int,
+        chunk_overlap_token_size: int,
+    ) -> list[dict[str, Any]]:
+        """Split by token budget without decoding partial UTF-8 token windows."""
+        text = str(content or "")
+        if not text:
+            return []
+        budget = max(1, int(chunk_token_size))
+        overlap = max(0, min(int(chunk_overlap_token_size), budget - 1))
+        rows: list[dict[str, Any]] = []
+        start = 0
+        order = 0
+
+        def token_count(value: str) -> int:
+            return len(tokenizer.encode(value))
+
+        while start < len(text):
+            low = start + 1
+            high = len(text)
+            best_end = low
+            while low <= high:
+                middle = (low + high) // 2
+                if token_count(text[start:middle]) <= budget:
+                    best_end = middle
+                    low = middle + 1
+                else:
+                    high = middle - 1
+
+            piece = text[start:best_end].strip()
+            if piece:
+                rows.append(
+                    {
+                        "content": piece,
+                        "tokens": token_count(piece),
+                        "chunk_order_index": order,
+                    }
+                )
+                order += 1
+            if best_end >= len(text):
+                break
+            if overlap <= 0:
+                start = best_end
+                continue
+
+            low = start + 1
+            high = best_end
+            next_start = best_end
+            while low <= high:
+                middle = (low + high) // 2
+                if token_count(text[middle:best_end]) <= overlap:
+                    next_start = middle
+                    high = middle - 1
+                else:
+                    low = middle + 1
+            start = max(start + 1, next_start)
+
+        return rows
 
     @staticmethod
     def _rag_document_body(document: IndexedDocument) -> str:
@@ -584,11 +842,17 @@ class ProjectSearchIndex:
             "engine": engine,
             "warning": warning,
             "warning_code": warning_code,
+            "retrieval_stats": {
+                "semantic": len(semantic_results),
+                "literal": len(literal_results),
+                "fused": len(results),
+            },
             "index_updates": {
                 "inserted": backend_result.inserted,
                 "updated": backend_result.updated,
                 "deleted": backend_result.deleted,
             },
+            "embedding": dict(backend_result.backend or {}),
         }
 
     def refresh(self) -> int:
@@ -603,16 +867,19 @@ class ProjectSearchIndex:
         documents = []
         for path in self._iter_documents():
             try:
-                body = path.read_text(encoding="utf-8")
+                raw_body = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
             relative = self._relative(path)
-            descriptor = describe_document(relative, body)
+            body = self._indexable_body(relative, raw_body)
+            if not body.strip():
+                continue
+            descriptor = describe_document(relative, raw_body)
             revision = self._revision(body, descriptor)
             documents.append(
                 IndexedDocument(
                     path=relative,
-                    title=document_title(path, body),
+                    title=self._document_title(path, raw_body),
                     body=body,
                     scope=descriptor.scope,
                     category=descriptor.category,
@@ -633,6 +900,7 @@ class ProjectSearchIndex:
                 self.novel_root / "data" / "foreshadowing",
                 {".md", ".yaml", ".yml"},
             ),
+            (self.novel_root / "data" / "style", {".md", ".yaml", ".yml"}),
         ]
         for root, suffixes in roots:
             if not root.is_dir():
@@ -648,6 +916,76 @@ class ProjectSearchIndex:
                         yield path
                 except OSError:
                     continue
+        sources_root = self.novel_root / "data" / "sources"
+        if sources_root.is_dir():
+            for path in sorted(sources_root.rglob("*")):
+                relative = path.relative_to(sources_root).as_posix()
+                is_report = path.name == "report.json" and "/analysis_v2/" in f"/{relative}"
+                is_snapshot = "/analysis_v2/snapshots/" in f"/{relative}" and path.suffix == ".txt"
+                is_style = "/style/" in f"/{relative}" and path.suffix.lower() in {
+                    ".md",
+                    ".yaml",
+                    ".yml",
+                }
+                try:
+                    if (
+                        (is_report or is_snapshot or is_style)
+                        and path.is_file()
+                        and not path.is_symlink()
+                        and path.stat().st_size <= MAX_INDEXED_BYTES
+                    ):
+                        yield path
+                except OSError:
+                    continue
+
+    @staticmethod
+    def _indexable_body(relative: str, raw_body: str) -> str:
+        from tools.character_state_index import mask_character_state_annotations
+
+        if relative.endswith("/analysis_v2/report.json"):
+            return ProjectSearchIndex._render_source_report(raw_body)
+        if relative.endswith(".md"):
+            return mask_character_state_annotations(raw_body)
+        return raw_body
+
+    @staticmethod
+    def _render_source_report(raw_body: str) -> str:
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        lines = [f"# 拆书分析：{payload.get('source_id') or '参考资料'}"]
+        summary = str(payload.get("summary") or "").strip()
+        if summary:
+            lines.extend(("", "## 总结", summary))
+        findings = payload.get("findings")
+        if isinstance(findings, list):
+            lines.extend(("", "## 可检索发现"))
+            for item in findings:
+                if not isinstance(item, dict):
+                    continue
+                claim = str(item.get("claim") or "").strip()
+                if claim:
+                    lines.append(f"- [{item.get('category') or 'finding'}] {claim}")
+                evidence = item.get("evidence")
+                if isinstance(evidence, list):
+                    for source in evidence[:2]:
+                        if isinstance(source, dict) and str(source.get("quote") or "").strip():
+                            lines.append(f"  - 原文：{str(source['quote']).strip()}")
+        return "\n".join(lines).strip() + "\n"
+
+    @staticmethod
+    def _document_title(path: Path, raw_body: str) -> str:
+        if path.name == "report.json":
+            try:
+                payload = json.loads(raw_body)
+            except json.JSONDecodeError:
+                payload = {}
+            if isinstance(payload, dict) and payload.get("source_id"):
+                return f"{payload['source_id']} · 拆书分析"
+        return document_title(path, raw_body)
 
     def _relative(self, path: Path) -> str:
         return path.resolve().relative_to(self.novel_root).as_posix()
@@ -694,7 +1032,7 @@ class ProjectSearchIndex:
         scope: str,
     ) -> list[SearchResult]:
         by_source = {document.source_key: document for document in documents}
-        query_terms = self._query_terms(query)
+        query_terms = self._semantic_anchor_terms(query)
         results: list[SearchResult] = []
         seen_paths: set[str] = set()
         for chunk in chunks:
@@ -719,6 +1057,8 @@ class ProjectSearchIndex:
                     category=document.category,
                     category_label=document.category_label,
                     score=1000.0 - chunk.rank + literal_hits,
+                    retrieval=("semantic",),
+                    excerpt=self._source_excerpt(document.body, line),
                 )
             )
             seen_paths.add(document.path)
@@ -749,14 +1089,73 @@ class ProjectSearchIndex:
         *,
         limit: int,
     ) -> list[SearchResult]:
-        merged = list(semantic)
-        seen = {item.path for item in semantic}
-        merged.extend(item for item in literal if item.path not in seen)
-        return merged[:limit]
+        # Weighted reciprocal-rank fusion keeps semantic recall dominant while
+        # allowing exact name and terminology matches to reinforce its rank.
+        semantic_by_path = {item.path: (rank, item) for rank, item in enumerate(semantic, 1)}
+        literal_by_path = {item.path: (rank, item) for rank, item in enumerate(literal, 1)}
+        fused: list[tuple[float, int, SearchResult]] = []
+        for path in set(semantic_by_path) | set(literal_by_path):
+            score = 0.0
+            ranks: list[int] = []
+            retrieval: list[str] = []
+            if path in semantic_by_path:
+                rank, semantic_item = semantic_by_path[path]
+                score += 0.7 / (60 + rank)
+                ranks.append(rank)
+                retrieval.append("semantic")
+            else:
+                semantic_item = None
+            if path in literal_by_path:
+                rank, literal_item = literal_by_path[path]
+                score += 0.3 / (60 + rank)
+                ranks.append(rank)
+                retrieval.append("literal")
+            else:
+                literal_item = None
+            selected = literal_item or semantic_item
+            if selected is None:  # pragma: no cover - guarded by path union
+                continue
+            fused.append(
+                (
+                    score,
+                    min(ranks),
+                    replace(
+                        selected,
+                        score=round(score * 100000, 4),
+                        retrieval=tuple(retrieval),
+                        excerpt=(
+                            semantic_item.excerpt
+                            if semantic_item is not None and semantic_item.excerpt
+                            else selected.excerpt
+                        ),
+                    ),
+                )
+            )
+        fused.sort(key=lambda item: (-item[0], item[1], item[2].path))
+        return [item[2] for item in fused[:limit]]
 
     @staticmethod
     def _query_terms(query: str) -> list[str]:
         return [item.casefold() for item in query.split() if item]
+
+    @staticmethod
+    def _semantic_anchor_terms(query: str) -> list[str]:
+        terms: list[str] = []
+        seen: set[str] = set()
+
+        def add(value: str) -> None:
+            folded = value.casefold().strip()
+            if len(folded) >= 2 and folded not in seen:
+                seen.add(folded)
+                terms.append(folded)
+
+        for token in re.findall(r"[A-Za-z0-9_]{2,}|[\u3400-\u9fff]{2,}", query):
+            add(token)
+            if re.fullmatch(r"[\u3400-\u9fff]+", token) and len(token) > 4:
+                for size in (4, 3, 2):
+                    for index in range(0, len(token) - size + 1):
+                        add(token[index : index + size])
+        return terms[:80]
 
     @classmethod
     def _locate_chunk(
@@ -765,32 +1164,72 @@ class ProjectSearchIndex:
         chunk: str,
         terms: list[str],
     ) -> tuple[int, str, str, float]:
-        chunk_text = cls._strip_rag_metadata(chunk)
+        chunk_text = cls._strip_rag_metadata(chunk).replace("\ufffd", "")
         offset = body.find(chunk_text) if chunk_text else -1
         if offset < 0 and chunk_text:
-            probe = next(
-                (line.strip() for line in chunk_text.splitlines() if len(line.strip()) >= 12),
-                "",
-            )
-            offset = body.find(probe) if probe else -1
+            for probe in (
+                line.strip()
+                for line in chunk_text.splitlines()
+                if len(line.strip()) >= 12
+            ):
+                offset = body.find(probe)
+                if offset >= 0:
+                    break
         start_line = body[: max(0, offset)].count("\n") + 1 if offset >= 0 else 1
         chunk_lines = chunk_text.splitlines() or [chunk_text]
         best: tuple[float, int, str] | None = None
         for index, line in enumerate(chunk_lines):
             stripped = line.strip()
-            if not stripped:
+            if not cls._is_substantive_snippet(stripped):
                 continue
             folded = stripped.casefold()
-            hits = sum(term in folded for term in terms)
-            score = float(hits * 3 + (1 if not stripped.startswith("#") else 0))
+            hit_weight = sum(min(6, len(term)) for term in terms if term in folded)
+            prose_bonus = min(3.0, len(stripped) / 80)
+            syntax_penalty = 1.5 if re.match(r"^[A-Za-z0-9_.-]+\s*[:=]", stripped) else 0
+            score = float(hit_weight * 2 + prose_bonus - syntax_penalty)
             candidate = (score, start_line + index, stripped[:280])
             if best is None or candidate[0] > best[0]:
                 best = candidate
         if best is None:
-            best = (0.0, start_line, chunk_text[:280])
+            fallback = next(
+                (line.strip() for line in chunk_lines if line.strip()),
+                chunk_text[:280],
+            )
+            best = (0.0, start_line, fallback[:280])
         literal_hits, line, snippet = best
         heading = cls._heading_for_line(body, line)
         return line, heading, snippet, literal_hits
+
+    @staticmethod
+    def _is_substantive_snippet(value: str) -> bool:
+        if not value or value in {"+++", "---", "***"}:
+            return False
+        if re.fullmatch(r"[#>*_`~+\-=|:：；，。！？、,.!?;\s]+", value):
+            return False
+        visible = re.sub(r"^[#>*_`~+\-=|\s]+", "", value).strip()
+        return len(re.sub(r"\W", "", visible, flags=re.UNICODE)) >= 2
+
+    @classmethod
+    def _source_excerpt(
+        cls,
+        body: str,
+        target_line: int,
+        *,
+        maximum_chars: int = 1600,
+    ) -> str:
+        lines = body.splitlines()
+        if not lines:
+            return ""
+        center = max(0, min(len(lines) - 1, int(target_line) - 1))
+        start = max(0, center - 3)
+        end = min(len(lines), center + 6)
+        selected = [
+            line.strip()
+            for line in lines[start:end]
+            if cls._is_substantive_snippet(line.strip())
+        ]
+        excerpt = "\n".join(selected).strip()
+        return excerpt[:maximum_chars]
 
     @staticmethod
     def _strip_rag_metadata(chunk: str) -> str:
@@ -866,6 +1305,7 @@ class ProjectSearchIndex:
             document.category,
             document.category_label,
             score,
+            ("literal",),
         )
 
 

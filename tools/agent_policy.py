@@ -52,19 +52,19 @@ DEFAULT_AGENT_SPECS: Dict[str, AgentSpec] = {
     ),
     "state_settler": AgentSpec(
         name="state_settler",
-        role="更新角色状态、关系、资源账本",
+        role="输出并应用 runtime-delta-v1，更新角色状态、关系与资源账本投影",
         required=True,
         can_read=["manuscript:draft", "runtime:truth_files"],
-        can_write=["world:current_state", "world:ledger", "world:relationships"],
+        can_write=["runtime:delta"],
         forbidden=["manuscript:rewrite", "outline:*"],
     ),
     "concept_curator": AgentSpec(
         name="concept_curator",
-        role="新增或修订概念文档（实体/术语）",
-        required=True,
-        can_read=["manuscript:draft", "src:world/*"],
-        can_write=["src:world/entities", "src:world/terminology"],
-        forbidden=["manuscript:*", "outline:*"],
+        role="审核 proposed_entities；只有用户确认后才晋升为正典概念文档",
+        required=False,
+        can_read=["runtime:proposed_entities", "src:world/*"],
+        can_write=["runtime:proposed_entities"],
+        forbidden=["manuscript:*", "outline:*", "src:world:*"],
     ),
 }
 
