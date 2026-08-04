@@ -412,7 +412,7 @@ pytest
 
 ## Star History
 
-<a href="https://star-history.com/#LiPu-jpg/Openwrite&Date">
+<a href="https://www.star-history.com/?repos=LiPu-jpg%2FOpenwrite&type=date&legend=top-left">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=LiPu-jpg/Openwrite&type=Date&theme=dark">
     <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=LiPu-jpg/Openwrite&type=Date">

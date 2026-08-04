@@ -226,6 +226,7 @@ class SourcePackService:
         source_path = root / "source.md"
         setting_path = root / "setting_profile.md"
         progress_path = root / "extraction" / "progress.json"
+        analysis_report_path = root / "analysis_v2" / "report.json"
         style_dir = root / "style"
         progress: dict[str, Any] = {}
         if progress_path.exists():
@@ -236,6 +237,40 @@ class SourcePackService:
             except (OSError, json.JSONDecodeError):
                 progress = {}
         parts = [f"# 来源审阅：{source_id}", ""]
+        analysis_report = self._load_json_object(analysis_report_path)
+        if analysis_report:
+            findings = [
+                item
+                for item in analysis_report.get("findings", [])
+                if isinstance(item, dict)
+            ]
+            evidence_count = sum(
+                len(item.get("evidence", []))
+                for item in findings
+                if isinstance(item.get("evidence"), list)
+            )
+            parts.extend(
+                [
+                    "## 证据化分析 V2",
+                    f"- 状态: {analysis_report.get('status', 'unknown')}",
+                    f"- 规范名称: {analysis_report.get('relative_name') or source_id}",
+                    f"- 结论数: {len(findings)}",
+                    f"- 证据数: {evidence_count}",
+                    f"- 失败分块: {len(analysis_report.get('failed_chunks') or [])}",
+                    "",
+                ]
+            )
+            summary = str(analysis_report.get("summary") or "").strip()
+            if summary:
+                parts.extend(["### 摘要", summary, ""])
+            if findings:
+                parts.append("### 可复用结论")
+                for finding in findings[:12]:
+                    category = str(finding.get("category") or "未分类").strip()
+                    claim = str(finding.get("claim") or "").strip()
+                    if claim:
+                        parts.append(f"- [{category}] {claim}")
+                parts.append("")
         if progress:
             parts.extend(
                 [
@@ -270,7 +305,80 @@ class SourcePackService:
         if style_files:
             parts.append("## 已生成风格文档")
             parts.extend(f"- {name}" for name in style_files)
+        readiness = self.promotion_readiness(source_id, "all")
+        parts.extend(
+            [
+                "",
+                "## 晋升检查",
+                f"- 可用目标: {', '.join(readiness['available_targets']) or '无'}",
+                f"- 全量晋升: {'可用' if readiness['ready'] else '不可用'}",
+            ]
+        )
+        if readiness["missing_items"]:
+            parts.append(f"- 缺失资产: {', '.join(readiness['missing_items'])}")
         return "\n".join(parts).strip() + "\n"
+
+    def review_metadata(self, source_id: str) -> dict[str, Any]:
+        root = self.source_root(source_id)
+        analysis_report = self._load_json_object(root / "analysis_v2" / "report.json")
+        findings = [
+            item
+            for item in analysis_report.get("findings", [])
+            if isinstance(item, dict)
+        ]
+        evidence_count = sum(
+            len(item.get("evidence", []))
+            for item in findings
+            if isinstance(item.get("evidence"), list)
+        )
+        readiness = self.promotion_readiness(source_id, "all")
+        return {
+            "analysis_version": 2 if analysis_report else 1,
+            "canonical_name": str(
+                analysis_report.get("relative_name") or source_id
+            ),
+            "analysis_status": str(analysis_report.get("status") or ""),
+            "finding_count": len(findings),
+            "evidence_count": evidence_count,
+            "promotion_ready": readiness["ready"],
+            "available_targets": readiness["available_targets"],
+            "missing_items": readiness["missing_items"],
+        }
+
+    def promotion_readiness(
+        self, source_id: str, target: str = "all"
+    ) -> dict[str, Any]:
+        root = self.source_root(source_id)
+        style_files = [
+            path
+            for path in sorted((root / "style").glob("*.md"))
+            if path.is_file() and path.stat().st_size > 0
+        ]
+        setting_ready = (root / "setting_profile.md").is_file()
+        target_requirements = {
+            "style": [(bool(style_files), "style/*.md")],
+            "setting": [(setting_ready, "setting_profile.md")],
+            "world": [(setting_ready, "setting_profile.md")],
+            "all": [
+                (bool(style_files), "style/*.md"),
+                (setting_ready, "setting_profile.md"),
+            ],
+        }
+        checks = target_requirements.get(target)
+        if checks is None:
+            raise ValueError(f"未知晋升目标: {target}")
+        available_targets: list[str] = []
+        if style_files:
+            available_targets.append("style")
+        if setting_ready:
+            available_targets.extend(["setting", "world"])
+        missing_items = [label for ready, label in checks if not ready]
+        return {
+            "ready": not missing_items,
+            "target": target,
+            "available_targets": available_targets,
+            "missing_items": missing_items,
+        }
 
     def promote(self, source_id: str, target: str) -> list[str]:
         promoted: list[str] = []
@@ -383,6 +491,16 @@ class SourcePackService:
         if not isinstance(value, list):
             return []
         return [str(item).strip() for item in value if str(item).strip()]
+
+    @staticmethod
+    def _load_json_object(path: Path) -> dict[str, Any]:
+        if not path.is_file():
+            return {}
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
 
     @staticmethod
     def _dedupe(items: list[str]) -> list[str]:

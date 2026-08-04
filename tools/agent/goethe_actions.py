@@ -370,17 +370,28 @@ class GoethePlanningRuntime:
 
     def review_source_pack(self, source_id: str) -> dict[str, Any]:
         try:
-            review = self.novel_service.review_source(source_id)["review_report"]
+            result = self.novel_service.review_source(source_id)
         except NovelServiceError as exc:
             return self._service_error("review_source_pack", source_id, exc)
+        review = str(result.get("review_report") or "")
+        metadata = result.get("review_metadata") or {}
+        promotion_ready = bool(metadata.get("promotion_ready"))
         source_root = self._source_root(source_id)
         return {
             "ok": True,
             "blocked": False,
-            "next_action": "promote_source_pack",
+            "next_action": (
+                "promote_source_pack" if promotion_ready else "extract_style_source"
+            ),
             "source_id": source_id,
             "source_root": str(source_root),
             "review_report": review,
+            "review_metadata": metadata,
+            "message": (
+                "来源包已通过晋升前检查。"
+                if promotion_ready
+                else "来源分析可审阅，但旧版晋升资产不完整；请先提取可晋升来源包。"
+            ),
         }
 
     def promote_source_pack(self, source_id: str, target: str = "all") -> dict[str, Any]:

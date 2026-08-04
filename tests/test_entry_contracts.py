@@ -92,6 +92,8 @@ def test_source_review_is_identical_in_service_studio_and_goethe(tmp_path: Path)
 
     assert studio["review_report"] == expected
     assert goethe["review_report"] == expected
+    assert goethe["review_metadata"]["promotion_ready"] is False
+    assert goethe["next_action"] == "extract_style_source"
 
 
 def test_goethe_outline_tools_stage_diff_before_confirming_src(tmp_path: Path):

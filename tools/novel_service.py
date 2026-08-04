@@ -587,15 +587,16 @@ class NovelApplicationService:
         source_id = self._validate_source_id(source_id)
         self._require_source_pack(source_id)
         try:
-            report = SourcePackService(
-                self.project_root, self.novel_id
-            ).render_review(source_id)
+            source_pack = SourcePackService(self.project_root, self.novel_id)
+            report = source_pack.render_review(source_id)
+            metadata = source_pack.review_metadata(source_id)
         except Exception as exc:
             raise NovelServiceError(f"来源审阅失败: {exc}") from exc
         return {
             "ok": True,
             "source_id": source_id,
             "review_report": report,
+            "review_metadata": metadata,
         }
 
     def prepare_source_analysis_v2(
@@ -714,10 +715,16 @@ class NovelApplicationService:
         if target not in {"style", "setting", "world", "all"}:
             raise NovelServiceError("晋升目标无效", code="INVALID_INPUT")
         self._require_source_pack(source_id)
+        source_pack = SourcePackService(self.project_root, self.novel_id)
+        readiness = source_pack.promotion_readiness(source_id, target)
+        if not readiness["ready"]:
+            missing = "、".join(readiness["missing_items"])
+            raise NovelServiceError(
+                f"来源包尚不可晋升到 {target}，缺少: {missing}",
+                code="SOURCE_INCOMPLETE",
+            )
         try:
-            promoted = SourcePackService(
-                self.project_root, self.novel_id
-            ).promote(source_id, target)
+            promoted = source_pack.promote(source_id, target)
         except Exception as exc:
             raise NovelServiceError(f"来源晋升失败: {exc}") from exc
         self.refresh()

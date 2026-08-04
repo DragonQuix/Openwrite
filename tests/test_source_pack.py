@@ -1,9 +1,11 @@
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tools.init_project import init_project
+from tools.novel_service import NovelApplicationService, NovelServiceError
 from tools.source_pack import SourcePackService
 
 
@@ -65,3 +67,74 @@ def test_source_pack_refresh_review_and_promotion_are_cli_independent(tmp_path: 
         novel_root / "src" / "world" / "rules.md"
     ).read_text(encoding="utf-8")
     assert list((novel_root / "src" / "world" / "entities").glob("*.md"))
+
+
+def test_source_pack_review_surfaces_v2_evidence_without_claiming_legacy_promotion(
+    tmp_path: Path,
+):
+    init_project(tmp_path, "demo", "证据来源")
+    service = SourcePackService(tmp_path, "demo")
+    analysis_root = service.source_root("opening") / "analysis_v2"
+    analysis_root.mkdir(parents=True)
+    (analysis_root / "report.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "source_id": "opening",
+                "relative_name": "opening.txt",
+                "status": "completed",
+                "summary": "用连续异响推动开场。",
+                "findings": [
+                    {
+                        "category": "pacing",
+                        "claim": "让异常信号逐次升级",
+                        "evidence": [
+                            {"start": 0, "end": 2, "quote": "钟声"},
+                            {"start": 4, "end": 6, "quote": "脚步"},
+                        ],
+                    }
+                ],
+                "failed_chunks": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    review = service.render_review("opening")
+    metadata = service.review_metadata("opening")
+
+    assert "规范名称: opening.txt" in review
+    assert "结论数: 1" in review
+    assert "证据数: 2" in review
+    assert "全量晋升: 不可用" in review
+    assert metadata == {
+        "analysis_version": 2,
+        "canonical_name": "opening.txt",
+        "analysis_status": "completed",
+        "finding_count": 1,
+        "evidence_count": 2,
+        "promotion_ready": False,
+        "available_targets": [],
+        "missing_items": ["style/*.md", "setting_profile.md"],
+    }
+
+
+def test_source_pack_all_promotion_preflights_before_any_partial_write(tmp_path: Path):
+    init_project(tmp_path, "demo", "原子晋升")
+    source = SourcePackService(tmp_path, "demo")
+    root = source.source_root("style_only")
+    (root / "style").mkdir(parents=True)
+    (root / "style" / "summary.md").write_text(
+        "# 风格总结\n\n## reusable_signals\n\n- 短句推进。\n",
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "novel_config.yaml"
+    config_before = config_path.read_text(encoding="utf-8")
+
+    with pytest.raises(NovelServiceError) as incomplete:
+        NovelApplicationService(tmp_path).promote_source("style_only", "all")
+
+    assert incomplete.value.code == "SOURCE_INCOMPLETE"
+    assert "setting_profile.md" in str(incomplete.value)
+    assert config_path.read_text(encoding="utf-8") == config_before
