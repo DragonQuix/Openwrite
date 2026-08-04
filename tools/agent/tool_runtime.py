@@ -602,7 +602,8 @@ def _read_project_document(
         return path_result
     path, relative = path_result
     content = path.read_text(encoding="utf-8")
-    revision = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    revision = content_hash[:16]
     try:
         max_chars = max(1000, min(80000, int(args.get("max_chars") or 24000)))
     except (TypeError, ValueError):
@@ -612,6 +613,7 @@ def _read_project_document(
         "ok": True,
         "path": relative,
         "revision": revision,
+        "source_revision": f"sha256:{content_hash}",
         "content": content[:max_chars],
         "truncated": truncated,
         "size": len(content),

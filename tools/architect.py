@@ -67,6 +67,7 @@ class ArchitectAgent:
     """
 
     GENRE_GUIDES = {
+        "unspecified": "题材未指定：必须以作者简述和现有已确认资产为准，不得擅自套用仙侠、都市等类型模板",
         "xuanhuan": "玄幻：东方仙侠世界，修炼境界（金丹、元婴等），门派纷争，奇遇流",
         "xianxia": "仙侠：修真文明，飞剑法宝，炼丹炼器，人与天地争斗",
         "urban": "都市：现代都市背景，异能/风水/相术等都市传说",
@@ -197,16 +198,17 @@ class ArchitectAgent:
 请生成{target_chapters}章的大纲。"""
 
         try:
-            response = self.ctx.client.chat(
+            content = self._chat_required(
                 messages=[
                     Message("system", system_prompt),
                     Message("user", user_prompt),
                 ],
                 temperature=0.5,
                 max_tokens=8192,
+                label="chapter outline",
             )
 
-            return self._parse_chapter_outline(response.content, target_chapters)
+            return self._parse_chapter_outline(content, target_chapters)
         except Exception as e:
             self.log.error(f"Outline generation failed: {e}")
             return []
@@ -257,16 +259,19 @@ class ArchitectAgent:
 请设计这个角色的详细设定。"""
 
         try:
-            response = self.ctx.client.chat(
+            content = self._chat_required(
                 messages=[
                     Message("system", system_prompt),
                     Message("user", user_prompt),
                 ],
                 temperature=0.7,
                 max_tokens=4096,
+                label="character",
             )
 
-            return f"# {name}\n\n{response.content}"
+            if content.lstrip().startswith("# "):
+                return content
+            return f"# {name}\n\n{content}"
         except Exception as e:
             self.log.error(f"Character generation failed: {e}")
             return f"# {name}\n\n角色生成失败：{e}"
@@ -301,16 +306,17 @@ class ArchitectAgent:
 
 请生成世界观设定。"""
 
-        response = self.ctx.client.chat(
+        content = self._chat_required(
             messages=[
                 Message("system", system_prompt),
                 Message("user", user_prompt),
             ],
             temperature=0.7,
             max_tokens=8192,
+            label="story bible",
         )
 
-        return response.content
+        return content
 
     def _generate_volume_outline(self, title: str, genre: str, story_bible: str, brief: str) -> str:
         """生成卷纲"""
@@ -351,16 +357,17 @@ class ArchitectAgent:
 
 请生成卷纲。"""
 
-        response = self.ctx.client.chat(
+        content = self._chat_required(
             messages=[
                 Message("system", system_prompt),
                 Message("user", user_prompt),
             ],
             temperature=0.5,
             max_tokens=8192,
+            label="volume outline",
         )
 
-        return response.content
+        return content
 
     def _generate_book_rules(self, title: str, genre: str, brief: str) -> str:
         """生成写作规则"""
@@ -384,16 +391,17 @@ class ArchitectAgent:
 
 请生成写作规则。"""
 
-        response = self.ctx.client.chat(
+        content = self._chat_required(
             messages=[
                 Message("system", system_prompt),
                 Message("user", user_prompt),
             ],
             temperature=0.3,
             max_tokens=2048,
+            label="book rules",
         )
 
-        return f"# {title} 写作规则\n\n{response.content}"
+        return f"# {title} 写作规则\n\n{content}"
 
     def _generate_current_state(self, title: str, genre: str, story_bible: str, brief: str) -> str:
         """生成初始状态"""
@@ -421,16 +429,17 @@ class ArchitectAgent:
 
 请生成初始状态卡。"""
 
-        response = self.ctx.client.chat(
+        content = self._chat_required(
             messages=[
                 Message("system", system_prompt),
                 Message("user", user_prompt),
             ],
             temperature=0.3,
             max_tokens=2048,
+            label="current state",
         )
 
-        return f"# 当前状态（第0章）\n\n{response.content}"
+        return f"# 当前状态（第0章）\n\n{content}"
 
     def _generate_foreshadowing_seed(self, title: str, volume_outline: str) -> str:
         """生成伏笔列表"""
@@ -466,16 +475,48 @@ status 使用“埋伏/待收/已收/废弃”；章节 ID 使用 ch_001 格式�
 
 请列出主要伏笔。"""
 
-        response = self.ctx.client.chat(
+        content = self._chat_required(
             messages=[
                 Message("system", system_prompt),
                 Message("user", user_prompt),
             ],
             temperature=0.3,
             max_tokens=2048,
+            label="foreshadowing",
         )
 
-        return response.content.strip()
+        return content
+
+    def _chat_required(
+        self,
+        *,
+        messages: list[Any],
+        temperature: float,
+        max_tokens: int,
+        label: str,
+    ) -> str:
+        """Retry one transient empty/error response before failing the draft."""
+
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                response = self.ctx.client.chat(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                content = str(getattr(response, "content", "") or "").strip()
+                if content:
+                    return content
+                last_error = RuntimeError(f"{label} model response was empty")
+            except Exception as exc:  # noqa: BLE001 - retry provider transients once
+                last_error = exc
+            self.log.warning(
+                "%s generation attempt %s returned no usable content",
+                label,
+                attempt + 1,
+            )
+        raise RuntimeError(f"{label} generation failed after retry") from last_error
 
     def _generate_pending_hooks(self, title: str, volume_outline: str) -> str:
         """兼容旧方法名。"""

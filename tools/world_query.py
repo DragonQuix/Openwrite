@@ -197,10 +197,15 @@ def _parse_relations(items: List[str]) -> List[Dict[str, str]]:
     return relations
 
 
-def _normalize_meta_relations(items: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+def _normalize_meta_relations(items: List[Any]) -> List[Dict[str, str]]:
     """Normalize TOML front matter related entries to legacy relation shape."""
     relations: List[Dict[str, str]] = []
     for item in items:
+        if isinstance(item, str):
+            target = item.strip()
+            if target:
+                relations.append({"target": target, "description": ""})
+            continue
         if not isinstance(item, dict):
             continue
         target = str(item.get("target", "")).strip()
@@ -394,79 +399,12 @@ def get_relations_topology(
 ) -> Dict[str, Any]:
     """Build a bounded Studio topology from canonical entity files."""
     root = (project_root or Path(__file__).parent.parent).resolve()
-    entities_dir = root / "data" / "novels" / novel_id / "src" / "world" / "entities"
-    characters_dir = root / "data" / "novels" / novel_id / "src" / "characters"
-    if not entities_dir.exists() and not characters_dir.exists():
+    parsed, raw_edges, diagnostics = _relation_catalog(root, novel_id)
+    if not parsed:
         return _empty_topology(max_nodes=max_nodes, max_edges=max_edges)
-
-    parsed = []
-    for path in sorted(entities_dir.rglob("*.md")):
-        entity = parse_entity(path)
-        _, body = parse_toml_front_matter(path.read_text(encoding="utf-8"))
-        entity["relations"] = _merge_relations_by_target(
-            entity["relations"], _parse_markdown_relationships(body, heading_targets=False)
-        )
-        parsed.append(entity)
-    if characters_dir.exists():
-        from tools.character_sync import parse_profile_to_card
-
-        for path in sorted(characters_dir.glob("*.md")):
-            card = parse_profile_to_card(path)
-            if not card:
-                continue
-            metadata, body = parse_toml_front_matter(path.read_text(encoding="utf-8"))
-            parsed.append(
-                {
-                    "id": str(card.get("id") or path.stem),
-                    "name": str(card.get("name") or path.stem),
-                    "type": "人物",
-                    "status": "active",
-                    "description": str(card.get("brief") or card.get("background") or ""),
-                    "role": str(metadata.get("role") or metadata.get("tier") or ""),
-                    "relations": _merge_relations_by_target(
-                        _normalize_character_relations(card.get("relationships")),
-                        _parse_markdown_relationships(body, heading_targets=True),
-                    ),
-                    "file": str(path),
-                }
-            )
-    by_id = {str(entity["id"]): entity for entity in parsed}
-    by_name = {
-        str(entity["name"]): entity
-        for entity in parsed
-        if str(entity.get("name") or "").strip()
-    }
-    protagonist = next(
-        (
-            entity
-            for entity in parsed
-            if entity.get("type") == "人物"
-            and str(entity.get("role") or "").strip() == "主角"
-        ),
-        None,
-    )
-    if protagonist is not None:
-        by_name["主角"] = protagonist
-    raw_edges: List[Dict[str, str]] = []
     referenced_ids: set[str] = set()
-    for entity in parsed:
-        source_id = str(entity["id"])
-        for relation in entity["relations"]:
-            raw_target = str(relation.get("target") or "").strip()
-            if not raw_target:
-                continue
-            clean_target = _clean_relation_target(raw_target)
-            target = by_id.get(raw_target) or by_name.get(raw_target) or by_name.get(clean_target)
-            target_id = str(target["id"]) if target else f"unresolved:{raw_target}"
-            referenced_ids.update((source_id, target_id))
-            raw_edges.append(
-                {
-                    "source": source_id,
-                    "target": target_id,
-                    "label": str(relation.get("description") or "").strip(),
-                    "raw_target": raw_target,
-                }
-            )
+    for edge in raw_edges:
+        referenced_ids.update((edge["source"], edge["target"]))
 
     ordered = sorted(
         parsed,
@@ -491,6 +429,7 @@ def get_relations_topology(
                 "status": "unresolved",
                 "description": "关系指向了尚未建立实体文件的目标。",
                 "source_path": "",
+                "asset_kind": "",
                 "unresolved": True,
             }
         )
@@ -508,6 +447,10 @@ def get_relations_topology(
                 "source": edge["source"],
                 "target": edge["target"],
                 "label": edge["label"] or "关联",
+                "kind": edge["kind"],
+                "origin": edge["origin"],
+                "confirmed": edge["origin"] in {"canonical", "annotation"},
+                "source_label": edge["source_label"],
             }
         )
 
@@ -518,9 +461,356 @@ def get_relations_topology(
         "nodes": nodes,
         "edges": edges,
         "totals": {"nodes": len(parsed) + unresolved_count, "edges": len(raw_edges)},
+        "relation_totals": {
+            "canonical": sum(edge["origin"] == "canonical" for edge in raw_edges),
+            "annotation": sum(edge["origin"] == "annotation" for edge in raw_edges),
+        },
+        "diagnostics": diagnostics,
         "limits": {"nodes": max_nodes, "edges": max_edges},
         "truncated": len(nodes) < len(parsed) + unresolved_count or len(edges) < len(raw_edges),
     }
+
+
+def get_asset_relation_view(
+    novel_id: str,
+    asset_id: str,
+    project_root: Optional[Path] = None,
+    *,
+    asset_kind: str = "",
+) -> Dict[str, Any]:
+    """Return the same resolved relation set used by the Studio topology."""
+    root = (project_root or Path(__file__).parent.parent).resolve()
+    entities, edges, _ = _relation_catalog(root, novel_id)
+    wanted_id = str(asset_id or "").strip().casefold()
+    current = next(
+        (
+            entity
+            for entity in entities
+            if str(entity.get("id") or "").casefold() == wanted_id
+            and (not asset_kind or entity.get("asset_kind") == asset_kind)
+        ),
+        None,
+    )
+    if current is None:
+        return {
+            "confirmed": [],
+            "registered": [],
+            "suggested": [],
+            "incoming": [],
+            "counts": {
+                "confirmed": 0,
+                "registered": 0,
+                "suggested": 0,
+                "incoming": 0,
+            },
+        }
+
+    current_id = str(current["id"])
+    by_id = {str(entity["id"]): entity for entity in entities}
+    confirmed = [
+        _relation_view_item(edge, by_id, direction="outgoing")
+        for edge in edges
+        if edge["source"] == current_id and edge["origin"] == "canonical"
+    ]
+    registered = [
+        _relation_view_item(edge, by_id, direction="outgoing")
+        for edge in edges
+        if edge["source"] == current_id and edge["origin"] == "annotation"
+    ]
+    incoming = [
+        _relation_view_item(edge, by_id, direction="incoming")
+        for edge in edges
+        if edge["target"] == current_id and edge["source"] != current_id
+    ]
+    return {
+        "confirmed": confirmed,
+        "registered": registered,
+        "suggested": [],
+        "incoming": incoming,
+        "counts": {
+            "confirmed": len(confirmed),
+            "registered": len(registered),
+            "suggested": 0,
+            "incoming": len(incoming),
+        },
+    }
+
+
+def _relation_catalog(
+    root: Path, novel_id: str
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Parse and resolve all Studio relation assets with provenance."""
+    novel_src = root / "data" / "novels" / novel_id / "src"
+    entities_dir = novel_src / "world" / "entities"
+    characters_dir = novel_src / "characters"
+    parsed: List[Dict[str, Any]] = []
+
+    if entities_dir.exists():
+        for path in sorted(entities_dir.rglob("*.md")):
+            content = path.read_text(encoding="utf-8")
+            metadata, _ = parse_toml_front_matter(content)
+            entity = parse_entity(path)
+            entity["type"] = str(entity.get("type") or metadata.get("kind") or "设定")
+            entity["aliases"] = _string_list(metadata.get("aliases"))
+            entity["asset_kind"] = "world"
+            entity["relations"] = _merge_relation_entries_by_target(
+                _relation_entries(
+                    metadata.get("related"),
+                    origin="canonical",
+                    source_label="资料字段 related",
+                )
+            )
+            parsed.append(entity)
+
+    if characters_dir.exists():
+        from tools.character_sync import parse_profile_to_card
+
+        for path in sorted(characters_dir.glob("*.md")):
+            card = parse_profile_to_card(path)
+            if not card:
+                continue
+            metadata, _ = parse_toml_front_matter(path.read_text(encoding="utf-8"))
+            parsed.append(
+                {
+                    "id": str(card.get("id") or path.stem),
+                    "name": str(card.get("name") or path.stem),
+                    "type": "人物",
+                    "status": str(metadata.get("status") or "active"),
+                    "description": str(card.get("brief") or card.get("background") or ""),
+                    "role": str(metadata.get("role") or metadata.get("tier") or ""),
+                    "aliases": _string_list(metadata.get("aliases")),
+                    "asset_kind": "character",
+                    "relations": _merge_relation_entries_by_target(
+                        _relation_entries(
+                            metadata.get("related"),
+                            origin="canonical",
+                            source_label="资料字段 related",
+                        )
+                    ),
+                    "file": str(path),
+                }
+            )
+
+    lookup = _relation_entity_lookup(parsed)
+    raw_edges: List[Dict[str, Any]] = []
+    seen_edges: set[tuple[str, str]] = set()
+    for entity in parsed:
+        source_id = str(entity["id"])
+        for relation in entity["relations"]:
+            raw_target = str(relation.get("target") or "").strip()
+            if not raw_target:
+                continue
+            target = _resolve_relation_entity(raw_target, lookup)
+            target_id = str(target["id"]) if target else f"unresolved:{raw_target}"
+            edge_key = (source_id.casefold(), target_id.casefold())
+            if edge_key in seen_edges:
+                continue
+            seen_edges.add(edge_key)
+            raw_edges.append(
+                {
+                    "source": source_id,
+                    "target": target_id,
+                    "label": str(relation.get("description") or "").strip(),
+                    "kind": str(relation.get("kind") or "related").strip() or "related",
+                    "origin": str(relation.get("origin") or "canonical"),
+                    "source_label": str(relation.get("source_label") or "正文关系段落"),
+                    "raw_target": raw_target,
+                }
+            )
+
+    diagnostics: List[Dict[str, Any]] = []
+    annotations, annotation_issues = _relation_annotation_records(root, novel_id)
+    diagnostics.extend(annotation_issues)
+    edge_positions = {
+        (str(edge["source"]).casefold(), str(edge["target"]).casefold()): index
+        for index, edge in enumerate(raw_edges)
+    }
+    for annotation in annotations:
+        source = _resolve_relation_entity(annotation.source, lookup)
+        target = _resolve_relation_entity(annotation.target, lookup)
+        if source is None:
+            diagnostics.append(
+                {
+                    "code": "relation_source_unresolved",
+                    "path": annotation.source_path,
+                    "line": annotation.line,
+                    "message": f"关系源实体不存在: {annotation.source}",
+                }
+            )
+            continue
+        if target is not None and str(source["id"]) == str(target.get("id")):
+            diagnostics.append(
+                {
+                    "code": "relation_self_reference",
+                    "path": annotation.source_path,
+                    "line": annotation.line,
+                    "message": "关系源和目标不能相同",
+                }
+            )
+            continue
+        target_id = str(target["id"]) if target else f"unresolved:{annotation.target}"
+        if target is None:
+            diagnostics.append(
+                {
+                    "code": "relation_target_unresolved",
+                    "path": annotation.source_path,
+                    "line": annotation.line,
+                    "message": f"关系目标实体不存在: {annotation.target}",
+                }
+            )
+        edge = {
+            "source": str(source["id"]),
+            "target": target_id,
+            "label": annotation.description,
+            "kind": "registered",
+            "origin": "annotation",
+            "source_label": f"正文注册 · {annotation.source_path}:{annotation.line}",
+            "raw_target": annotation.target,
+        }
+        edge_key = (edge["source"].casefold(), edge["target"].casefold())
+        existing_index = edge_positions.get(edge_key)
+        if existing_index is None:
+            edge_positions[edge_key] = len(raw_edges)
+            raw_edges.append(edge)
+        elif raw_edges[existing_index]["origin"] == "annotation":
+            raw_edges[existing_index] = edge
+    return parsed, raw_edges, diagnostics
+
+
+def _relation_annotation_records(
+    root: Path, novel_id: str
+) -> tuple[List[Any], List[Dict[str, Any]]]:
+    from tools.character_state_index import parse_relation_annotations
+
+    novel_root = root / "data" / "novels" / novel_id
+    candidates = [
+        *(novel_root / "src").rglob("*.md"),
+        *(novel_root / "data" / "manuscript").rglob("*.md"),
+    ]
+    records: List[Any] = []
+    diagnostics: List[Dict[str, Any]] = []
+    for path in sorted({item.resolve() for item in candidates if item.is_file()}):
+        relative = path.relative_to(novel_root).as_posix()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            diagnostics.append(
+                {
+                    "code": "relation_source_unreadable",
+                    "path": relative,
+                    "line": 0,
+                    "message": f"无法读取关系注册来源: {exc}",
+                }
+            )
+            continue
+        parsed, issues = parse_relation_annotations(text, source_path=relative)
+        records.extend(parsed)
+        diagnostics.extend(issues)
+    return records, diagnostics
+
+
+def _relation_entries(value: Any, *, origin: str, source_label: str) -> List[Dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    entries: List[Dict[str, str]] = []
+    for item in value:
+        if isinstance(item, str):
+            target = item.strip()
+            kind = "related"
+            description = ""
+        elif isinstance(item, dict):
+            target = str(item.get("target") or "").strip()
+            kind = str(item.get("kind") or "related").strip() or "related"
+            description = (
+                str(item.get("note") or "").strip()
+                or str(item.get("description") or "").strip()
+                or kind
+            )
+        else:
+            continue
+        if target:
+            entries.append(
+                {
+                    "target": target,
+                    "description": description,
+                    "kind": kind,
+                    "origin": origin,
+                    "source_label": source_label,
+                }
+            )
+    return entries
+
+
+def _merge_relation_entries_by_target(
+    *groups: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    merged: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for group in groups:
+        for relation in group:
+            target = _clean_relation_target(str(relation.get("target") or ""))
+            key = target.casefold()
+            if not target or key in seen:
+                continue
+            seen.add(key)
+            merged.append({**relation, "target": target})
+    return merged
+
+
+def _relation_entity_lookup(entities: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    lookup: Dict[str, Dict[str, Any]] = {}
+    ambiguous: set[str] = set()
+    for entity in entities:
+        values = [entity.get("id"), entity.get("name"), *entity.get("aliases", [])]
+        if entity.get("type") == "人物" and str(entity.get("role") or "").strip() == "主角":
+            values.append("主角")
+        for value in values:
+            key = _clean_relation_target(str(value or "")).casefold()
+            if not key:
+                continue
+            if key in lookup and lookup[key] is not entity:
+                ambiguous.add(key)
+                continue
+            lookup[key] = entity
+    for key in ambiguous:
+        lookup.pop(key, None)
+    return lookup
+
+
+def _resolve_relation_entity(
+    target: str, lookup: Dict[str, Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    raw = str(target or "").strip().casefold()
+    clean = _clean_relation_target(target).casefold()
+    return lookup.get(raw) or lookup.get(clean)
+
+
+def _relation_view_item(
+    edge: Dict[str, Any],
+    by_id: Dict[str, Dict[str, Any]],
+    *,
+    direction: str,
+) -> Dict[str, Any]:
+    entity_id = edge["target"] if direction == "outgoing" else edge["source"]
+    entity = by_id.get(str(entity_id))
+    return {
+        "target": str(entity.get("id") if entity else edge.get("raw_target") or entity_id),
+        "name": str(entity.get("name") if entity else edge.get("raw_target") or entity_id),
+        "asset_kind": str(entity.get("asset_kind") or "") if entity else "",
+        "path": str(entity.get("file") or "") if entity else "",
+        "kind": str(edge.get("kind") or "related"),
+        "note": str(edge.get("label") or ""),
+        "origin": str(edge.get("origin") or "canonical"),
+        "source_label": str(edge.get("source_label") or "正文关系段落"),
+        "direction": direction,
+        "resolved": entity is not None,
+    }
+
+
+def _string_list(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _topology_node(entity: Dict[str, Any], root: Path) -> Dict[str, Any]:
@@ -538,6 +828,7 @@ def _topology_node(entity: Dict[str, Any], root: Path) -> Dict[str, Any]:
         "status": str(entity.get("status") or "active"),
         "description": str(entity.get("description") or ""),
         "source_path": source_path,
+        "asset_kind": str(entity.get("asset_kind") or ""),
         "unresolved": False,
     }
 
@@ -593,51 +884,6 @@ def _normalize_character_relations(value: Any) -> List[Dict[str, str]]:
     return _dedupe_relations(relations)
 
 
-def _parse_markdown_relationships(
-    body: str, *, heading_targets: bool
-) -> List[Dict[str, str]]:
-    """Read conservative relationship declarations from human-authored Markdown."""
-    relations: List[Dict[str, str]] = []
-    section_pattern = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
-    matches = list(section_pattern.finditer(body))
-    for index, match in enumerate(matches):
-        heading = match.group(1).strip()
-        section_end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
-        section = body[match.end():section_end]
-        if heading in {"关系网络", "人物关系", "人际关系"}:
-            for line in section.splitlines():
-                item = re.match(r"^\s*[-*]\s+\*\*(.+?)\*\*[：:]\s*(.+?)\s*$", line)
-                if item:
-                    relations.append(
-                        {
-                            "target": _clean_relation_target(item.group(1)),
-                            "description": item.group(2).strip()[:240],
-                        }
-                    )
-        if not heading_targets:
-            continue
-        target_match = re.match(r"^与(.+?)(?:的)?(?:关系|羁绊)", heading)
-        if target_match:
-            relations.append(
-                {
-                    "target": _clean_relation_target(target_match.group(1)),
-                    "description": _relationship_section_summary(section)
-                    or heading[:240],
-                }
-            )
-    return _dedupe_relations(relations)
-
-
-def _relationship_section_summary(section: str) -> str:
-    for raw_line in section.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith(("#", "|", ">", "- ", "* ")):
-            continue
-        clean = re.sub(r"[*_`]", "", line)
-        return clean[:240]
-    return ""
-
-
 def _clean_relation_target(value: str) -> str:
     clean = str(value or "").strip().strip("*_")
     clean = re.sub(r"[（(][^）)]*[）)]\s*$", "", clean).strip()
@@ -660,6 +906,93 @@ def _merge_relations_by_target(*groups: List[Dict[str, str]]) -> List[Dict[str, 
                 }
             )
     return merged
+
+
+def _editable_related(value: Any) -> List[Dict[str, Any]]:
+    """Keep legacy string targets when a canonical relation edit rewrites metadata."""
+    if not isinstance(value, list):
+        return []
+    related: List[Dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, str):
+            target = item.strip()
+            if target:
+                related.append({"target": target, "kind": "related"})
+        elif isinstance(item, dict) and str(item.get("target") or "").strip():
+            related.append(dict(item))
+    return related
+
+
+def _relation_entity_labels(
+    canonical_target: str,
+    target_metadata: Dict[str, Any],
+    target_body: str,
+) -> tuple[set[str], set[str]]:
+    """Return exact identifiers and human labels for one confirmed entity."""
+    exact = {str(canonical_target or "").strip().casefold()}
+    labels: List[str] = [
+        str(target_metadata.get("name") or ""),
+        _markdown_title(target_body),
+    ]
+    for key in ("alias", "aliases"):
+        value = target_metadata.get(key)
+        if isinstance(value, str):
+            labels.append(value)
+        elif isinstance(value, list):
+            labels.extend(str(item) for item in value)
+    cleaned_labels = {
+        _clean_relation_target(label).casefold()
+        for label in labels
+        if _clean_relation_target(label)
+    }
+    exact.update(cleaned_labels)
+    return {item for item in exact if item}, cleaned_labels
+
+
+def _relation_target_matches_entity(
+    raw_target: str,
+    canonical_target: str,
+    target_metadata: Dict[str, Any],
+    target_body: str,
+) -> bool:
+    """Match a legacy display target to the entity explicitly selected by ID."""
+    target = _clean_relation_target(raw_target).casefold()
+    exact, labels = _relation_entity_labels(
+        canonical_target,
+        target_metadata,
+        target_body,
+    )
+    if not target or target in exact:
+        return bool(target)
+
+    compact_target = re.sub(r"[\W_]+", "", target)
+    if len(compact_target) < 4:
+        return False
+    for label in labels:
+        compact_label = re.sub(r"[\W_]+", "", label)
+        if len(compact_label) >= 4 and (
+            compact_target in compact_label or compact_label in compact_target
+        ):
+            return True
+    return False
+
+
+def _matching_relation_indexes(
+    related: List[Dict[str, Any]],
+    canonical_target: str,
+    target_metadata: Dict[str, Any],
+    target_body: str,
+) -> List[int]:
+    return [
+        index
+        for index, item in enumerate(related)
+        if _relation_target_matches_entity(
+            str(item.get("target") or ""),
+            canonical_target,
+            target_metadata,
+            target_body,
+        )
+    ]
 
 
 def edit_world_relation(
@@ -702,16 +1035,15 @@ def edit_world_relation(
     source_metadata = metadata.copy()
     target_metadata, target_body = parse_toml_front_matter(target.read_text(encoding="utf-8"))
     canonical_target = str(target_metadata.get("id") or target.stem).strip()
-    related = [item for item in metadata.get("related", []) if isinstance(item, dict)]
-    existing_index = next(
-        (
-            index
-            for index, item in enumerate(related)
-            if str(item.get("target") or "").strip() == canonical_target
-        ),
-        None,
+    related = _editable_related(metadata.get("related"))
+    matching_indexes = _matching_relation_indexes(
+        related,
+        canonical_target,
+        target_metadata,
+        target_body,
     )
-    if action == "remove" and existing_index is None:
+    existing_index = matching_indexes[0] if matching_indexes else None
+    if action == "remove" and not matching_indexes:
         updated = original
     else:
         if not metadata:
@@ -720,7 +1052,8 @@ def edit_world_relation(
                 "name": _markdown_title(body) or source.stem,
             }
         if action == "remove":
-            related.pop(existing_index)
+            for index in reversed(matching_indexes):
+                related.pop(index)
         else:
             entry = {"target": canonical_target, "kind": "related"}
             if str(description or "").strip():
@@ -729,6 +1062,8 @@ def edit_world_relation(
                 related.append(entry)
             else:
                 related[existing_index] = {**related[existing_index], **entry}
+                for index in reversed(matching_indexes[1:]):
+                    related.pop(index)
         if related:
             metadata["related"] = related
         else:
@@ -883,7 +1218,7 @@ def edit_world_relations(
                     "id": source.stem,
                     "name": _markdown_title(body) or source.stem,
                 }
-            related = [item for item in metadata.get("related", []) if isinstance(item, dict)]
+            related = _editable_related(metadata.get("related"))
             group = {
                 "source": source,
                 "original": original,
@@ -910,18 +1245,18 @@ def edit_world_relations(
                 "action": action,
             }
         )
-        existing_index = next(
-            (
-                rel_index
-                for rel_index, item in enumerate(group["related"])
-                if str(item.get("target") or "").strip() == canonical_target
-            ),
-            None,
+        matching_indexes = _matching_relation_indexes(
+            group["related"],
+            canonical_target,
+            target_metadata,
+            target_body,
         )
+        existing_index = matching_indexes[0] if matching_indexes else None
         changed = False
         if action == "remove":
-            if existing_index is not None:
-                group["related"].pop(existing_index)
+            if matching_indexes:
+                for rel_index in reversed(matching_indexes):
+                    group["related"].pop(rel_index)
                 changed = True
         else:
             entry = {"target": canonical_target, "kind": "related"}
@@ -932,8 +1267,13 @@ def edit_world_relations(
                 changed = True
             else:
                 merged = {**group["related"][existing_index], **entry}
-                changed = merged != group["related"][existing_index]
+                changed = (
+                    merged != group["related"][existing_index]
+                    or len(matching_indexes) > 1
+                )
                 group["related"][existing_index] = merged
+                for rel_index in reversed(matching_indexes[1:]):
+                    group["related"].pop(rel_index)
         changes.append(
             {
                 "index": index + 1,

@@ -45,15 +45,9 @@ class StoryPlanningStore:
         self.ideation_summary_path = self.runtime_planning_dir / "ideation_summary.md"
         self.background_draft_path = self.runtime_planning_dir / "background_draft.md"
         self.foundation_draft_path = self.runtime_planning_dir / "foundation_draft.md"
-        self.volume_outline_draft_path = (
-            self.runtime_planning_dir / "volume_outline_draft.md"
-        )
-        self.current_state_draft_path = (
-            self.runtime_planning_dir / "current_state_draft.md"
-        )
-        self.foreshadowing_draft_path = (
-            self.runtime_planning_dir / "foreshadowing_draft.yaml"
-        )
+        self.volume_outline_draft_path = self.runtime_planning_dir / "volume_outline_draft.md"
+        self.current_state_draft_path = self.runtime_planning_dir / "current_state_draft.md"
+        self.foreshadowing_draft_path = self.runtime_planning_dir / "foreshadowing_draft.yaml"
         self.outline_draft_path = self.runtime_planning_dir / "outline_draft.md"
         self.outline_edit_state_path = self.runtime_planning_dir / "outline_edit.yaml"
         self.goethe_handoff_md_path = self.workflow_dir / "goethe_handoff.md"
@@ -63,9 +57,7 @@ class StoryPlanningStore:
         """追加一段原始灵感记录，不做结构化改写。"""
         self.runtime_planning_dir.mkdir(parents=True, exist_ok=True)
         previous = (
-            self.ideation_path.read_text(encoding="utf-8")
-            if self.ideation_path.exists()
-            else ""
+            self.ideation_path.read_text(encoding="utf-8") if self.ideation_path.exists() else ""
         )
         content = previous.rstrip("\n")
         if content:
@@ -76,7 +68,9 @@ class StoryPlanningStore:
     def save_ideation_summary(self, text: str) -> None:
         """保存 ideation 的结构化汇总，并记录与原始 ideation 的对应哈希。"""
         self.runtime_planning_dir.mkdir(parents=True, exist_ok=True)
-        ideation = self.ideation_path.read_text(encoding="utf-8") if self.ideation_path.exists() else ""
+        ideation = (
+            self.ideation_path.read_text(encoding="utf-8") if self.ideation_path.exists() else ""
+        )
         source_hash = self._hash_text(ideation)
         meta, body = parse_toml_front_matter(text)
         normalized_body = strip_front_matter_padding(body if meta else text).strip()
@@ -102,9 +96,7 @@ class StoryPlanningStore:
             return not self.ideation_summary_path.exists()
         if not self.ideation_summary_path.exists():
             return False
-        meta, body = parse_toml_front_matter(
-            self.ideation_summary_path.read_text(encoding="utf-8")
-        )
+        meta, body = parse_toml_front_matter(self.ideation_summary_path.read_text(encoding="utf-8"))
         if not body.strip():
             return False
         current_hash = self._hash_text(self.ideation_path.read_text(encoding="utf-8"))
@@ -136,19 +128,13 @@ class StoryPlanningStore:
             return False
 
         foundation_path = self.story_src_dir / "foundation.md"
-        existing = (
-            foundation_path.read_text(encoding="utf-8")
-            if foundation_path.exists()
-            else ""
-        )
+        existing = foundation_path.read_text(encoding="utf-8") if foundation_path.exists() else ""
         if self._story_document_has_content(existing):
             return False
 
         summary_text = self.ideation_summary_path.read_text(encoding="utf-8")
         summary_meta, summary_body = parse_toml_front_matter(summary_text)
-        summary = strip_front_matter_padding(
-            summary_body if summary_meta else summary_text
-        ).strip()
+        summary = strip_front_matter_padding(summary_body if summary_meta else summary_text).strip()
         if not summary:
             return False
 
@@ -201,6 +187,8 @@ class StoryPlanningStore:
                     sort_keys=False,
                 ),
             )
+        elif self.foreshadowing_draft_path.exists():
+            self.foreshadowing_draft_path.unlink()
 
     def promote_foundation(self) -> bool:
         """将 background/foundation 的当前版本收口成 draft 与 src 的一致镜像。"""
@@ -254,18 +242,14 @@ class StoryPlanningStore:
 
             state_text = self.current_state_draft_path.read_text(encoding="utf-8")
             state_meta, state_body = parse_toml_front_matter(state_text)
-            truth = TruthFilesManager(
-                self.project_root, self.novel_id
-            ).load_truth_files()
+            truth = TruthFilesManager(self.project_root, self.novel_id).load_truth_files()
             truth.current_state = strip_front_matter_padding(
                 state_body if state_meta else state_text
             ).strip()
             TruthFilesManager(self.project_root, self.novel_id).save_truth_files(truth)
 
         if foreshadowing_graph is not None:
-            dag_path = (
-                self.novel_root / "data" / "foreshadowing" / "dag.yaml"
-            )
+            dag_path = self.novel_root / "data" / "foreshadowing" / "dag.yaml"
             self._atomic_write_text(
                 dag_path,
                 yaml.safe_dump(
@@ -375,11 +359,9 @@ class StoryPlanningStore:
         if pending and self.outline_draft_path.exists():
             pending_base = str(pending.get("base_revision", ""))
             pending_draft = self.outline_draft_path.read_text(encoding="utf-8")
-            if (
-                pending_base == self._hash_text(canonical)
-                and str(pending.get("draft_revision", ""))
-                == self._hash_text(pending_draft)
-            ):
+            if pending_base == self._hash_text(canonical) and str(
+                pending.get("draft_revision", "")
+            ) == self._hash_text(pending_draft):
                 editing_source = pending_draft
                 source_kind = "pending_draft"
 
@@ -603,10 +585,9 @@ class StoryPlanningStore:
         """判断 outline draft 是否与 canonical outline 保持完全一致。"""
         if not self.outline_src_path.exists() or not self.outline_draft_path.exists():
             return False
-        return (
-            self.outline_src_path.read_text(encoding="utf-8")
-            == self.outline_draft_path.read_text(encoding="utf-8")
-        )
+        return self.outline_src_path.read_text(
+            encoding="utf-8"
+        ) == self.outline_draft_path.read_text(encoding="utf-8")
 
     def promote_outline(self, confirmed: bool) -> bool:
         """确认后原子写入 outline；revision 冲突时拒绝覆盖。"""
@@ -648,9 +629,7 @@ class StoryPlanningStore:
         if not self.outline_edit_state_path.exists():
             return {}
         try:
-            data = yaml.safe_load(
-                self.outline_edit_state_path.read_text(encoding="utf-8")
-            ) or {}
+            data = yaml.safe_load(self.outline_edit_state_path.read_text(encoding="utf-8")) or {}
         except (OSError, yaml.YAMLError):
             return {}
         return data if isinstance(data, dict) else {}
@@ -725,7 +704,9 @@ class StoryPlanningStore:
         persona_paths = payload.get("persona_paths", [])
         persona_text = "、".join(str(item) for item in persona_paths) if persona_paths else "无"
         character_paths = payload.get("character_paths", [])
-        character_text = "、".join(str(item) for item in character_paths) if character_paths else "无"
+        character_text = (
+            "、".join(str(item) for item in character_paths) if character_paths else "无"
+        )
 
         # Markdown 版本给人快速审阅，YAML 版本给运行时和测试稳定读取。
         body = "\n".join(
@@ -739,9 +720,7 @@ class StoryPlanningStore:
                 f"- target_agent: {payload.get('target_agent', 'dante')}",
                 "",
                 "## Required Assets",
-                "- " + "\n- ".join(
-                    str(item) for item in payload.get("required_assets", [])
-                )
+                "- " + "\n- ".join(str(item) for item in payload.get("required_assets", []))
                 if payload.get("required_assets")
                 else "- 无",
                 "",
@@ -755,7 +734,8 @@ class StoryPlanningStore:
                 f"- {character_text}",
                 "",
                 "## Summary",
-                str(payload.get("summary", "")).strip() or "Goethe 资产已整理完毕，可以交接给 Dante。",
+                str(payload.get("summary", "")).strip()
+                or "Goethe 资产已整理完毕，可以交接给 Dante。",
             ]
         )
         self.goethe_handoff_md_path.write_text(

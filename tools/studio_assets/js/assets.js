@@ -4,6 +4,7 @@ import {
 } from "/js/markdown-editor.js";
 
 let refreshWorkspace = async () => {};
+let refreshContinuity = async () => {};
 let activateAssetEditor = () => {};
 
 const kindLabels = {
@@ -56,7 +57,6 @@ const characterFields = [
   ["progression_stage", "当前阶段 ID", "input"],
   ["tags", "标签", "textarea", "每行一个"],
   ["detail_refs", "详情引用", "textarea", "每行一个"],
-  ["related", "关系引用", "textarea", "每行 target|kind|note"],
 ];
 
 const worldFields = [
@@ -66,11 +66,29 @@ const worldFields = [
   ["summary", "概要", "textarea"],
   ["tags", "标签", "textarea", "每行一个"],
   ["detail_refs", "详情引用", "textarea", "每行一个"],
-  ["related", "关系引用", "textarea", "每行 target|kind|note"],
 ];
+
+const characterSections = [
+  ["基本信息", ["name", "aliases", "tier", "summary"]],
+  ["角色塑造", ["personality", "goal", "fear", "taboos", "appearance", "voice"]],
+  ["当前状态", ["current_state", "state_updated_at", "organization", "progression_system", "progression_stage"]],
+  ["索引", ["tags", "detail_refs"]],
+];
+
+const worldSections = [
+  ["基本信息", ["name", "kind", "status", "summary", "tags"]],
+  ["索引", ["detail_refs"]],
+];
+
+const assetTypeLabels = {
+  character: "角色",
+  world: "设定",
+  progression: "成长体系",
+};
 
 export function bindAssetUI(callbacks = {}) {
   refreshWorkspace = callbacks.refreshWorkspace || refreshWorkspace;
+  refreshContinuity = callbacks.refreshContinuity || refreshContinuity;
   activateAssetEditor = callbacks.activateAssetEditor || activateAssetEditor;
   $("#asset-create").addEventListener("click", () => newAsset($("#library-create-kind").value));
   $("#asset-package-import-open").addEventListener("click", openPackageDialog);
@@ -81,9 +99,17 @@ export function bindAssetUI(callbacks = {}) {
   $("#asset-package-preview").addEventListener("click", previewPackage);
   $("#asset-package-apply").addEventListener("click", applyPackage);
   $("#asset-form").addEventListener("submit", saveAsset);
-  $("#asset-form").addEventListener("input", markAssetDirty);
+  $("#asset-form").addEventListener("input", (event) => {
+    if (event.target.closest(".asset-relation-picker")) return;
+    markAssetDirty();
+  });
   $$("[data-asset-mode]").forEach((button) => {
     button.addEventListener("click", () => setMode(button.dataset.assetMode));
+    button.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault();
+      setMode(button.dataset.assetMode === "raw" ? "structured" : "raw");
+    });
   });
 }
 
@@ -98,7 +124,10 @@ export async function openStructuredAsset(summary, pushHistory = false) {
   if (state.assets.dirty && !window.confirm("当前资料尚未保存，仍要离开吗？")) return;
   state.dirty = false;
   try {
-    const result = await api(`/api/assets/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`);
+    const [result] = await Promise.all([
+      api(`/api/assets/${encodeURIComponent(kind)}/${encodeURIComponent(id)}`),
+      loadAssetIndex(),
+    ]);
     state.assets.kind = kind;
     state.assets.selected = { kind, id, path: summary.path || "" };
     state.assets.draft = { ...(result.data || result), isNew: false };
@@ -116,7 +145,7 @@ export async function openStructuredAsset(summary, pushHistory = false) {
   }
 }
 
-function newAsset(kind) {
+async function newAsset(kind) {
   if (!kindScopes[kind]) return;
   if (state.assets.dirty && !window.confirm("当前资料尚未保存，仍要新建吗？")) return;
   state.assets.kind = kind;
@@ -136,6 +165,7 @@ function newAsset(kind) {
   state.assets.mode = "structured";
   state.assets.dirty = false;
   $("#asset-form-status").textContent = "";
+  await loadAssetIndex();
   renderAssetEditor();
   activateAssetEditor(state.assets.draft, { scope: kindScopes[kind], pushHistory: true });
   syncExportButton();
@@ -155,38 +185,71 @@ function renderAssetEditor() {
   $("#asset-editor-kind").textContent = kindLabels[draft.kind] || draft.kind;
   $("#asset-editor-title").textContent = draft.isNew ? `新建${kindLabels[draft.kind]}` : (draft.name || draft.id);
   $("#asset-editor-path").textContent = draft.path || "尚未保存";
-  $$("[data-asset-mode]").forEach((button) => button.classList.toggle("active", button.dataset.assetMode === state.assets.mode));
-  $("#asset-structured-fields").hidden = state.assets.mode !== "structured";
-  $("#asset-raw-field").hidden = state.assets.mode !== "raw";
+  $("#asset-raw-format").textContent = draft.kind === "progression" ? "YAML" : "TOML + Markdown";
   $("#asset-raw-text").value = draft.raw_text || "";
   renderStructuredFields(draft);
+  syncAssetMode();
 }
 
 function renderStructuredFields(draft) {
   const root = $("#asset-structured-fields");
   destroyMarkdownEditorsWithin(root);
   root.replaceChildren();
-  const id = addField(root, "id", "资料 ID", draft.id, "input", "只能使用字母、数字、下划线、点或短横线");
+  const basicSection = addFieldSection(root, "基本信息");
+  const id = addField(basicSection, "id", "资料 ID", draft.id, "input", "字母、数字、下划线、点或短横线");
   id.input.readOnly = !draft.isNew;
-  id.wrapper.classList.add("full-span");
   if (draft.kind === "progression") {
-    addField(root, "name", "体系名称", draft.data?.name || "", "input");
-    addChoiceField(root, "kind", "体系类型", draft.data?.kind || "ability", progressionKindChoices);
-    addField(root, "summary", "概要", draft.data?.summary || "", "textarea", "", true);
-    renderStages(root, draft.data?.stages || []);
-    addField(root, "body_markdown", "说明（可选 Markdown）", draft.body_markdown || "", "textarea", "", true);
+    addField(basicSection, "name", "体系名称", draft.data?.name || "", "input");
+    addChoiceField(basicSection, "kind", "体系类型", draft.data?.kind || "ability", progressionKindChoices);
+    addField(basicSection, "summary", "概要", draft.data?.summary || "", "textarea", "", true);
+    const stagesSection = addFieldSection(root, "阶段设置");
+    renderStages(stagesSection, draft.data?.stages || []);
+    const detailsSection = addFieldSection(root, "正文详情");
+    addField(detailsSection, "body_markdown", "说明", draft.body_markdown || "", "textarea", "", true);
     return;
   }
   const fields = draft.kind === "character" ? characterFields : worldFields;
-  fields.forEach(([key, label, type, hint]) => {
-    if (type === "select") {
-      addChoiceField(root, key, label, draft.data?.[key] || "organization", hint);
-      return;
-    }
-    const value = serializeField(key, draft.data?.[key]);
-    addField(root, key, label, value, type, hint, ["summary", "personality", "goal", "fear", "taboos", "appearance", "voice", "current_state", "related", "detail_refs"].includes(key));
+  const sections = draft.kind === "character" ? characterSections : worldSections;
+  sections.forEach(([sectionTitle, keys], sectionIndex) => {
+    const section = sectionIndex === 0 ? basicSection : addFieldSection(root, sectionTitle);
+    keys.forEach((key) => renderConfiguredField(section, fields, draft, key));
   });
-  addField(root, "body_markdown", "自由 Markdown 详情", draft.body_markdown || "", "textarea", "", true);
+  const relationsSection = addFieldSection(root, "关联资料");
+  addRelationField(relationsSection, draft.data?.related || [], draft.relation_view || {});
+  const detailsSection = addFieldSection(root, "正文详情");
+  addField(detailsSection, "body_markdown", "Markdown 详情", draft.body_markdown || "", "textarea", "", true);
+}
+
+function addFieldSection(root, title) {
+  const section = document.createElement("section");
+  section.className = "asset-field-section";
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  const fields = document.createElement("div");
+  fields.className = "asset-field-grid";
+  section.append(heading, fields);
+  root.append(section);
+  return fields;
+}
+
+function renderConfiguredField(root, definitions, draft, key) {
+  const definition = definitions.find(([candidate]) => candidate === key);
+  if (!definition) return;
+  const [, label, type, hint] = definition;
+  if (type === "select") {
+    addChoiceField(root, key, label, draft.data?.[key] || "organization", hint);
+    return;
+  }
+  const value = serializeField(key, draft.data?.[key]);
+  addField(
+    root,
+    key,
+    label,
+    value,
+    type,
+    hint,
+    ["summary", "personality", "goal", "fear", "taboos", "appearance", "voice", "current_state", "detail_refs"].includes(key),
+  );
 }
 
 function addField(root, key, label, value, type = "input", hint = "", fullSpan = false) {
@@ -219,6 +282,287 @@ function addField(root, key, label, value, type = "input", hint = "", fullSpan =
   }
   root.append(wrapper);
   return { wrapper, input };
+}
+
+async function loadAssetIndex(force = false) {
+  if (!force && state.assets.items.length) return state.assets.items;
+  try {
+    const result = await api("/api/assets");
+    state.assets.items = result.data?.assets || result.assets || [];
+  } catch (error) {
+    state.assets.items = [];
+    showToast(`关联资料读取失败：${error.message}`, true);
+  }
+  return state.assets.items;
+}
+
+function addRelationField(root, relations, relationView = {}) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "asset-field asset-relations-field full-span";
+  const heading = document.createElement("div");
+  heading.className = "asset-relation-heading";
+  const label = document.createElement("span");
+  label.textContent = "关系";
+  const count = document.createElement("small");
+  heading.append(label, count);
+
+  const picker = document.createElement("div");
+  picker.className = "asset-relation-picker";
+  const searchIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  searchIcon.classList.add("asset-relation-search-icon");
+  searchIcon.setAttribute("aria-hidden", "true");
+  const searchIconUse = document.createElementNS("http://www.w3.org/2000/svg", "use");
+  searchIconUse.setAttribute("href", "#icon-search");
+  searchIcon.append(searchIconUse);
+  const search = document.createElement("input");
+  search.type = "search";
+  search.placeholder = "搜索名称、ID、类型或标签";
+  search.autocomplete = "off";
+  search.spellcheck = false;
+  search.setAttribute("role", "combobox");
+  search.setAttribute("aria-autocomplete", "list");
+  search.setAttribute("aria-expanded", "false");
+  const options = document.createElement("div");
+  options.className = "asset-relation-options";
+  options.setAttribute("role", "listbox");
+  options.hidden = true;
+  picker.append(searchIcon, search, options);
+
+  const list = document.createElement("div");
+  list.className = "asset-relation-list";
+  list.dataset.assetRelations = "true";
+  const registered = Array.isArray(relationView.registered) ? relationView.registered : [];
+  const incoming = Array.isArray(relationView.incoming) ? relationView.incoming : [];
+  const registeredList = document.createElement("div");
+  registeredList.className = "asset-relation-reference-list";
+  const incomingList = document.createElement("div");
+  incomingList.className = "asset-relation-reference-list";
+
+  const syncCount = () => {
+    const value = list.querySelectorAll(".asset-relation-row").length;
+    count.textContent = `资料字段 ${value} · 正文注册 ${registered.length} · 被引用 ${incoming.length}`;
+    list.classList.toggle("empty", value === 0);
+  };
+  const renderOptions = () => {
+    const query = search.value.trim().toLocaleLowerCase();
+    const selected = new Set(Array.from(
+      list.querySelectorAll(".asset-relation-row"),
+      (row) => findAssetReference(row.dataset.relationTarget)?.id || row.dataset.relationTarget,
+    ));
+    const current = state.assets.draft;
+    const matches = state.assets.items
+      .filter((item) => !(item.kind === current?.kind && item.id === current?.id))
+      .filter((item) => !selected.has(item.id))
+      .filter((item) => !query || assetSearchText(item).includes(query))
+      .sort((left, right) => assetSearchScore(left, query) - assetSearchScore(right, query)
+        || String(left.name || left.id).localeCompare(String(right.name || right.id), "zh-CN"))
+      .slice(0, 12);
+    options.replaceChildren();
+    if (!matches.length) {
+      const empty = document.createElement("p");
+      empty.className = "asset-relation-option-empty";
+      empty.textContent = state.assets.items.length ? "没有匹配的资料" : "资料索引为空";
+      options.append(empty);
+    }
+    matches.forEach((item) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.className = "asset-relation-option";
+      option.setAttribute("role", "option");
+      const title = document.createElement("strong");
+      title.textContent = item.name || item.id;
+      const meta = document.createElement("span");
+      meta.textContent = relationAssetMeta(item);
+      option.append(title, meta);
+      const choose = (event) => {
+        if (event.type === "pointerdown") {
+          if (event.button !== 0) return;
+          event.preventDefault();
+        }
+        const row = createRelationRow({ target: item.id, kind: "related" }, syncCount);
+        list.append(row);
+        search.value = "";
+        markAssetDirty();
+        syncCount();
+        search.focus({ preventScroll: true });
+        options.hidden = true;
+        search.setAttribute("aria-expanded", "false");
+        row.scrollIntoView({ block: "nearest" });
+        showToast(`已添加${item.name || item.id}，保存后生效`);
+      };
+      option.addEventListener("pointerdown", choose);
+      option.addEventListener("click", (event) => {
+        if (event.detail === 0) choose(event);
+      });
+      options.append(option);
+    });
+    options.hidden = false;
+    search.setAttribute("aria-expanded", "true");
+  };
+  search.addEventListener("focus", renderOptions);
+  search.addEventListener("input", renderOptions);
+  search.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      options.querySelector(".asset-relation-option")?.focus();
+    } else if (event.key === "Escape") {
+      options.hidden = true;
+      search.setAttribute("aria-expanded", "false");
+    }
+  });
+  picker.addEventListener("focusout", () => {
+    window.setTimeout(() => {
+      if (picker.contains(document.activeElement)) return;
+      options.hidden = true;
+      search.setAttribute("aria-expanded", "false");
+    }, 0);
+  });
+
+  (Array.isArray(relations) ? relations : []).forEach((relation) => {
+    const normalized = normalizeRelation(relation);
+    if (normalized.target) list.append(createRelationRow(normalized, syncCount));
+  });
+  registered.forEach((relation) => {
+    registeredList.append(createRelationReferenceRow(relation));
+  });
+  incoming.forEach((relation) => {
+    incomingList.append(createRelationReferenceRow(relation));
+  });
+  wrapper.append(heading, picker);
+  wrapper.append(createRelationGroup("资料字段", list));
+  if (registered.length) wrapper.append(createRelationGroup("正文注册", registeredList));
+  if (incoming.length) wrapper.append(createRelationGroup("被其他资料引用", incomingList));
+  root.append(wrapper);
+  syncCount();
+}
+
+function createRelationGroup(title, content) {
+  const group = document.createElement("section");
+  group.className = "asset-relation-group";
+  const heading = document.createElement("h4");
+  heading.textContent = title;
+  group.append(heading, content);
+  return group;
+}
+
+function createRelationReferenceRow(relation) {
+  const row = document.createElement("div");
+  row.className = "asset-relation-reference-row";
+  const identity = createRelationIdentity(relation.target, relation.name);
+  const detail = document.createElement("div");
+  detail.className = "asset-relation-reference-detail";
+  const kind = document.createElement("strong");
+  kind.textContent = relation.kind || "related";
+  const note = document.createElement("span");
+  note.textContent = relation.note || "关联";
+  const source = document.createElement("small");
+  source.textContent = relation.origin === "canonical" ? "资料字段" : (relation.source_label || "正文注册");
+  detail.append(kind, note, source);
+  row.append(identity, detail);
+  return row;
+}
+
+function createRelationIdentity(target, fallbackName = "") {
+  const item = findAssetReference(target);
+  const identity = document.createElement(item ? "button" : "div");
+  identity.className = "asset-relation-identity";
+  if (item) {
+    identity.type = "button";
+    identity.title = `打开${item.name || item.id}`;
+    identity.addEventListener("click", () => openStructuredAsset({
+      asset_kind: item.kind,
+      asset_id: item.id,
+      path: item.path,
+      scope: kindScopes[item.kind],
+    }, true));
+  }
+  const name = document.createElement("strong");
+  name.textContent = item?.name || fallbackName || target;
+  const meta = document.createElement("span");
+  meta.textContent = item ? relationAssetMeta(item) : `未匹配 · ${target}`;
+  identity.append(name, meta);
+  return identity;
+}
+
+function createRelationRow(relation, syncCount) {
+  const row = document.createElement("div");
+  row.className = "asset-relation-row";
+  row.dataset.relationTarget = relation.target;
+  const identity = createRelationIdentity(relation.target);
+  const relationName = identity.querySelector("strong")?.textContent || relation.target;
+
+  const kind = relationInput("关系", relation.kind || "related", "例如：盟友、隶属、使用", "kind");
+  const note = relationInput("备注", relation.note || relation.description || "", "可选", "note");
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "icon-button asset-relation-remove";
+  remove.setAttribute("aria-label", `移除与${relationName}的关联`);
+  remove.title = "移除关联";
+  remove.textContent = "×";
+  remove.addEventListener("click", () => {
+    row.remove();
+    markAssetDirty();
+    syncCount();
+  });
+  row.append(identity, kind, note, remove);
+  return row;
+}
+
+function relationInput(label, value, placeholder, key) {
+  const wrapper = document.createElement("label");
+  wrapper.className = `asset-relation-property asset-relation-${key}`;
+  const title = document.createElement("span");
+  title.textContent = label;
+  const input = document.createElement("input");
+  input.dataset.relationField = key;
+  input.value = value;
+  input.placeholder = placeholder;
+  wrapper.append(title, input);
+  return wrapper;
+}
+
+function normalizeRelation(value) {
+  if (typeof value === "string") return { target: value.trim(), kind: "related" };
+  if (!value || typeof value !== "object") return { target: "", kind: "related" };
+  return {
+    target: String(value.target || "").trim(),
+    kind: String(value.kind || "related").trim(),
+    note: String(value.note || value.description || "").trim(),
+  };
+}
+
+function findAssetReference(target) {
+  const needle = String(target || "").trim().toLocaleLowerCase();
+  return state.assets.items.find((item) => item.id.toLocaleLowerCase() === needle)
+    || state.assets.items.find((item) => String(item.name || "").toLocaleLowerCase() === needle)
+    || state.assets.items.find((item) => (item.aliases || [])
+      .some((alias) => String(alias).toLocaleLowerCase() === needle));
+}
+
+function assetSearchText(item) {
+  return [
+    item.name,
+    item.id,
+    assetTypeLabels[item.kind],
+    item.asset_type,
+    item.summary,
+    ...(item.aliases || []),
+    ...(item.tags || []),
+  ].join(" ").toLocaleLowerCase();
+}
+
+function assetSearchScore(item, query) {
+  if (!query) return 3;
+  const name = String(item.name || "").toLocaleLowerCase();
+  const id = String(item.id || "").toLocaleLowerCase();
+  if (name === query || id === query) return 0;
+  if (name.startsWith(query) || id.startsWith(query)) return 1;
+  return 2;
+}
+
+function relationAssetMeta(item) {
+  const type = assetTypeLabels[item.kind] || item.kind;
+  return [type, item.asset_type, item.id].filter(Boolean).join(" · ");
 }
 
 function markAssetDirty() {
@@ -296,12 +640,38 @@ function stageRow(stage) {
 }
 
 function setMode(mode) {
+  const nextMode = mode === "raw" ? "raw" : "structured";
+  if (nextMode === state.assets.mode) return;
   if (mode === "raw" && state.assets.draft?.isNew) {
     showToast("请先用字段模式创建资料，再切换原文", true);
     return;
   }
-  state.assets.mode = mode === "raw" ? "raw" : "structured";
-  renderAssetEditor();
+  if (state.assets.dirty) {
+    showToast("请先保存当前更改，再切换编辑方式", true);
+    $("#asset-save").focus();
+    return;
+  }
+  state.assets.mode = nextMode;
+  syncAssetMode();
+  if (nextMode === "raw") {
+    const source = $("#asset-raw-text");
+    source.focus();
+    source.setSelectionRange(0, 0);
+    source.scrollTop = 0;
+  } else {
+    $("#asset-structured-fields").querySelector("input, textarea, select")?.focus();
+  }
+}
+
+function syncAssetMode() {
+  $$("[data-asset-mode]").forEach((button) => {
+    const active = button.dataset.assetMode === state.assets.mode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  $("#asset-structured-fields").hidden = state.assets.mode !== "structured";
+  $("#asset-raw-field").hidden = state.assets.mode !== "raw";
 }
 
 async function saveAsset(event) {
@@ -334,6 +704,8 @@ async function saveAsset(event) {
     $("#asset-form-status").textContent = "已保存并同步运行态";
     showToast("资料已保存");
     await refreshWorkspace();
+    await loadAssetIndex(true);
+    if (state.continuity) await refreshContinuity();
     activateAssetEditor(state.assets.draft, { scope: kindScopes[saved.kind], pushHistory: false });
     renderAssetEditor();
     syncExportButton();
@@ -371,8 +743,17 @@ function collectData(kind) {
     if (key === "body_markdown") return;
     data[key] = ["aliases", "taboos", "tags", "detail_refs"].includes(key)
       ? splitLines(input.value)
-      : key === "related" ? parseRelations(input.value) : input.value.trim();
+      : input.value.trim();
   });
+  data.related = $$(".asset-relation-row").map((row) => {
+    const kindValue = row.querySelector('[data-relation-field="kind"]')?.value.trim() || "related";
+    const note = row.querySelector('[data-relation-field="note"]')?.value.trim() || "";
+    return {
+      target: row.dataset.relationTarget,
+      kind: kindValue,
+      ...(note ? { note } : {}),
+    };
+  }).filter((item) => item.target);
   return data;
 }
 
@@ -383,19 +764,15 @@ function collectField(key) {
 
 function serializeField(key, value) {
   if (["aliases", "taboos", "tags", "detail_refs"].includes(key)) return (value || []).join("\n");
-  if (key === "related") return (value || []).map((item) => [item.target, item.kind, item.note].filter(Boolean).join("|" )).join("\n");
+  if (key === "related") return (value || []).map((item) => {
+    const relation = normalizeRelation(item);
+    return [relation.target, relation.kind, relation.note].filter(Boolean).join("|");
+  }).join("\n");
   return value == null ? "" : String(value);
 }
 
 function splitLines(value) {
   return String(value || "").split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
-}
-
-function parseRelations(value) {
-  return splitLines(value).map((line) => {
-    const [target, kind, note] = line.split("|").map((item) => item.trim());
-    return { target, kind: kind || "related", ...(note ? { note } : {}) };
-  }).filter((item) => item.target);
 }
 
 function openPackageDialog() {

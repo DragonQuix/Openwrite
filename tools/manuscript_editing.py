@@ -120,7 +120,7 @@ class ManuscriptVersionStore:
             raise ManuscriptEditingError("恢复版本需要显式确认", code="CONFIRMATION_REQUIRED")
         path = self.chapter_path(chapter_id)
         current = path.read_text(encoding="utf-8")
-        if current_revision != self.fingerprint(current):
+        if not self.revision_matches(current_revision, self.fingerprint(current)):
             raise ManuscriptEditingError("当前正文已变化", code="STALE_REVISION")
         version, content = self.load(chapter_id, version_id)
         self.checkpoint(chapter_id, reason="restore", label=f"恢复前: {version_id}")
@@ -146,6 +146,19 @@ class ManuscriptVersionStore:
     @staticmethod
     def fingerprint(content: str) -> str:
         return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def revision_matches(provided: str, current: str) -> bool:
+        supplied = str(provided or "").strip().casefold()
+        canonical = str(current or "").strip().casefold()
+        if supplied == canonical:
+            return True
+        supplied_hash = supplied.removeprefix("sha256:")
+        current_hash = canonical.removeprefix("sha256:")
+        return bool(
+            re.fullmatch(r"[0-9a-f]{16}", supplied_hash)
+            and current_hash.startswith(supplied_hash)
+        )
 
     @staticmethod
     def _novel_id(value: str) -> str:
@@ -202,7 +215,8 @@ class ManuscriptAnnotationStore:
         note: str,
     ) -> ManuscriptAnnotationV1:
         content = self.versions.chapter_path(chapter_id).read_text(encoding="utf-8")
-        if source_revision != self.versions.fingerprint(content):
+        current_revision = self.versions.fingerprint(content)
+        if not self.versions.revision_matches(source_revision, current_revision):
             raise ManuscriptEditingError("正文已变化，请重新选择批注位置", code="STALE_REVISION")
         start = max(0, int(start_hint))
         end = max(start, int(end_hint))
@@ -214,7 +228,7 @@ class ManuscriptAnnotationStore:
         annotation = ManuscriptAnnotationV1(
             annotation_id=f"ann_{uuid4().hex[:16]}",
             chapter_id=chapter_id,
-            source_revision=source_revision,
+            source_revision=current_revision,
             quote=clean_quote,
             start_hint=start,
             end_hint=end,

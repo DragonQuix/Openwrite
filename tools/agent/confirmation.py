@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -50,6 +51,7 @@ _NEGATIVE_MARKERS = (
 
 _EXPLICIT_MARKERS = (
     "确认应用",
+    "确认执行",
     "确认修改",
     "确认大纲",
     "确认关系",
@@ -105,6 +107,21 @@ _SHORT_CONFIRMATIONS = {
     "lgtm",
 }
 
+_CONFIRMATION_SCOPE_MARKERS = {
+    "apply_reference_adoption": ("参考", "adoption"),
+    "confirm_character_draft": ("角色", "character"),
+    "confirm_foundation": ("基础设定", "foundation"),
+    "confirm_outline_edits": ("大纲", "outline"),
+    "edit_outline_structure": ("大纲", "结构", "outline"),
+    "edit_project_document": ("文档", "资料", "文件", "document"),
+    "edit_world_relation": ("关系", "relation"),
+    "edit_world_relations": ("关系", "relation"),
+    "manage_manuscript_versions": ("版本", "恢复", "正文", "restore"),
+    "promote_source_pack": ("来源包", "晋升", "source pack"),
+    "update_truth_file": ("真相", "truth"),
+    "update_chapter_intervention": ("干预", "intervention"),
+}
+
 
 def is_explicit_mutation_confirmation(text: str) -> bool:
     """Return whether one user turn explicitly authorizes applying a preview."""
@@ -119,6 +136,27 @@ def is_explicit_mutation_confirmation(text: str) -> bool:
     if normalized in _SHORT_CONFIRMATIONS:
         return True
     return any(marker in normalized for marker in _EXPLICIT_MARKERS)
+
+
+def is_explicit_confirmation_for_tool(text: str, tool_name: str) -> bool:
+    """Interpret mixed confirmations without leaking consent across tool scopes."""
+    raw = str(text or "").strip()
+    markers = _CONFIRMATION_SCOPE_MARKERS.get(tool_name, ())
+    if not raw or not markers:
+        return is_explicit_mutation_confirmation(raw)
+    clauses = [
+        clause.strip()
+        for clause in re.split(r"[。！？；;，,\n]+", raw)
+        if clause.strip()
+    ]
+    scoped = [
+        clause
+        for clause in clauses
+        if any(marker in clause.casefold() for marker in markers)
+    ]
+    if not scoped:
+        return is_explicit_mutation_confirmation(raw)
+    return any(is_explicit_mutation_confirmation(clause) for clause in scoped)
 
 
 def is_confirmation_policy_block(payload: Mapping[str, Any] | None) -> bool:
@@ -250,7 +288,7 @@ def _guard_executor(
             "confirm_outline_edits",
             "promote_source_pack",
         } or bool(payload.get("confirm"))
-        if not applying or is_explicit_mutation_confirmation(instruction()):
+        if not applying or is_explicit_confirmation_for_tool(instruction(), name):
             return executor(payload)
         return {
             "action": name,

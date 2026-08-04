@@ -262,6 +262,30 @@ def test_goethe_handoff_shortcut_persists_web_turn(tmp_path: Path):
     assert "foundation" in transcript
 
 
+def test_goethe_explicit_handoff_tool_name_runs_react(tmp_path: Path):
+    from tools.goethe import GoetheChatAgent
+
+    react_agent = FakeReActAgent(responses=["工具测试完成"])
+    agent = GoetheChatAgent(
+        project_root=tmp_path,
+        novel_id="demo",
+        react_agent=react_agent,
+        tool_layer_factory=lambda *args: {
+            "action_tool_executors": {
+                "prepare_dante_handoff": lambda args: {
+                    "ok": False,
+                    "missing_items": ["foundation"],
+                }
+            }
+        },
+    )
+
+    response = agent.respond("请实际调用 get_goethe_handoff 做只读工具测试")
+
+    assert response == "工具测试完成"
+    assert react_agent.instructions == ["请实际调用 get_goethe_handoff 做只读工具测试"]
+
+
 def test_goethe_pending_confirmation_with_handoff_text_runs_react(tmp_path: Path):
     from tools.goethe import GoetheChatAgent
 
@@ -431,6 +455,38 @@ def test_dante_shared_confirmation_guard_allows_preview_then_explicit_apply(
     )
     assert applied["ok"] is True
     assert calls[-1] == {"confirm": True}
+
+
+def test_shared_confirmation_guard_scopes_mixed_document_and_relation_intent(
+    tmp_path: Path,
+):
+    from tools.goethe import GoetheChatAgent
+
+    calls: list[str] = []
+    agent = GoetheChatAgent(
+        project_root=tmp_path,
+        novel_id="demo",
+        tool_layer_factory=lambda *args: {
+            "tool_executors": {
+                "edit_project_document": lambda args: calls.append("document")
+                or {"ok": True},
+                "edit_world_relation": lambda args: calls.append("relation")
+                or {"ok": True},
+            },
+            "action_tool_executors": {},
+        },
+    )
+    agent._active_user_instruction = (
+        "确认应用上一轮文档编辑预览。关系只重新预览，不要在本轮确认。"
+    )
+    guarded = agent._combined_tool_executors()
+
+    document = guarded["edit_project_document"]({"confirm": True})
+    relation = guarded["edit_world_relation"]({"confirm": True})
+
+    assert document["ok"] is True
+    assert relation["error"] == "explicit_user_confirmation_required"
+    assert calls == ["document"]
 
 
 @pytest.mark.parametrize("command", ["quit", "exit", "q", "退出"])
@@ -798,6 +854,7 @@ def test_confirmation_markers_accept_short_and_english_forms():
     assert is_explicit_mutation_confirmation("yes")
     assert is_explicit_mutation_confirmation("ok")
     assert is_explicit_mutation_confirmation("不要再确认，直接应用")
+    assert is_explicit_mutation_confirmation("确认执行关系 revision 冲突测试")
     assert not is_explicit_mutation_confirmation("先不要改")
 
 

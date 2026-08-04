@@ -753,7 +753,9 @@ OPENWRITE_TOOLS = [
         name="manage_annotations",
         description=(
             "列出、创建或完成正文批注。创建时必须携带来源 revision、原文 quote 与"
-            "Python 字符位置；正文变化后锚点会明确标为 relocated 或 detached。"
+            "Python 字符位置；revision 优先使用 read_project_document 返回的 "
+            "source_revision，兼容其 16 位 revision；正文变化后锚点会明确标为 "
+            "relocated 或 detached。"
         ),
         parameters={
             "type": "object",
@@ -887,7 +889,7 @@ OPENWRITE_TOOLS = [
     ToolDefinition(
         name="read_project_document",
         description=(
-            "读取小说项目内的源资产或正文文档，返回 revision 与内容。"
+            "读取小说项目内的源资产或正文文档，返回短 revision、完整 source_revision 与内容。"
             "支持 src、data/manuscript、data/foreshadowing 下的文件。"
         ),
         parameters={

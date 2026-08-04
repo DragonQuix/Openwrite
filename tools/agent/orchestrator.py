@@ -87,8 +87,7 @@ class OpenWriteOrchestrator:
         prompt_sections = context.to_prompt_sections()
         core_documents = dict(getattr(context, "core_documents", {}) or {})
         setting_documents = {
-            "world_rules": prompt_sections.get("设定")
-            or prompt_sections.get("世界观", "")
+            "world_rules": prompt_sections.get("设定") or prompt_sections.get("世界观", "")
         }
         continuity_documents = {
             "current_state": getattr(context, "current_state", ""),
@@ -104,12 +103,8 @@ class OpenWriteOrchestrator:
             "author_intent": getattr(context, "author_intent", ""),
             "creative_focus": getattr(context, "creative_focus", ""),
             "core_documents": core_documents,
-            "story_background": self.story_planning_store.read_story_document(
-                "background"
-            ),
-            "foundation": self.story_planning_store.read_story_document(
-                "foundation"
-            ),
+            "story_background": self.story_planning_store.read_story_document("background"),
+            "foundation": self.story_planning_store.read_story_document("foundation"),
             "previous_chapter_content": self._read_previous_chapter_content(chapter_id),
             "style_documents": self._build_style_documents(context, prompt_sections),
             "character_documents": self._build_character_documents(context),
@@ -521,9 +516,8 @@ class OpenWriteOrchestrator:
         normalized = re.sub(r"\s+", "", text).lower()
         if normalized in {"查看项目状态", "查看状态", "查看当前状态", "status"}:
             return True
-        return (
-            ("状态" in text or "进度" in text)
-            and any(token in text for token in ("查看", "当前", "项目", "现在", "目前"))
+        return ("状态" in text or "进度" in text) and any(
+            token in text for token in ("查看", "当前", "项目", "现在", "目前")
         )
 
     def _handle_status_request(self) -> OrchestratorResult:
@@ -869,9 +863,9 @@ class OpenWriteOrchestrator:
         write = r"(?:写|开始写|帮我写|请写|我要写)"
         negation = r"(?:不要|别|先别|先不要)"
         return bool(
-            re.search(fr"{negation}.{{0,6}}{write}.{{0,12}}{chapter}", compact)
-            or re.search(fr"{write}.{{0,12}}{chapter}.{{0,6}}{negation}", compact)
-            or re.search(fr"{chapter}.{{0,12}}{negation}.{{0,6}}{write}", compact)
+            re.search(rf"{negation}.{{0,6}}{write}.{{0,12}}{chapter}", compact)
+            or re.search(rf"{write}.{{0,12}}{chapter}.{{0,6}}{negation}", compact)
+            or re.search(rf"{chapter}.{{0,12}}{negation}.{{0,6}}{write}", compact)
         )
 
     def _looks_like_foundation_confirmation(self, text: str) -> bool:
@@ -880,7 +874,9 @@ class OpenWriteOrchestrator:
         ready_terms = ("准备好了", "已准备好", "ready", "可以开始", "开始", "start")
         outline_terms = ("outline", "大纲", "提纲")
         return (
-            any(term in lowered for term in ("基础设定准备好了", "基础设定好了", "foundation ready"))
+            any(
+                term in lowered for term in ("基础设定准备好了", "基础设定好了", "foundation ready")
+            )
             or (
                 any(term in text for term in foundation_terms)
                 and any(term in lowered for term in ready_terms)
@@ -909,15 +905,17 @@ class OpenWriteOrchestrator:
             r"(?:确认|确定|同意).*(?:大纲|范围|提纲)",
             r"outline.*(?:confirm|confirmed|ready|go ahead)",
         )
-        return any(re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in positive_patterns)
+        return any(
+            re.search(pattern, lowered, flags=re.IGNORECASE) for pattern in positive_patterns
+        )
 
     def _is_negated_outline_confirmation(self, text: str) -> bool:
         compact = re.sub(r"\s+", "", text.lower())
         outline = r"(?:大纲|范围|提纲|outline)"
         negation = r"(?:不要|别|先别|先不要|先不|不确认|不同意|不认可|不接受)"
         return bool(
-            re.search(fr"{negation}.{{0,12}}{outline}", compact)
-            or re.search(fr"{outline}.{{0,12}}{negation}", compact)
+            re.search(rf"{negation}.{{0,12}}{outline}", compact)
+            or re.search(rf"{outline}.{{0,12}}{negation}", compact)
         )
 
     def _looks_like_outline_generation_request(
@@ -926,6 +924,8 @@ class OpenWriteOrchestrator:
         *,
         allow_confirmation: bool = False,
     ) -> bool:
+        if self._is_negated_outline_confirmation(text):
+            return False
         if not allow_confirmation and any(
             token in text for token in ("确认", "确认好了", "确认通过", "可写")
         ):
@@ -944,18 +944,17 @@ class OpenWriteOrchestrator:
         if self.state.pending_confirmation != "ideation_summary":
             return False
         lowered = text.lower()
-        return (
-            any(token in lowered for token in ("汇总", "总结", "想法", "idea", "灵感"))
-            and any(
-                token in lowered
-                for token in ("确认", "可以", "没问题", "同意", "行", "ok", "okay", "继续")
-            )
+        return any(token in lowered for token in ("汇总", "总结", "想法", "idea", "灵感")) and any(
+            token in lowered
+            for token in ("确认", "可以", "没问题", "同意", "行", "ok", "okay", "继续")
         )
 
     def _looks_like_character_creation_request(self, text: str) -> bool:
         if "角色" not in text:
             return False
-        return any(token in text for token in ("创建", "生成", "设计", "补一个", "增加一个", "来个"))
+        return any(
+            token in text for token in ("创建", "生成", "设计", "补一个", "增加一个", "来个")
+        )
 
     def _extract_target_words(self, text: str) -> int:
         match = re.search(r"(?:字数|约|控制在)\s*(\d{3,5})", text)
@@ -966,7 +965,9 @@ class OpenWriteOrchestrator:
         except ValueError:
             return 0
 
-    def _get_orchestrator_executor(self, tool_name: str) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    def _get_orchestrator_executor(
+        self, tool_name: str
+    ) -> Callable[[dict[str, Any]], dict[str, Any]]:
         if tool_name not in ORCHESTRATOR_TOOLKIT:
             raise KeyError(f"Tool {tool_name} is not part of ORCHESTRATOR_TOOLKIT")
         if tool_name not in self.tool_executors:
@@ -999,9 +1000,7 @@ class OpenWriteOrchestrator:
         self, context: Any, prompt_sections: dict[str, str]
     ) -> dict[str, str]:
         summary = ""
-        if getattr(context, "style_profile", None) and hasattr(
-            context.style_profile, "to_summary"
-        ):
+        if getattr(context, "style_profile", None) and hasattr(context.style_profile, "to_summary"):
             summary = context.style_profile.to_summary(max_chars=1200)
         docs = {
             "summary": summary,
@@ -1037,9 +1036,7 @@ class OpenWriteOrchestrator:
 
     def _build_character_documents(self, context: Any) -> dict[str, str]:
         documents: dict[str, str] = {}
-        for index, character in enumerate(
-            getattr(context, "active_characters", []), start=1
-        ):
+        for index, character in enumerate(getattr(context, "active_characters", []), start=1):
             name = str(
                 getattr(character, "name", "")
                 or getattr(character, "character_id", "")
@@ -1057,8 +1054,7 @@ class OpenWriteOrchestrator:
         self, context: Any, prompt_sections: dict[str, str]
     ) -> dict[str, str]:
         return {
-            "world_rules": prompt_sections.get("设定")
-            or prompt_sections.get("世界观", ""),
+            "world_rules": prompt_sections.get("设定") or prompt_sections.get("世界观", ""),
             "chapter_goals": prompt_sections.get("本章目标", ""),
             "current_state": getattr(context, "current_state", ""),
             "pending_hooks": getattr(context, "pending_hooks", ""),
@@ -1162,11 +1158,7 @@ class OpenWriteOrchestrator:
 - 输出 2-3 篇，每篇 2-3 节，每节 2-3 章
 - 采用滚动大纲思路，优先保证前半段可写
 - 保持中文网文风格，信息具体，不写空泛套话"""
-        user_prompt = (
-            f"项目名：{story_title}\n"
-            f"用户请求：{request_text}\n\n"
-            f"已有设定：\n{context}"
-        )
+        user_prompt = f"项目名：{story_title}\n用户请求：{request_text}\n\n已有设定：\n{context}"
         return self._strip_code_fences(
             self._chat_text(system_prompt, user_prompt, temperature=0.4, max_tokens=6000)
         )
@@ -1220,11 +1212,7 @@ class OpenWriteOrchestrator:
 - 如果用户没有提供名字，请自行起一个贴合题材的中文名
 - 内容要和已有世界观、主角气质、冲突方向相容
 - 如果用户提到关系约束，必须写进正文和 related 关系里"""
-        user_prompt = (
-            f"项目名：{story_title}\n"
-            f"角色需求：{request_text}\n\n"
-            f"已有设定：\n{context}"
-        )
+        user_prompt = f"项目名：{story_title}\n角色需求：{request_text}\n\n已有设定：\n{context}"
         return self._strip_code_fences(
             self._chat_text(system_prompt, user_prompt, temperature=0.7, max_tokens=4000)
         )
@@ -1323,15 +1311,9 @@ class OpenWriteOrchestrator:
                 title = str(item.get("title") or "").strip()
                 asset_id = str(item.get("asset_id") or "").strip()
                 summary = " ".join(str(item.get("summary") or "").split())[:120]
-                identity = (
-                    f"{title} ({asset_id})"
-                    if asset_id and asset_id != title
-                    else title
-                )
+                identity = f"{title} ({asset_id})" if asset_id and asset_id != title else title
                 if identity:
-                    lines.append(
-                        f"- {identity}: {summary}" if summary else f"- {identity}"
-                    )
+                    lines.append(f"- {identity}: {summary}" if summary else f"- {identity}")
             rendered = "\n".join(lines)
             if rendered:
                 parts.append(f"## {label}\n{rendered[:2400]}")

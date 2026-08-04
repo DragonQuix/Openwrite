@@ -35,6 +35,12 @@ ANNOTATION_RE = re.compile(
     rf"[：:]\s*(?P<old>.*?)\s*(?:->|→|⇒)\s*(?P<new>.*?)\s*\*\*\s*$",
     re.IGNORECASE,
 )
+RELATION_ANNOTATION_RE = re.compile(
+    r"^\s*//\*\*\s*"
+    r"(?P<source>[^~～:：\r\n]+?)\s*[~～]\s*"
+    r"(?P<target>[^:：\r\n]+?)\s*"
+    r"[：:]\s*(?P<description>.+?)\s*\*\*\s*$"
+)
 
 
 @dataclass(frozen=True)
@@ -62,6 +68,72 @@ class CharacterStateRecord:
             source_path=str(value.get("source_path") or ""),
             line=int(value.get("line") or 0),
         )
+
+
+@dataclass(frozen=True)
+class RelationAnnotationRecord:
+    source: str
+    target: str
+    description: str
+    source_path: str
+    line: int
+
+
+def parse_relation_annotations(
+    text: str,
+    *,
+    source_path: str,
+) -> tuple[list[RelationAnnotationRecord], list[dict[str, Any]]]:
+    """Parse explicit ``//**A~B:关系**`` registrations outside code fences."""
+    records: list[RelationAnnotationRecord] = []
+    diagnostics: list[dict[str, Any]] = []
+    fence_marker = ""
+    for line_number, line in enumerate(str(text or "").splitlines(), start=1):
+        fence = FENCE_RE.match(line)
+        if fence:
+            marker = fence.group(1)[0]
+            if not fence_marker:
+                fence_marker = marker
+            elif fence_marker == marker:
+                fence_marker = ""
+            continue
+        if fence_marker or "//**" not in line:
+            continue
+        match = RELATION_ANNOTATION_RE.match(line)
+        if not match:
+            if "~" in line or "～" in line:
+                diagnostics.append(
+                    {
+                        "code": "invalid_relation_annotation",
+                        "path": source_path,
+                        "line": line_number,
+                        "message": "关系批注格式无效，应为 //**A~B:具体关系**",
+                    }
+                )
+            continue
+        source = match.group("source").strip()
+        target = match.group("target").strip()
+        description = match.group("description").strip()
+        if not source or not target or not description:
+            diagnostics.append(
+                {
+                    "code": "incomplete_relation_annotation",
+                    "path": source_path,
+                    "line": line_number,
+                    "message": "关系源、目标和具体关系均不能为空",
+                }
+            )
+            continue
+        records.append(
+            RelationAnnotationRecord(
+                source=source,
+                target=target,
+                description=description,
+                source_path=source_path,
+                line=line_number,
+            )
+        )
+    return records, diagnostics
 
 
 def parse_character_state_annotations(
@@ -96,6 +168,8 @@ def parse_character_state_annotations(
                 current_chapter = scoped
 
         if "//**" not in line:
+            continue
+        if RELATION_ANNOTATION_RE.match(line) or "~" in line or "～" in line:
             continue
         match = ANNOTATION_RE.match(line)
         if not match:
@@ -151,11 +225,11 @@ def parse_character_state_annotations(
 
 
 def strip_character_state_annotations(text: str) -> str:
-    """Remove valid inline state metadata from prose sent to readers or models."""
+    """Remove valid inline state and relation metadata from reader-facing prose."""
     return "".join(
         line
         for line in str(text or "").splitlines(keepends=True)
-        if not ANNOTATION_RE.match(line.rstrip("\r\n"))
+        if not _is_inline_metadata(line.rstrip("\r\n"))
     )
 
 
@@ -164,12 +238,16 @@ def mask_character_state_annotations(text: str) -> str:
     masked: list[str] = []
     for line in str(text or "").splitlines(keepends=True):
         content = line.rstrip("\r\n")
-        if not ANNOTATION_RE.match(content):
+        if not _is_inline_metadata(content):
             masked.append(line)
             continue
         ending = line[len(content) :]
         masked.append(ending or "\n")
     return "".join(masked)
+
+
+def _is_inline_metadata(line: str) -> bool:
+    return bool(ANNOTATION_RE.match(line) or RELATION_ANNOTATION_RE.match(line))
 
 
 class CharacterStateIndex:

@@ -109,6 +109,28 @@ def test_annotations_relocate_only_on_one_exact_match_then_detach(tmp_path: Path
     assert detached.current_start is None and detached.current_end is None
 
 
+def test_annotations_accept_document_reader_short_revision(tmp_path: Path) -> None:
+    chapter = _project(tmp_path, "# 第一章\n\n甲乙丙，随后离开。\n")
+    versions = ManuscriptVersionStore(tmp_path, "demo")
+    annotations = ManuscriptAnnotationStore(tmp_path, "demo")
+    content = chapter.read_text(encoding="utf-8")
+    quote = "乙丙"
+    start = content.index(quote)
+    full_revision = versions.fingerprint(content)
+
+    annotation = annotations.create(
+        "ch_001",
+        source_revision=full_revision.removeprefix("sha256:")[:16],
+        quote=quote,
+        start_hint=start,
+        end_hint=start + len(quote),
+        note="短 revision 兼容测试",
+    )
+
+    assert annotation.source_revision == full_revision
+    assert annotations.list("ch_001")[0].anchor_state == "attached"
+
+
 def test_ai_revision_creates_recoverable_checkpoint_before_apply(tmp_path: Path) -> None:
     chapter = _project(tmp_path, "林舟推开钟楼的门。")
     original = chapter.read_text(encoding="utf-8")

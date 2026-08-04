@@ -37,9 +37,7 @@ def test_outline_writing_agents_share_parser_aligned_contract() -> None:
             assert field in prompt
 
 
-def test_outline_draft_generator_uses_shared_contract(
-    tmp_path, monkeypatch
-) -> None:
+def test_outline_draft_generator_uses_shared_contract(tmp_path, monkeypatch) -> None:
     novel_root = tmp_path / "data" / "novels" / "demo"
     characters = novel_root / "src" / "characters"
     settings = novel_root / "src" / "world" / "entities"
@@ -141,9 +139,7 @@ def test_architect_requests_and_preserves_complete_chapter_fields() -> None:
             )
 
     architect = ArchitectAgent(SimpleNamespace(client=FakeClient()))
-    chapters = asyncio.run(
-        architect.generate_outline("测试作品", "悬疑", "镜雨区会影响记忆", 1)
-    )
+    chapters = asyncio.run(architect.generate_outline("测试作品", "悬疑", "镜雨区会影响记忆", 1))
 
     system_prompt = calls[0][0].content
     for field in (
@@ -160,3 +156,42 @@ def test_architect_requests_and_preserves_complete_chapter_fields() -> None:
     assert chapters[0].involved_settings == ["镜雨区"]
     assert chapters[0].beats == ["发现异常", "决定追查"]
     assert chapters[0].hooks == ["来客身份"]
+
+
+def test_architect_retries_one_empty_model_response() -> None:
+    responses = [SimpleNamespace(content=""), SimpleNamespace(content="有效内容")]
+
+    class FakeClient:
+        def chat(self, **kwargs):
+            return responses.pop(0)
+
+    architect = ArchitectAgent(SimpleNamespace(client=FakeClient()))
+
+    content = architect._chat_required(
+        messages=[],
+        temperature=0.3,
+        max_tokens=128,
+        label="test",
+    )
+
+    assert content == "有效内容"
+    assert responses == []
+
+
+def test_architect_character_does_not_duplicate_model_heading() -> None:
+    class FakeClient:
+        def chat(self, **kwargs):
+            return SimpleNamespace(content="# 链路审校员\n\n## 基本信息\n\n测试角色")
+
+    architect = ArchitectAgent(SimpleNamespace(client=FakeClient()))
+
+    content = asyncio.run(
+        architect.generate_character(
+            "链路审校员",
+            "归墟档案室临时审校员",
+            "unspecified",
+            "归墟负责回收历史残骸。",
+        )
+    )
+
+    assert content.count("# 链路审校员") == 1

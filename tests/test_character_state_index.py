@@ -8,6 +8,7 @@ from tools.agent.tool_runtime import build_tool_executors
 from tools.character_state_index import (
     CharacterStateIndex,
     parse_character_state_annotations,
+    parse_relation_annotations,
     strip_character_state_annotations,
 )
 
@@ -63,6 +64,40 @@ def test_parser_reports_unscoped_and_malformed_annotations():
         "unscoped_annotation",
         "invalid_annotation",
     ]
+
+
+def test_relation_annotation_parser_is_explicit_and_ignores_fenced_examples():
+    text = """//**沈烬~白续:互相试探的敌对关系**
+
+```text
+//**示例甲~示例乙:不应注册**
+```
+
+## 关系网络
+- **裴织**：普通正文不应注册
+"""
+
+    records, diagnostics = parse_relation_annotations(
+        text, source_path="src/characters/shen_jin.md"
+    )
+    state_records, state_diagnostics = parse_character_state_annotations(
+        text,
+        source_path="src/characters/shen_jin.md",
+        source_kind="reference",
+    )
+
+    assert diagnostics == []
+    assert [(item.source, item.target, item.description) for item in records] == [
+        ("沈烬", "白续", "互相试探的敌对关系")
+    ]
+    assert state_records == []
+    assert state_diagnostics == []
+
+    malformed, malformed_diagnostics = parse_relation_annotations(
+        "//**沈烬~白续**\n", source_path="src/characters/shen_jin.md"
+    )
+    assert malformed == []
+    assert malformed_diagnostics[0]["code"] == "invalid_relation_annotation"
 
 
 def test_query_returns_old_current_state_outside_recent_history(tmp_path: Path):
@@ -162,6 +197,7 @@ def test_strip_annotations_preserves_surrounding_prose():
     text = (
         "第一段。\n"
         "//**沈烬[位置]：工坊 -> 归墟港**\n"
+        "//**沈烬~白续:敌对关系**\n"
         "第二段。\n"
     )
 

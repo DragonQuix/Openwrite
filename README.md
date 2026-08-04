@@ -241,9 +241,10 @@ data/novels/{novel_id}/
 //**沈烬：仍在试探 -> 确认白续是敌人**
 //**沈烬[位置]：贫民区工坊 -> 归墟港**
 //**沈烬[伤势]：左臂轻伤 -> 已恢复**
+//**沈烬~白续:互相试探的敌对关系**
 ```
 
-系统会从大纲和正文重建索引，区分计划状态与实际状态，并报告状态断裂及来源行号。有效批注不会计入正文字数，也不会进入 Markdown、TXT 或 EPUB 成书。完整语法见 [内联人物状态批注](docs/inline-character-state.md)。
+系统会从大纲和正文重建索引，区分计划状态与实际状态，并报告状态断裂及来源行号。有效批注不会计入正文字数，也不会进入 Markdown、TXT 或 EPUB 成书。`A~B:具体关系` 用于显式注册资料关系；普通正文提及和“关系网络”段落不会自动生成关系图连线。
 
 ### 有界记忆与可靠提交
 
@@ -408,6 +409,16 @@ pytest
 ```
 
 提交问题或功能建议请前往 [GitHub Issues](https://github.com/LiPu-jpg/Openwrite/issues)。项目仍在持续迭代，涉及作品数据的改动建议先在自己的项目仓库中保留版本记录。
+
+## Star History
+
+<a href="https://star-history.com/#LiPu-jpg/Openwrite&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=LiPu-jpg/Openwrite&type=Date&theme=dark">
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=LiPu-jpg/Openwrite&type=Date">
+    <img alt="OpenWrite Star History Chart" src="https://api.star-history.com/svg?repos=LiPu-jpg/Openwrite&type=Date">
+  </picture>
+</a>
 
 ## 致谢
 

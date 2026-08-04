@@ -1074,6 +1074,11 @@ class GoetheChatAgent:
         lowered = str(text or "").strip().lower()
         if not lowered:
             return False
+        if any(
+            tool_name in lowered
+            for tool_name in ("get_goethe_handoff", "prepare_dante_handoff")
+        ):
+            return False
         return any(
             token in lowered
             for token in ("切到 dante", "切换到 dante", "开始写正文", "handoff", "交接给 dante")

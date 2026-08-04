@@ -310,14 +310,17 @@
                   <h2 id="asset-editor-title">资料字段</h2>
                   <code id="asset-editor-path"></code>
                 </div>
-                <div class="segmented" role="group" aria-label="编辑模式">
-                  <button class="segment active" type="button" data-asset-mode="structured">字段</button>
-                  <button class="segment" type="button" data-asset-mode="raw">原文</button>
-                </div>
               </div>
-              <div id="asset-structured-fields" class="asset-fields"></div>
-              <label id="asset-raw-field" class="asset-raw-field" hidden for="asset-raw-text">
-                原文
+              <div class="asset-editor-modes" role="tablist" aria-label="资料编辑方式">
+                <button class="asset-mode-tab active" type="button" role="tab" aria-selected="true" aria-controls="asset-structured-fields" data-asset-mode="structured">资料字段</button>
+                <button class="asset-mode-tab" type="button" role="tab" aria-selected="false" aria-controls="asset-raw-field" data-asset-mode="raw">Markdown 原文</button>
+              </div>
+              <div id="asset-structured-fields" class="asset-fields" role="tabpanel"></div>
+              <label id="asset-raw-field" class="asset-raw-field" role="tabpanel" hidden for="asset-raw-text">
+                <span class="asset-raw-heading">
+                  <strong>源文件</strong>
+                  <code id="asset-raw-format">TOML + Markdown</code>
+                </span>
                 <textarea id="asset-raw-text" rows="24" spellcheck="false"></textarea>
               </label>
               <div class="asset-form-actions">
@@ -512,6 +515,12 @@
                   <option value="concept">概念</option>
                   <option value="unknown">其他 / 未归档</option>
                 </select>
+                <label for="relationship-origin">关系</label>
+                <select id="relationship-origin">
+                  <option value="all">全部关系</option>
+                  <option value="canonical">资料字段</option>
+                  <option value="annotation">正文注册</option>
+                </select>
                 <button id="relationship-fit" class="quiet-button" type="button">适合视图</button>
                 <button id="relationship-layout" class="quiet-button" type="button" aria-pressed="false">暂停布局</button>
                 <button id="relationship-reset" class="quiet-button" type="button">重置布局</button>
@@ -524,6 +533,8 @@
               <span data-kind="place">地点 · 菱形</span>
               <span data-kind="concept">概念 · 六边形</span>
               <span data-kind="unknown">其他 · 虚线圆</span>
+              <span class="relationship-origin-key canonical">资料字段 · 实线</span>
+              <span class="relationship-origin-key annotation">正文注册 · 点线</span>
             </div>
             <div class="relationship-workspace">
               <div id="relationship-stage" class="relationship-stage">

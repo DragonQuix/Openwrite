@@ -24,6 +24,7 @@ from tools.world_query import (
     get_entity,
     get_relations_graph,
     get_relations_topology,
+    get_asset_relation_view,
     edit_world_relation,
     search_relation_targets,
     edit_world_relations,
@@ -462,7 +463,7 @@ class TestGetRelationsTopology:
         world.mkdir(parents=True)
         characters.mkdir(parents=True)
         (world / "harbor.md").write_text(
-            "# 雾港\n\n> 地点 | 港口 | active\n\n故事起点。\n\n## 关联\n- char_lin — 常驻\n",
+            "# 雾港\n\n> 地点 | 港口 | active\n\n故事起点。\n\n//**雾港~林岑:常驻**\n",
             encoding="utf-8",
         )
         (characters / "lin.md").write_text(
@@ -492,7 +493,7 @@ note = "长期调查"
         world = tmp_path / "data" / "novels" / "test" / "src" / "world" / "entities"
         world.mkdir(parents=True)
         (world / "a.md").write_text(
-            "# A\n\n> 概念 | | active\n\n## 关联\n- missing — 尚未归档\n",
+            "# A\n\n> 概念 | | active\n\n//**A~missing:尚未归档**\n",
             encoding="utf-8",
         )
 
@@ -504,8 +505,9 @@ note = "长期调查"
         assert topology["edges"] == []
         assert topology["totals"] == {"nodes": 2, "edges": 1}
         assert topology["truncated"] is True
+        assert topology["diagnostics"][0]["code"] == "relation_target_unresolved"
 
-    def test_topology_reads_existing_character_relationship_sections(self, tmp_path):
+    def test_topology_ignores_unregistered_character_relationship_sections(self, tmp_path):
         characters = tmp_path / "data" / "novels" / "test" / "src" / "characters"
         characters.mkdir(parents=True)
         (characters / "hero.md").write_text(
@@ -551,16 +553,77 @@ name = "周策"
         )
 
         topology = get_relations_topology("test", project_root=tmp_path)
-        edges = {
-            (edge["source"], edge["target"]): edge["label"]
-            for edge in topology["edges"]
-        }
+        assert topology["edges"] == []
+        assert topology["relation_totals"] == {"canonical": 0, "annotation": 0}
 
-        assert edges[("hero", "su_yao")] == "共同调查旧案"
-        assert edges[("hero", "zhou_ce")].startswith("mentor")
-        assert edges[("su_yao", "hero")] == "从互相怀疑逐渐变成可靠搭档。"
-        assert edges[("zhou_ce", "hero")] == "旧案让两人形成亦师亦友的关系。"
-        assert not any(node["unresolved"] for node in topology["nodes"])
+    def test_asset_relation_view_uses_same_resolved_edges_and_provenance(self, tmp_path):
+        characters = tmp_path / "data" / "novels" / "test" / "src" / "characters"
+        characters.mkdir(parents=True)
+        (characters / "hero.md").write_text(
+            """+++
+id = "hero"
+name = "林舟"
+
+[[related]]
+target = "partner"
+kind = "ally"
+note = "共同调查"
++++
+
+# 林舟
+
+## 关系网络
+- **苏遥**：正文中的重复描述
+- **周策（老周）**：普通正文描述
+
+//**林舟~周策:曾经的导师**
+""",
+            encoding="utf-8",
+        )
+        (characters / "partner.md").write_text(
+            '+++\nid = "partner"\nname = "苏遥"\n+++\n\n# 苏遥\n',
+            encoding="utf-8",
+        )
+        (characters / "mentor.md").write_text(
+            '+++\nid = "mentor"\nname = "周策"\n+++\n\n# 周策\n',
+            encoding="utf-8",
+        )
+
+        topology = get_relations_topology("test", project_root=tmp_path)
+        view = get_asset_relation_view(
+            "test", "hero", project_root=tmp_path, asset_kind="character"
+        )
+        incoming = get_asset_relation_view(
+            "test", "partner", project_root=tmp_path, asset_kind="character"
+        )
+
+        assert topology["relation_totals"] == {"canonical": 1, "annotation": 1}
+        assert [(item["target"], item["kind"]) for item in view["confirmed"]] == [
+            ("partner", "ally")
+        ]
+        assert [(item["target"], item["origin"]) for item in view["registered"]] == [
+            ("mentor", "annotation")
+        ]
+        assert incoming["incoming"][0]["target"] == "hero"
+        assert incoming["incoming"][0]["origin"] == "canonical"
+
+    def test_legacy_string_related_entries_are_confirmed_edges(self, tmp_path):
+        world = tmp_path / "data" / "novels" / "test" / "src" / "world" / "entities"
+        world.mkdir(parents=True)
+        (world / "market.md").write_text(
+            '+++\nid = "market"\nname = "市集"\nrelated = ["港口"]\n+++\n\n# 市集\n',
+            encoding="utf-8",
+        )
+        (world / "harbor.md").write_text(
+            '+++\nid = "harbor"\nname = "港口"\n+++\n\n# 港口\n',
+            encoding="utf-8",
+        )
+
+        topology = get_relations_topology("test", project_root=tmp_path)
+
+        assert topology["edges"][0]["source"] == "market"
+        assert topology["edges"][0]["target"] == "harbor"
+        assert topology["edges"][0]["origin"] == "canonical"
 
 
 class TestEditWorldRelation:
@@ -641,6 +704,90 @@ name = "苏遥"
             edge["source"] == "hero" and edge["target"] == "partner"
             for edge in topology["edges"]
         )
+
+    def test_relation_edit_preserves_legacy_string_targets(self, relation_project):
+        characters = (
+            relation_project
+            / "data"
+            / "novels"
+            / "test"
+            / "src"
+            / "characters"
+        )
+        source = characters / "hero.md"
+        source.write_text(
+            source.read_text(encoding="utf-8").replace(
+                'summary = "追查旧案。"',
+                'summary = "追查旧案。"\nrelated = ["旧识"]',
+            ),
+            encoding="utf-8",
+        )
+        (characters / "old_friend.md").write_text(
+            '+++\nid = "old_friend"\nname = "旧识"\n+++\n\n# 旧识\n',
+            encoding="utf-8",
+        )
+
+        preview = edit_world_relation(
+            "test", "hero", "partner", "搭档", project_root=relation_project
+        )
+        applied = edit_world_relation(
+            "test",
+            "hero",
+            "partner",
+            "搭档",
+            project_root=relation_project,
+            base_revision=preview["base_revision"],
+            confirm=True,
+        )
+
+        assert applied["ok"] is True
+        updated = source.read_text(encoding="utf-8")
+        assert 'target = "旧识"' in updated
+        assert 'target = "partner"' in updated
+
+    def test_relation_upsert_replaces_legacy_label_for_confirmed_entity(
+        self, relation_project
+    ):
+        characters = (
+            relation_project
+            / "data"
+            / "novels"
+            / "test"
+            / "src"
+            / "characters"
+        )
+        source = characters / "hero.md"
+        source.write_text(
+            source.read_text(encoding="utf-8").replace(
+                'summary = "追查旧案。"',
+                'summary = "追查旧案。"\nrelated = ["旧识搭档", "旧案地点"]',
+            ),
+            encoding="utf-8",
+        )
+        (characters / "old_friend.md").write_text(
+            '+++\nid = "old_friend"\nname = "旧识搭档与前线伙伴"\n+++'
+            '\n\n# 旧识搭档与前线伙伴\n',
+            encoding="utf-8",
+        )
+
+        preview = edit_world_relation(
+            "test", "hero", "old_friend", "昔日搭档", project_root=relation_project
+        )
+        applied = edit_world_relation(
+            "test",
+            "hero",
+            "old_friend",
+            "昔日搭档",
+            project_root=relation_project,
+            base_revision=preview["base_revision"],
+            confirm=True,
+        )
+
+        assert applied["ok"] is True
+        updated = source.read_text(encoding="utf-8")
+        assert 'target = "old_friend"' in updated
+        assert 'target = "旧识搭档"' not in updated
+        assert 'target = "旧案地点"' in updated
 
     def test_search_relation_targets_finds_characters_and_world_entities(
         self, relation_project

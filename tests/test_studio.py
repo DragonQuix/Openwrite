@@ -137,12 +137,41 @@ def test_studio_structured_asset_ui_keeps_raw_mode_and_explicit_import_decisions
     assert '<option value="world">设定</option>' in html
     assert '<option value="progression">成长体系</option>' in html
     assert 'data-asset-mode="raw"' in html
+    assert 'role="tablist" aria-label="资料编辑方式"' in html
     assert 'id="asset-package-dialog"' in html
     assert "ASSET_CONFLICT" in javascript
     assert "replace" in javascript and "rename" in javascript and "skip" in javascript
+    assert "function addRelationField" in javascript
+    assert "function createRelationReferenceRow" in javascript
+    assert "draft.relation_view || {}" in javascript
+    assert 'option.addEventListener("pointerdown", choose)' in javascript
+    assert "保存后生效" in javascript
+    assert 'search.placeholder = "搜索名称、ID、类型或标签"' in javascript
+    assert 'data.related = $$(".asset-relation-row")' in javascript
+    assert "请先保存当前更改，再切换编辑方式" in javascript
     assert ".asset-editor-pane" in styles
     assert ".asset-stage-row" in styles
+    assert ".asset-field-section" in styles
+    assert ".asset-relation-options[hidden]" in styles
+    assert ".asset-relation-reference-row" in styles
+    assert "--asset-label-column: 128px;" in styles
+    assert "grid-template-columns: var(--asset-label-column) minmax(0, 1fr);" in styles
+    assert ".asset-form-actions .form-status {\n  grid-column: 2;" in styles
     assert ".asset-field {\n  display: grid;\n  align-self: start;" in styles
+
+
+def test_studio_continuity_distinguishes_field_and_registered_relations():
+    root = Path(__file__).parents[1] / "tools" / "studio_assets"
+    html = (root / "index.html").read_text(encoding="utf-8")
+    javascript = (root / "js" / "application.js").read_text(encoding="utf-8")
+    styles = (root / "styles.css").read_text(encoding="utf-8")
+
+    assert 'id="relationship-origin"' in html
+    assert '<option value="canonical">资料字段</option>' in html
+    assert '<option value="annotation">正文注册</option>' in html
+    assert 'line.classList.toggle("annotation", edge.origin === "annotation")' in javascript
+    assert 'refreshContinuity: loadContinuity' in javascript
+    assert ".relationship-edge.annotation" in styles
 
 
 def test_studio_post_route_registry_matches_application_surface():

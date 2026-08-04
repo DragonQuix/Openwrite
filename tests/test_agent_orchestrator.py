@@ -146,7 +146,9 @@ def test_discovery_summary_request_generates_summary_and_waits_for_confirmation(
     monkeypatch.setattr(
         orchestrator,
         "_chat_text",
-        lambda system_prompt, user_prompt, **kwargs: "# 当前想法汇总\n\n## 核心方向\n\n- 都市职场异能",
+        lambda system_prompt, user_prompt, **kwargs: (
+            "# 当前想法汇总\n\n## 核心方向\n\n- 都市职场异能"
+        ),
     )
 
     result = orchestrator.handle_user_message("先帮我汇总一下当前想法")
@@ -195,9 +197,7 @@ def test_summary_request_infers_ideation_from_confirmed_assets(
     assert result.next_action == "confirm_ideation_summary"
     assert state_store.load_or_create().pending_confirmation == "ideation_summary"
     assert "从已确认资产反推" in planning_store.ideation_path.read_text(encoding="utf-8")
-    assert "镜雨区雨声记忆悬疑" in planning_store.ideation_summary_path.read_text(
-        encoding="utf-8"
-    )
+    assert "镜雨区雨声记忆悬疑" in planning_store.ideation_summary_path.read_text(encoding="utf-8")
 
 
 def test_dante_actions_require_summary_confirmation_before_outline_generation(
@@ -280,6 +280,40 @@ def test_dante_actions_confirm_summary_advances_discovery_to_foundation(
     assert state.last_agent_action == "confirmed_ideation_summary"
 
 
+def test_confirm_summary_does_not_generate_outline_when_request_is_negated(
+    tmp_path: Path,
+):
+    state_store = BookStateStore(tmp_path, "demo")
+    planning_store = StoryPlanningStore(tmp_path, "demo")
+    planning_store.append_ideation("主角要追查失踪案")
+    planning_store.save_ideation_summary("# 当前想法汇总\n\n- 追查失踪案")
+    planning_store.outline_src_path.parent.mkdir(parents=True, exist_ok=True)
+    planning_store.outline_src_path.write_text(
+        "# 已确认大纲\n\n## 第一篇\n",
+        encoding="utf-8",
+    )
+    state = state_store.load_or_create()
+    state.stage = BookStage.CHAPTER_PREFLIGHT
+    state.pending_confirmation = "ideation_summary"
+    state_store.save(state)
+    orchestrator = OpenWriteOrchestrator.for_testing(
+        tmp_path,
+        "demo",
+        state_store=state_store,
+        planning_store=planning_store,
+    )
+    adapter = DanteActionAdapter(orchestrator)
+
+    payload = adapter.confirm_ideation_summary("确认这版想法汇总，但不要生成大纲。")
+
+    persisted = state_store.load_or_create()
+    assert payload["blocked"] is False
+    assert payload["next_action"] == "ready_for_outline_generation"
+    assert persisted.stage == BookStage.CHAPTER_PREFLIGHT
+    assert persisted.pending_confirmation == ""
+    assert not planning_store.outline_draft_path.exists()
+
+
 def test_summary_confirmation_and_outline_request_are_handled_in_one_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -287,9 +321,7 @@ def test_summary_confirmation_and_outline_request_are_handled_in_one_message(
     state_store = BookStateStore(tmp_path, "demo")
     planning_store = StoryPlanningStore(tmp_path, "demo")
     planning_store.append_ideation("主角是被雪藏的穿越艺人")
-    planning_store.save_ideation_summary(
-        "# 当前想法汇总\n\n## 核心方向\n\n- 娱乐圈成长爽文\n"
-    )
+    planning_store.save_ideation_summary("# 当前想法汇总\n\n## 核心方向\n\n- 娱乐圈成长爽文\n")
     state = state_store.load_or_create()
     state.pending_confirmation = "ideation_summary"
     state.last_agent_action = "generated_ideation_summary"
@@ -323,9 +355,9 @@ def test_summary_confirmation_and_outline_request_are_handled_in_one_message(
     assert state.stage == BookStage.ROLLING_OUTLINE
     assert state.pending_confirmation == "outline_scope"
     assert "第一卷" in planning_store.outline_draft_path.read_text(encoding="utf-8")
-    assert "娱乐圈成长爽文" in (
-        planning_store.story_src_dir / "foundation.md"
-    ).read_text(encoding="utf-8")
+    assert "娱乐圈成长爽文" in (planning_store.story_src_dir / "foundation.md").read_text(
+        encoding="utf-8"
+    )
 
     monkeypatch.setattr(
         orchestrator,
@@ -964,9 +996,7 @@ def test_outline_generation_request_writes_draft_and_requests_confirmation(
         "> 情感弧线: 平静 -> 戒备\n> 节拍: 日常切入, 异常来电\n"
         "> 悬念: 来电者身份\n\n主角首次接触异常。"
     )
-    monkeypatch.setattr(
-        orchestrator, "_generate_outline_draft", lambda text: complete_outline
-    )
+    monkeypatch.setattr(orchestrator, "_generate_outline_draft", lambda text: complete_outline)
 
     result = orchestrator.handle_user_message("帮我生成一份都市异能题材四级大纲")
 
@@ -997,7 +1027,9 @@ def test_outline_generation_requires_confirmed_ideation_summary_first(
     monkeypatch.setattr(
         orchestrator,
         "_chat_text",
-        lambda system_prompt, user_prompt, **kwargs: "# 当前想法汇总\n\n## 核心方向\n\n- 都市职场异能",
+        lambda system_prompt, user_prompt, **kwargs: (
+            "# 当前想法汇总\n\n## 核心方向\n\n- 都市职场异能"
+        ),
     )
     monkeypatch.setattr(
         orchestrator,
@@ -1113,7 +1145,8 @@ def test_character_creation_request_routes_to_executor_and_syncs(tmp_path: Path,
     monkeypatch.setattr(
         orchestrator,
         "_generate_character_document",
-        lambda text: """+++
+        lambda text: (
+            """+++
 name = "苏晚"
 +++
 
@@ -1122,7 +1155,8 @@ name = "苏晚"
 ## 背景
 
 旧友反派。
-""",
+"""
+        ),
     )
     sync_calls = []
     monkeypatch.setattr(
@@ -1214,9 +1248,7 @@ def test_build_chapter_packet_persists_context_snapshot(tmp_path: Path):
     assert packet["story_background"]
     assert packet["core_documents"]
     assert "world_rules" in packet["setting_documents"]
-    assert {"current_state", "ledger", "relationships"} <= set(
-        packet["continuity_documents"]
-    )
+    assert {"current_state", "ledger", "relationships"} <= set(packet["continuity_documents"])
     assert packet["concept_documents"] == {
         **packet["setting_documents"],
         **packet["continuity_documents"],
@@ -1236,9 +1268,7 @@ def test_build_chapter_packet_persists_context_snapshot(tmp_path: Path):
         guidance="",
         target_words=0,
     )
-    assert "角色1" not in {
-        character["name"] for character in writer_payload["active_characters"]
-    }
+    assert "角色1" not in {character["name"] for character in writer_payload["active_characters"]}
 
 
 def test_orchestrator_character_documents_keep_canonical_name_and_full_context(
@@ -1282,9 +1312,7 @@ def test_delegate_writing_runs_review_when_executor_available(
         return {
             "ok": True,
             "chapter_id": "ch_001",
-            "draft_path": str(
-                novel_root / "data" / "manuscript" / "arc_001" / "ch_001.md"
-            ),
+            "draft_path": str(novel_root / "data" / "manuscript" / "arc_001" / "ch_001.md"),
         }
 
     def review_chapter(args: dict) -> dict:

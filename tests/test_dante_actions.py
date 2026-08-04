@@ -7,7 +7,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tools.agent.book_state import BookStage, BookStateStore
 from tools.agent.dante_actions import DanteActionAdapter
+from tools.agent.goethe_actions import GoethePlanningRuntime
 from tools.agent.orchestrator import OpenWriteOrchestrator, OrchestratorResult
+from tools.architect import FoundationResult
 from tools.story_planning import StoryPlanningStore
 
 
@@ -16,14 +18,8 @@ def _bootstrap_planning_project(tmp_path: Path) -> tuple[BookStateStore, StoryPl
     planning_store.append_ideation("主角是普通上班族。")
     planning_store.append_ideation("公司地下埋着异常节点。")
     planning_store.save_foundation_draft(
-        background=(
-            "# 背景\n\n"
-            "现代都市表面稳定，实则少数人能看见异常术式和隐秘节点。"
-        ),
-        foundation=(
-            "# 基础设定\n\n"
-            "主角在公司里被迫接触术式推演能力。"
-        ),
+        background=("# 背景\n\n现代都市表面稳定，实则少数人能看见异常术式和隐秘节点。"),
+        foundation=("# 基础设定\n\n主角在公司里被迫接触术式推演能力。"),
     )
     planning_store.save_outline_draft(
         "# 测试小说\n\n"
@@ -68,6 +64,76 @@ def _bootstrap_planning_project(tmp_path: Path) -> tuple[BookStateStore, StoryPl
     )
 
     return BookStateStore(tmp_path, "demo"), planning_store
+
+
+def test_foundation_draft_uses_canonical_context_without_regressing_stage(
+    tmp_path: Path,
+):
+    (tmp_path / "novel_config.yaml").write_text(
+        "novel_id: demo\ntitle: 测试作品\n",
+        encoding="utf-8",
+    )
+    planning = StoryPlanningStore(tmp_path, "demo")
+    planning.story_src_dir.mkdir(parents=True, exist_ok=True)
+    (planning.story_src_dir / "background.md").write_text(
+        "# 背景\n\n归墟港是前文明失败后的回收港。",
+        encoding="utf-8",
+    )
+    (planning.story_src_dir / "foundation.md").write_text(
+        "# 基础设定\n\n沈烬通过回响校勘改变历史变量。",
+        encoding="utf-8",
+    )
+    planning.outline_src_path.parent.mkdir(parents=True, exist_ok=True)
+    planning.outline_src_path.write_text(
+        "# 第一卷\n\n## 第一幕\n\n### 第一节\n\n#### 第一章\n",
+        encoding="utf-8",
+    )
+    state_store = BookStateStore(tmp_path, "demo")
+    state = state_store.load_or_create()
+    state.stage = BookStage.CHAPTER_PREFLIGHT
+    state.pending_confirmation = "foundation"
+    state_store.save(state)
+    captured: dict[str, str] = {}
+
+    class FakeArchitect:
+        def generate_foundation(self, *, title: str, genre: str, brief: str):
+            captured.update(title=title, genre=genre, brief=brief)
+            return FoundationResult(
+                story_bible="# 背景草案\n\n保留归墟港。",
+                volume_outline="# 卷纲草案\n",
+                book_rules="# 规则草案\n",
+                current_state="# 当前状态\n",
+                foreshadowing_seed="",
+            )
+
+    runtime = GoethePlanningRuntime(tmp_path, "demo")
+    runtime._architect = FakeArchitect()  # type: ignore[assignment]
+
+    result = runtime.generate_foundation_draft("仅补全现有设定")
+
+    assert captured["genre"] == "unspecified"
+    assert "已经确认的正典资产" in captured["brief"]
+    assert "归墟港是前文明失败后的回收港" in captured["brief"]
+    assert "沈烬通过回响校勘改变历史变量" in captured["brief"]
+    assert result["next_action"] == "review_foundation_draft"
+    assert result["foreshadowing_generated"] is False
+    assert result["foreshadowing_path"] == ""
+    persisted = state_store.load_or_create()
+    assert persisted.stage == BookStage.CHAPTER_PREFLIGHT
+    assert persisted.pending_confirmation == ""
+
+
+def test_character_request_parser_treats_chinese_semicolon_as_field_boundary(
+    tmp_path: Path,
+):
+    runtime = object.__new__(GoethePlanningRuntime)
+
+    name, role = runtime._parse_character_request(
+        "角色名：链路审校员；角色定位：归墟档案室临时审校员，专门记录异常"
+    )
+
+    assert name == "链路审校员"
+    assert role == "归墟档案室临时审校员"
 
 
 def test_dante_action_adapter_delegates_public_orchestrator_actions(tmp_path: Path):
@@ -175,7 +241,11 @@ def test_dante_action_adapter_bounds_outline_draft_payload(tmp_path: Path):
         story_planning_store = type(
             "StoryPlanningStoreProxy",
             (),
-            {"read_outline_draft": lambda self, max_chars=0: huge_outline[:max_chars] if max_chars else huge_outline},
+            {
+                "read_outline_draft": lambda self, max_chars=0: (
+                    huge_outline[:max_chars] if max_chars else huge_outline
+                )
+            },
         )()
 
     adapter = DanteActionAdapter(FakeOrchestrator())
@@ -187,7 +257,9 @@ def test_dante_action_adapter_bounds_outline_draft_payload(tmp_path: Path):
     assert payload["outline_draft"].startswith("# 测试小说")
 
 
-def test_orchestrator_public_actions_drive_planning_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_orchestrator_public_actions_drive_planning_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     state_store, planning_store = _bootstrap_planning_project(tmp_path)
     orchestrator = OpenWriteOrchestrator.for_testing(
         tmp_path,
@@ -240,17 +312,13 @@ def test_orchestrator_public_actions_drive_planning_flow(tmp_path: Path, monkeyp
     assert outline_result.next_action == "request_outline_confirmation"
     assert state.stage == BookStage.ROLLING_OUTLINE
     assert planning_store.outline_src_path.exists() is False
-    assert planning_store.outline_draft_path.read_text(encoding="utf-8").startswith(
-        "# 测试小说"
-    )
+    assert planning_store.outline_draft_path.read_text(encoding="utf-8").startswith("# 测试小说")
 
     promotion_result = orchestrator.confirm_outline_draft()
 
     assert promotion_result.blocked is False
     assert promotion_result.next_action == "chapter_preflight"
-    assert planning_store.outline_src_path.read_text(encoding="utf-8").startswith(
-        "# 测试小说"
-    )
+    assert planning_store.outline_src_path.read_text(encoding="utf-8").startswith("# 测试小说")
 
     state.stage = BookStage.CHAPTER_PREFLIGHT
     state.current_chapter = "ch_001"

@@ -239,6 +239,14 @@ class StructuredAssetService:
                 "id": self._asset_id(data.get("id") or path.stem),
                 "name": str(data.get("name") or path.stem),
                 "summary": str(data.get("summary") or ""),
+                "asset_type": str(data.get("kind") or "ability"),
+                "tags": [
+                    str(item).strip()
+                    for item in data.get("tags", [])
+                    if str(item).strip()
+                ]
+                if isinstance(data.get("tags"), list)
+                else [],
                 "stage_count": len(stages),
                 "path": self._relative(path),
             }
@@ -248,6 +256,21 @@ class StructuredAssetService:
             "id": self._asset_id(meta.get("id") or path.stem),
             "name": str(meta.get("name") or self._markdown_title(content) or path.stem),
             "summary": str(meta.get("summary") or ""),
+            "asset_type": str(meta.get("type") or meta.get("kind") or ""),
+            "aliases": [
+                str(item).strip()
+                for item in meta.get("aliases", [])
+                if str(item).strip()
+            ]
+            if isinstance(meta.get("aliases"), list)
+            else [],
+            "tags": [
+                str(item).strip()
+                for item in meta.get("tags", [])
+                if str(item).strip()
+            ]
+            if isinstance(meta.get("tags"), list)
+            else [],
             "path": self._relative(path),
         }
 

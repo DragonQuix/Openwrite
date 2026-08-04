@@ -107,6 +107,43 @@ def test_cancel_rejects_late_model_result(tmp_path: Path) -> None:
     assert error.value.code == "LATE_RESULT_REJECTED"
 
 
+def test_cancel_reviewed_run_is_non_mutating_terminal_diagnostic(tmp_path: Path) -> None:
+    store = ChapterRunV2Store(tmp_path, "demo")
+    manifest = store.create("ch_004")
+    for stage in (
+        "context",
+        "plan",
+        "draft",
+        "fact_extract",
+        "settle",
+        "validate",
+        "commit",
+        "review",
+    ):
+        _complete(store, manifest, stage)
+    current = chapter_run_v2_action(tmp_path, "demo", {"action": "get", "run_id": manifest.run_id})
+
+    result = chapter_run_v2_action(
+        tmp_path,
+        "demo",
+        {
+            "action": "cancel",
+            "run_id": manifest.run_id,
+            "revision": current["revision"],
+            "reason": "too_late",
+        },
+    )
+
+    assert result["code"] == "RUN_ALREADY_TERMINAL"
+    assert result["already_terminal"] is True
+    assert result["cancelled"] is False
+    assert result["run"]["status"] == "reviewed"
+    reloaded = store.load(manifest.run_id)
+    assert reloaded is not None
+    assert reloaded.status == "reviewed"
+    assert reloaded.cancel_requested is False
+
+
 def test_intervention_requires_confirmed_state_machine_and_stales_plan(tmp_path: Path) -> None:
     store = ChapterRunV2Store(tmp_path, "demo")
     manifest = store.create("ch_005", input_revisions={"facts": "one"})
@@ -141,9 +178,7 @@ def test_intervention_requires_confirmed_state_machine_and_stales_plan(tmp_path:
     intervention = store.update_intervention(
         manifest, intervention.intervention_id, state="confirmed", confirm=True
     )
-    store.update_intervention(
-        manifest, intervention.intervention_id, state="applied", confirm=True
-    )
+    store.update_intervention(manifest, intervention.intervention_id, state="applied", confirm=True)
     assert manifest.stages["context"].status == "completed"
     assert manifest.stages["plan"].status == "stale"
 
@@ -160,9 +195,7 @@ def test_artifact_path_cannot_escape_project(tmp_path: Path) -> None:
 def test_shared_action_requires_current_revision_for_intervention(tmp_path: Path) -> None:
     store = ChapterRunV2Store(tmp_path, "demo")
     manifest = store.create("ch_007")
-    current = chapter_run_v2_action(
-        tmp_path, "demo", {"action": "get", "run_id": manifest.run_id}
-    )
+    current = chapter_run_v2_action(tmp_path, "demo", {"action": "get", "run_id": manifest.run_id})
     created = chapter_run_v2_action(
         tmp_path,
         "demo",

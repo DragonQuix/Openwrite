@@ -52,12 +52,7 @@ class ChapterRunV2Store:
         self.project_root = Path(project_root).resolve()
         self.novel_id = str(novel_id)
         self.root = (
-            self.project_root
-            / "data"
-            / "novels"
-            / self.novel_id
-            / "data"
-            / "chapter_runs_v2"
+            self.project_root / "data" / "novels" / self.novel_id / "data" / "chapter_runs_v2"
         )
 
     def create(
@@ -94,9 +89,7 @@ class ChapterRunV2Store:
         if not path.is_file():
             return None
         try:
-            return ChapterRunV2Manifest.model_validate_json(
-                path.read_text(encoding="utf-8")
-            )
+            return ChapterRunV2Manifest.model_validate_json(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
 
@@ -126,9 +119,7 @@ class ChapterRunV2Store:
         result = self.list(chapter_id=chapter_id, limit=1)
         return result[0] if result else None
 
-    def latest_reviewable_for_chapter(
-        self, chapter_id: str
-    ) -> ChapterRunV2Manifest | None:
+    def latest_reviewable_for_chapter(self, chapter_id: str) -> ChapterRunV2Manifest | None:
         result = self.list(
             chapter_id=chapter_id,
             statuses={"committed", "reviewed"},
@@ -145,9 +136,7 @@ class ChapterRunV2Store:
         payload["next_stage"] = self.next_stage(manifest)
         return payload
 
-    def require_revision(
-        self, manifest: ChapterRunV2Manifest, expected_revision: str
-    ) -> None:
+    def require_revision(self, manifest: ChapterRunV2Manifest, expected_revision: str) -> None:
         expected = str(expected_revision or "").strip()
         if not expected:
             raise ChapterRunV2Error(
@@ -207,15 +196,11 @@ class ChapterRunV2Store:
         self._require_stage(stage)
         previous = manifest.stages[stage]
         if previous.status not in {"running", "completed"}:
-            raise ChapterRunV2Error(
-                f"阶段尚未运行: {stage}", code="INVALID_STAGE_TRANSITION"
-            )
+            raise ChapterRunV2Error(f"阶段尚未运行: {stage}", code="INVALID_STAGE_TRANSITION")
         expected = expected_input_revisions or previous.input_revisions
         if not self._inputs_match(expected, manifest.input_revisions):
             self.mark_stale(manifest, manifest.input_revisions)
-            raise ChapterRunV2Error(
-                f"阶段输入 revision 已变化: {stage}", code="STALE_STAGE"
-            )
+            raise ChapterRunV2Error(f"阶段输入 revision 已变化: {stage}", code="STALE_STAGE")
         now = self._now()
         manifest.updated_at = now
         manifest.stages[stage] = ChapterRunV2Stage(
@@ -291,9 +276,7 @@ class ChapterRunV2Store:
 
     def assert_accepts_result(self, manifest: ChapterRunV2Manifest) -> None:
         if manifest.cancel_requested or manifest.status == "cancelled":
-            raise ChapterRunV2Error(
-                "运行已取消，拒绝晚到模型结果", code="LATE_RESULT_REJECTED"
-            )
+            raise ChapterRunV2Error("运行已取消，拒绝晚到模型结果", code="LATE_RESULT_REJECTED")
 
     def mark_stale(
         self,
@@ -313,8 +296,7 @@ class ChapterRunV2Store:
             dependency_stale = any(dep in stale for dep in V2_STAGE_DEPENDENCIES[stage])
             input_stale = any(
                 key in changed
-                and record.input_revisions.get(key)
-                != current_input_revisions.get(key)
+                and record.input_revisions.get(key) != current_input_revisions.get(key)
                 for key in record.input_revisions
             )
             if record.status == "completed" and (dependency_stale or input_stale):
@@ -372,9 +354,7 @@ class ChapterRunV2Store:
     ) -> InterventionV1:
         index, current = self._intervention(manifest, intervention_id)
         if state in {"confirmed", "applied"} and not confirm:
-            raise ChapterRunV2Error(
-                "干预确认或应用需要显式确认", code="CONFIRMATION_REQUIRED"
-            )
+            raise ChapterRunV2Error("干预确认或应用需要显式确认", code="CONFIRMATION_REQUIRED")
         allowed = {
             "recorded": {"facts_read", "rejected", "stale"},
             "facts_read": {"classified", "rejected", "stale"},
@@ -396,14 +376,10 @@ class ChapterRunV2Store:
             update={
                 "state": state,
                 "facts_revision": (
-                    current.facts_revision
-                    if facts_revision is None
-                    else str(facts_revision)
+                    current.facts_revision if facts_revision is None else str(facts_revision)
                 ),
                 "impact": (
-                    current.impact
-                    if impact is None
-                    else tuple(str(item) for item in impact)
+                    current.impact if impact is None else tuple(str(item) for item in impact)
                 ),
                 "proposal": current.proposal if proposal is None else str(proposal)[:20000],
                 "updated_at": now,
@@ -574,9 +550,7 @@ class ChapterRunV2Store:
                     "artifact 必须位于项目目录内", code="PATH_OUT_OF_BOUNDS"
                 ) from exc
         if ".." in path.parts:
-            raise ChapterRunV2Error(
-                "artifact 路径越界", code="PATH_OUT_OF_BOUNDS"
-            )
+            raise ChapterRunV2Error("artifact 路径越界", code="PATH_OUT_OF_BOUNDS")
         return str(path)
 
     @staticmethod
@@ -648,15 +622,9 @@ def chapter_run_v2_action(
             str(payload.get("intervention_id") or ""),
             state=str(payload.get("state") or ""),
             facts_revision=(
-                str(payload["facts_revision"])
-                if "facts_revision" in payload
-                else None
+                str(payload["facts_revision"]) if "facts_revision" in payload else None
             ),
-            impact=(
-                payload.get("impact")
-                if isinstance(payload.get("impact"), list)
-                else None
-            ),
+            impact=(payload.get("impact") if isinstance(payload.get("impact"), list) else None),
             proposal=(str(payload["proposal"]) if "proposal" in payload else None),
             confirm=bool(payload.get("confirm")),
         )
@@ -665,9 +633,19 @@ def chapter_run_v2_action(
             "intervention": intervention.model_dump(mode="json"),
         }
     if action == "cancel":
+        if manifest.status in {"reviewed", "cancelled"}:
+            return {
+                "run": store.payload(manifest),
+                "cancelled": manifest.status == "cancelled",
+                "already_terminal": True,
+                "code": "RUN_ALREADY_TERMINAL",
+                "message": (
+                    "运行已经完成审稿，不能再取消。"
+                    if manifest.status == "reviewed"
+                    else "运行已经取消。"
+                ),
+            }
         store.request_cancel(manifest, reason=str(payload.get("reason") or "user_cancelled"))
         store.finalize_cancel(manifest)
         return {"run": store.payload(manifest), "cancelled": True}
-    raise ChapterRunV2Error(
-        f"未知 Chapter Run V2 操作: {action}", code="INVALID_RUN_ACTION"
-    )
+    raise ChapterRunV2Error(f"未知 Chapter Run V2 操作: {action}", code="INVALID_RUN_ACTION")

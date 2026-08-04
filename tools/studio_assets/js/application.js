@@ -4157,10 +4157,15 @@ function renderRelationshipGraph(graph) {
   const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
   const edges = Array.isArray(graph.edges) ? graph.edges : [];
   const filter = $("#relationship-filter").value;
+  const origin = $("#relationship-origin").value;
   const query = normalizeRelationshipSearch($("#relationship-search").value);
   const typedNodes = filter === "all" ? nodes : nodes.filter((node) => node.kind === filter);
   const typedIds = new Set(typedNodes.map((node) => node.id));
-  const typedEdges = edges.filter((edge) => typedIds.has(edge.source) && typedIds.has(edge.target));
+  const typedEdges = edges.filter((edge) => (
+    typedIds.has(edge.source)
+    && typedIds.has(edge.target)
+    && (origin === "all" || edge.origin === origin)
+  ));
   const matchIds = query ? findRelationshipMatches(typedNodes, typedEdges, query) : new Set();
   const contextIds = new Set(matchIds);
   if (query) {
@@ -4182,16 +4187,21 @@ function renderRelationshipGraph(graph) {
 
   const totalNodes = Number(graph.totals?.nodes ?? nodes.length);
   const totalEdges = Number(graph.totals?.edges ?? edges.length);
+  const canonicalEdges = Number(graph.relation_totals?.canonical ?? edges.filter((edge) => edge.origin === "canonical").length);
+  const annotationEdges = Number(graph.relation_totals?.annotation ?? edges.filter((edge) => edge.origin === "annotation").length);
+  const relationDiagnostics = Array.isArray(graph.diagnostics) ? graph.diagnostics : [];
   const relationHint = totalNodes && !totalEdges
-    ? " · 暂无结构化连线，请在实体中添加 related / 关联"
+    ? " · 暂无已注册连线，请添加 related 或关系批注"
     : "";
-  $("#relationship-summary").textContent = `${totalNodes} 个节点 · ${totalEdges} 条关系${graph.truncated ? " · 已按性能上限截取" : ""}${relationHint}`;
+  $("#relationship-summary").textContent = `${totalNodes} 个节点 · ${totalEdges} 条关系（资料字段 ${canonicalEdges} · 正文注册 ${annotationEdges}）${relationDiagnostics.length ? ` · 注册错误 ${relationDiagnostics.length}` : ""}${graph.truncated ? " · 已按性能上限截取" : ""}${relationHint}`;
   $("#relationship-visible-count").textContent = String(visibleNodes.length);
   $("#relationship-search-status").textContent = query
     ? (matchIds.size
       ? `搜索“${$("#relationship-search").value.trim()}”：匹配 ${matchIds.size} 个节点，已保留相邻上下文。按 Enter 定位第一个匹配。`
       : `搜索“${$("#relationship-search").value.trim()}”：没有匹配节点。`)
-    : "输入名称、ID、摘要或关系文字开始搜索。";
+    : (relationDiagnostics.length
+      ? `${relationDiagnostics[0].message}（${relationDiagnostics[0].path}:${relationDiagnostics[0].line}）`
+      : "输入名称、ID、摘要或关系文字开始搜索。");
   $("#relationship-empty").textContent = query
     ? "没有匹配节点。可以缩短关键词或切换节点类型。"
     : (filter === "all"
@@ -4226,7 +4236,8 @@ function findRelationshipMatches(nodes, edges, query) {
     if (corpusById.get(node.id)?.includes(query)) matchIds.add(node.id);
   });
   edges.forEach((edge) => {
-    if (String(edge.label || "").toLocaleLowerCase("zh-CN").includes(query)) {
+    if ([edge.label, edge.kind, edge.source_label, edge.origin].filter(Boolean)
+      .join(" ").toLocaleLowerCase("zh-CN").includes(query)) {
       matchIds.add(edge.source);
       matchIds.add(edge.target);
     }
@@ -4268,6 +4279,8 @@ function buildRelationshipSvg(nodes, edges) {
   edges.forEach((edge) => {
     const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
     line.classList.add("relationship-edge");
+    line.classList.toggle("annotation", edge.origin === "annotation");
+    line.classList.toggle("canonical", edge.origin === "canonical");
     line.dataset.edgeId = edge.id;
     const searchRelated = Boolean(state.relationship.query) && (
       state.relationship.matchIds.has(edge.source) || state.relationship.matchIds.has(edge.target)
@@ -4275,7 +4288,7 @@ function buildRelationshipSvg(nodes, edges) {
     line.classList.toggle("search-related", searchRelated);
     line.classList.toggle("search-context", Boolean(state.relationship.query) && !searchRelated);
     const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-    title.textContent = edge.label;
+    title.textContent = `${edge.label} · ${edge.origin === "canonical" ? "资料字段" : "正文注册"}`;
     line.append(title);
     edgeRoot.append(line);
   });
@@ -4565,12 +4578,31 @@ function renderRelationshipDetail() {
     source.textContent = node.source_path; source.title = `打开 ${node.source_path}`;
     source.addEventListener("click", () => openDocument(node.source_path)); root.append(source);
   }
+  if (node.asset_kind) {
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "quiet-button relationship-edit-asset";
+    edit.textContent = "在资料库中编辑";
+    edit.addEventListener("click", () => openStructuredAsset({
+      asset_kind: node.asset_kind,
+      asset_id: node.id,
+      path: node.source_path,
+    }, true));
+    root.append(edit);
+  }
   const neighbors = state.relationship.edges.filter((edge) => edge.source === node.id || edge.target === node.id);
   const list = document.createElement("ul");
   neighbors.forEach((edge) => {
     const neighborId = edge.source === node.id ? edge.target : edge.source;
     const neighbor = state.relationship.nodes.find((item) => item.id === neighborId);
-    const item = document.createElement("li"); item.textContent = `${neighbor?.label || neighborId}：${edge.label}`; list.append(item);
+    const item = document.createElement("li");
+    const text = document.createElement("span");
+    text.textContent = `${neighbor?.label || neighborId}：${edge.label}`;
+    const origin = document.createElement("small");
+    origin.className = `relationship-edge-origin ${edge.origin || "annotation"}`;
+    origin.textContent = edge.origin === "canonical" ? "资料字段" : "正文注册";
+    item.append(text, origin);
+    list.append(item);
   });
   if (neighbors.length) root.append(list); else { const empty = document.createElement("p"); empty.textContent = "当前筛选中没有相邻关系。"; root.append(empty); }
 }
@@ -5378,6 +5410,7 @@ function bindEvents() {
   $("#agent-history-refresh").addEventListener("click", () => loadAgentSurface(state.agent, activeAgentSessionId()));
   $("#continuity-refresh").addEventListener("click", loadContinuity);
   $("#relationship-filter").addEventListener("change", () => renderRelationshipGraph(state.continuity?.relationship_graph || {}));
+  $("#relationship-origin").addEventListener("change", () => renderRelationshipGraph(state.continuity?.relationship_graph || {}));
   $("#relationship-search").addEventListener("input", () => renderRelationshipGraph(state.continuity?.relationship_graph || {}));
   $("#relationship-search").addEventListener("keydown", handleRelationshipSearchKeydown);
   $("#relationship-fit").addEventListener("click", fitRelationshipGraph);
@@ -5511,6 +5544,7 @@ function bindEvents() {
   });
   bindAssetUI({
     refreshWorkspace: loadWorkspace,
+    refreshContinuity: loadContinuity,
     activateAssetEditor: activateStructuredAssetEditor,
   });
 }

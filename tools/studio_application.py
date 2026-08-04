@@ -3315,7 +3315,7 @@ class StudioApplication:
 
     def read_asset(self, kind: str, asset_id: str) -> dict[str, Any]:
         try:
-            return self._assets().read(kind, asset_id)
+            return self._asset_with_relations(self._assets().read(kind, asset_id))
         except StructuredAssetError as exc:
             raise self._translate_asset_error(exc) from exc
 
@@ -3328,7 +3328,7 @@ class StudioApplication:
             raise self._translate_asset_error(exc) from exc
         except NovelServiceError as exc:
             raise self._translate_service_error(exc) from exc
-        return {"asset": asset, "sync": sync}
+        return {"asset": self._asset_with_relations(asset), "sync": sync}
 
     def update_asset(self, payload: dict[str, Any]) -> dict[str, Any]:
         kind = str(payload.get("kind") or "")
@@ -3346,7 +3346,22 @@ class StudioApplication:
             raise self._translate_asset_error(exc) from exc
         except NovelServiceError as exc:
             raise self._translate_service_error(exc) from exc
-        return {"asset": asset, "sync": sync}
+        return {"asset": self._asset_with_relations(asset), "sync": sync}
+
+    def _asset_with_relations(self, asset: dict[str, Any]) -> dict[str, Any]:
+        if asset.get("kind") not in {"character", "world"}:
+            return asset
+        from tools.world_query import get_asset_relation_view
+
+        return {
+            **asset,
+            "relation_view": get_asset_relation_view(
+                self.novel_id,
+                str(asset.get("id") or ""),
+                project_root=self.project_root,
+                asset_kind=str(asset.get("kind") or ""),
+            ),
+        }
 
     def asset_package_preview(self, payload: dict[str, Any]) -> dict[str, Any]:
         encoded = str(payload.get("package_base64") or "")

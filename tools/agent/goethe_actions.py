@@ -108,11 +108,35 @@ class GoethePlanningRuntime:
         brief = str(request_text or "").strip()
         title, genre = self._load_title_and_genre()
         architect = self._get_architect()
+        confirmed_sections = [
+            ("已确认构思摘要", self.story_planning_store.read_ideation_summary(max_chars=2200)),
+            (
+                "已确认故事背景",
+                self.story_planning_store.read_story_document("background", max_chars=3600),
+            ),
+            (
+                "已确认基础设定",
+                self.story_planning_store.read_story_document("foundation", max_chars=3600),
+            ),
+            ("已确认大纲片段", self.story_planning_store.read_outline_source(max_chars=3000)),
+        ]
+        confirmed_context = "\n\n".join(
+            f"### {label}\n{text}" for label, text in confirmed_sections if str(text or "").strip()
+        )
+        generation_brief = brief
+        if confirmed_context:
+            generation_brief = (
+                f"{brief}\n\n"
+                "以下内容是当前项目已经确认的正典资产。草案只能补全或细化，"
+                "不得替换题材、世界背景、力量体系、角色身份或组织含义；"
+                "若请求与正典冲突，以正典为准。\n\n"
+                f"{confirmed_context}"
+            ).strip()
 
         foundation = architect.generate_foundation(
             title=title,
             genre=genre,
-            brief=brief,
+            brief=generation_brief,
         )
         try:
             self.story_planning_store.save_foundation_draft(
@@ -132,8 +156,12 @@ class GoethePlanningRuntime:
             }
 
         state = self.book_state_store.load_or_create()
-        state.stage = BookStage.FOUNDATION
-        state.pending_confirmation = "foundation"
+        can_promote = state.stage in {BookStage.DISCOVERY, BookStage.FOUNDATION}
+        if can_promote:
+            state.stage = BookStage.FOUNDATION
+            state.pending_confirmation = "foundation"
+        elif state.pending_confirmation == "foundation":
+            state.pending_confirmation = ""
         state.blocking_reason = ""
         state.last_agent_action = "generated_foundation_draft"
         self.book_state_store.save(state)
@@ -141,28 +169,29 @@ class GoethePlanningRuntime:
         return {
             "ok": True,
             "blocked": False,
-            "next_action": "confirm_foundation",
+            "next_action": "confirm_foundation" if can_promote else "review_foundation_draft",
             "title": title,
             "genre": genre,
             "background_path": str(self.story_planning_store.background_draft_path),
             "foundation_path": str(self.story_planning_store.foundation_draft_path),
-            "volume_outline_path": str(
-                self.story_planning_store.volume_outline_draft_path
+            "volume_outline_path": str(self.story_planning_store.volume_outline_draft_path),
+            "current_state_path": str(self.story_planning_store.current_state_draft_path),
+            "foreshadowing_path": (
+                str(self.story_planning_store.foreshadowing_draft_path)
+                if self.story_planning_store.foreshadowing_draft_path.is_file()
+                else ""
             ),
-            "current_state_path": str(
-                self.story_planning_store.current_state_draft_path
-            ),
-            "foreshadowing_path": str(
-                self.story_planning_store.foreshadowing_draft_path
-            ),
+            "foreshadowing_generated": self.story_planning_store.foreshadowing_draft_path.is_file(),
             "story_bible": foundation.story_bible,
             "book_rules": foundation.book_rules,
             "current_state": foundation.current_state,
             "outline_seed": foundation.volume_outline,
             "foreshadowing_seed": foundation.foreshadowing_seed,
             "message": (
-                "基础设定、卷纲、初始状态与伏笔草案已写入 planning；"
-                "确认前未修改 canonical 资产。"
+                "基础设定辅助草案已写入 planning；确认前未修改 canonical 资产。"
+                if can_promote
+                else "基础设定辅助草案已写入 planning；当前写作阶段不会倒退，"
+                "如需替换 canonical 基础设定应开启独立修订流程。"
             ),
         }
 
@@ -243,9 +272,7 @@ class GoethePlanningRuntime:
                 "message": "character_id 无效。",
             }
         draft_path = (
-            self.story_planning_store.runtime_planning_dir
-            / "characters"
-            / f"{clean_id}.md"
+            self.story_planning_store.runtime_planning_dir / "characters" / f"{clean_id}.md"
         )
         if not draft_path.is_file():
             return {
@@ -529,9 +556,7 @@ class GoethePlanningRuntime:
             },
             "summary": self._build_handoff_summary(readiness),
         }
-        handoff_md_path, handoff_yaml_path = self.story_planning_store.save_goethe_handoff(
-            manifest
-        )
+        handoff_md_path, handoff_yaml_path = self.story_planning_store.save_goethe_handoff(manifest)
 
         return {
             "ok": True,
@@ -559,7 +584,7 @@ class GoethePlanningRuntime:
     def _load_title_and_genre(self) -> tuple[str, str]:
         config = self._load_config()
         title = str(config.get("title", self.novel_id)).strip() or self.novel_id
-        genre = str(config.get("genre", "xuanhuan")).strip() or "xuanhuan"
+        genre = str(config.get("genre", "unspecified")).strip() or "unspecified"
         return title, genre
 
     def _load_config(self) -> dict[str, Any]:
@@ -583,9 +608,9 @@ class GoethePlanningRuntime:
         name = ""
         role = ""
         patterns = [
-            (r"角色名[:：]\s*([^，,。;\n]+)", "name"),
-            (r"名字[:：]\s*([^，,。;\n]+)", "name"),
-            (r"角色[:：]\s*([^，,。;\n]+)", "name"),
+            (r"角色名[:：]\s*([^，,。;；\n]+)", "name"),
+            (r"名字[:：]\s*([^，,。;；\n]+)", "name"),
+            (r"角色[:：]\s*([^，,。;；\n]+)", "name"),
         ]
         for pattern, _kind in patterns:
             match = re.search(pattern, raw)
@@ -594,10 +619,10 @@ class GoethePlanningRuntime:
                 break
 
         role_patterns = [
-            r"定位[:：]\s*([^，,。;\n]+)",
-            r"身份[:：]\s*([^，,。;\n]+)",
-            r"角色定位[:：]\s*([^，,。;\n]+)",
-            r"角色类型[:：]\s*([^，,。;\n]+)",
+            r"定位[:：]\s*([^，,。;；\n]+)",
+            r"身份[:：]\s*([^，,。;；\n]+)",
+            r"角色定位[:：]\s*([^，,。;；\n]+)",
+            r"角色类型[:：]\s*([^，,。;；\n]+)",
         ]
         for pattern in role_patterns:
             match = re.search(pattern, raw)
@@ -650,13 +675,7 @@ class GoethePlanningRuntime:
 
     def _source_root(self, source_id: str) -> Path:
         return (
-            self.project_root
-            / "data"
-            / "novels"
-            / self.novel_id
-            / "data"
-            / "sources"
-            / source_id
+            self.project_root / "data" / "novels" / self.novel_id / "data" / "sources" / source_id
         )
 
     @staticmethod
@@ -734,8 +753,7 @@ class GoethePlanningRuntime:
         meta, body = parse_toml_front_matter(text)
         errors: list[str] = []
         missing_meta = [
-            key for key in ("id", "name", "tier", "summary", "tags")
-            if meta.get(key) in (None, "")
+            key for key in ("id", "name", "tier", "summary", "tags") if meta.get(key) in (None, "")
         ]
         if missing_meta:
             errors.append(f"{path.name} front matter 缺少: {', '.join(missing_meta)}")
@@ -908,9 +926,7 @@ class GoetheActionAdapter:
         )
 
     def list_reference_library(self) -> dict[str, Any]:
-        return self._wrap(
-            "list_reference_library", self.runtime.list_reference_library()
-        )
+        return self._wrap("list_reference_library", self.runtime.list_reference_library())
 
     def review_reference_source(self, source_id: str) -> dict[str, Any]:
         if not str(source_id or "").strip():
@@ -940,9 +956,7 @@ class GoetheActionAdapter:
             self.runtime.preview_reference_adoption(profile_id, selections),
         )
 
-    def apply_reference_adoption(
-        self, preview_id: str, *, confirm: bool
-    ) -> dict[str, Any]:
+    def apply_reference_adoption(self, preview_id: str, *, confirm: bool) -> dict[str, Any]:
         if not str(preview_id or "").strip():
             return self._missing_required("apply_reference_adoption", "preview_id")
         return self._wrap(

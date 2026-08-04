@@ -62,12 +62,16 @@ def test_studio_structured_assets_support_fields_and_validated_raw_mode(tmp_path
                     "name": "林舟",
                     "summary": "钟楼修复师",
                     "aliases": ["小林"],
+                    "tags": ["修复师", "钟楼"],
                 },
                 "body_markdown": "# 林舟\n\n他负责修复旧钟。\n",
             }
         )["asset"]
         assert created["data"]["aliases"] == ["小林"]
         assert 'id = "char_linzhou"' in created["raw_text"]
+        summary = app.asset_surface("character")["assets"][0]
+        assert summary["aliases"] == ["小林"]
+        assert summary["tags"] == ["修复师", "钟楼"]
 
         raw_text = created["raw_text"].replace("钟楼修复师", "失去一分钟的人")
         updated = app.update_asset(
@@ -106,6 +110,59 @@ def test_studio_structured_assets_preserve_legacy_markdown_titles(tmp_path: Path
         assert asset["name"] == "林舟"
         assert asset["data"]["name"] == "林舟"
         assert app.asset_surface("character")["assets"][0]["name"] == "林舟"
+    finally:
+        if app._task_runner is not None:
+            app._task_runner.shutdown(wait=True)
+
+
+def test_studio_asset_api_exposes_inline_registered_relations(tmp_path: Path):
+    init_project(tmp_path, "demo")
+    app = StudioApplication(tmp_path)
+    try:
+        app.create_asset(
+            {
+                "kind": "character",
+                "id": "partner",
+                "data": {"name": "苏遥"},
+                "body_markdown": "# 苏遥\n",
+            }
+        )
+        hero = app.create_asset(
+            {
+                "kind": "character",
+                "id": "hero",
+                "data": {"name": "林舟"},
+                "body_markdown": "# 林舟\n\n//**林舟~苏遥:共同调查旧案**\n",
+            }
+        )["asset"]
+
+        assert hero["relation_view"]["counts"] == {
+            "confirmed": 0,
+            "registered": 1,
+            "suggested": 0,
+            "incoming": 0,
+        }
+        assert hero["relation_view"]["registered"][0]["target"] == "partner"
+        assert app.read_asset("character", "partner")["relation_view"]["incoming"][0][
+            "target"
+        ] == "hero"
+
+        confirmed = app.update_asset(
+            {
+                "kind": "character",
+                "id": "hero",
+                "revision": hero["revision"],
+                "data": {
+                    "related": [
+                        {"target": "partner", "kind": "ally", "note": "共同调查旧案"}
+                    ]
+                },
+                "body_markdown": hero["body_markdown"],
+            }
+        )["asset"]
+
+        assert confirmed["relation_view"]["counts"]["confirmed"] == 1
+        assert confirmed["relation_view"]["counts"]["registered"] == 0
     finally:
         if app._task_runner is not None:
             app._task_runner.shutdown(wait=True)
