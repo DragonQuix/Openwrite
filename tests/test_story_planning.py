@@ -280,6 +280,94 @@ def test_stage_outline_edits_replaces_markdown_section_without_copying_old_text(
     assert "### 第二节：追踪\n\n必须保留的相邻内容。" in draft
 
 
+def test_stage_outline_edits_replaces_range_between_short_anchors(tmp_path: Path):
+    store = StoryPlanningStore(tmp_path, "demo")
+    original = (
+        "# 大纲\n\n范围开头的唯一短句\n旧内容一\n旧内容二\n"
+        "范围结尾的唯一短句\n\n相邻内容保留\n"
+    )
+    store.outline_src_path.parent.mkdir(parents=True)
+    store.outline_src_path.write_text(original, encoding="utf-8")
+
+    result = store.stage_outline_edits(
+        base_revision=store.outline_source_revision(),
+        edits=[
+            {
+                "start_text": "范围开头的唯一短句",
+                "end_text": "范围结尾的唯一短句",
+                "new_text": "精简后的新内容",
+            }
+        ],
+        final_batch=False,
+    )
+
+    assert result["ok"] is True
+    assert result["applied"][0]["mode"] == "range"
+    assert result["applied"][0]["automatic"] is False
+    draft = store.outline_draft_path.read_text(encoding="utf-8")
+    assert "精简后的新内容" in draft
+    assert "旧内容一" not in draft
+    assert "范围开头的唯一短句" not in draft
+    assert "相邻内容保留" in draft
+
+
+def test_long_old_text_mismatch_automatically_falls_back_to_range_anchors(
+    tmp_path: Path,
+):
+    store = StoryPlanningStore(tmp_path, "demo")
+    original = (
+        "# 大纲\n\n【长范围开始】\n"
+        + "当前真实内容。" * 80
+        + "\n【长范围结束】\n\n不应被修改\n"
+    )
+    store.outline_src_path.parent.mkdir(parents=True)
+    store.outline_src_path.write_text(original, encoding="utf-8")
+    inaccurate_old_text = (
+        "【长范围开始】\n" + "模型记错的中间内容。" * 60 + "\n【长范围结束】"
+    )
+
+    result = store.stage_outline_edits(
+        base_revision=store.outline_source_revision(),
+        edits=[{"old_text": inaccurate_old_text, "new_text": "自动收敛后的内容"}],
+        final_batch=False,
+    )
+
+    assert result["ok"] is True
+    assert result["applied"][0]["mode"] == "range"
+    assert result["applied"][0]["automatic"] is True
+    draft = store.outline_draft_path.read_text(encoding="utf-8")
+    assert "自动收敛后的内容" in draft
+    assert "当前真实内容" not in draft
+    assert "不应被修改" in draft
+
+
+def test_stage_outline_edits_only_blocks_ambiguous_range_anchors(tmp_path: Path):
+    store = StoryPlanningStore(tmp_path, "demo")
+    store.outline_src_path.parent.mkdir(parents=True)
+    store.outline_src_path.write_text(
+        "重复起点\n内容一\n重复起点\n内容二\n唯一终点\n",
+        encoding="utf-8",
+    )
+
+    result = store.stage_outline_edits(
+        base_revision=store.outline_source_revision(),
+        edits=[
+            {
+                "start_text": "重复起点",
+                "end_text": "唯一终点",
+                "new_text": "新内容",
+            }
+        ],
+        final_batch=False,
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "ambiguous_text_range"
+    assert result["details"]["range_count"] == 2
+    assert "各增加几个字" in result["message"]
+    assert store.outline_draft_path.exists() is False
+
+
 def test_stage_outline_edits_reports_available_headings_for_unknown_section(
     tmp_path: Path,
 ):

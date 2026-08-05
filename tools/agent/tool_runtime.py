@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import json
 import os
+import re
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +17,9 @@ import yaml
 from tools.novel_service import NovelApplicationService, NovelServiceError
 
 ToolExecutor = Callable[[dict[str, Any]], dict[str, Any]]
+
+DOCUMENT_LONG_OLD_TEXT_CHARS = 240
+DOCUMENT_RANGE_ANCHOR_CHARS = 96
 
 
 def _service_error(exc: NovelServiceError) -> dict[str, Any]:
@@ -635,6 +640,27 @@ def _read_project_document(
 def _edit_project_document(
     project_root: Path, novel_id: str, args: dict[str, Any]
 ) -> dict[str, Any]:
+    confirm = bool(args.get("confirm"))
+    stored_preview_path: Path | None = None
+    preview_token = str(args.get("preview_token") or "").strip()
+    if confirm and preview_token:
+        stored_preview, stored_preview_path, preview_error = (
+            _load_document_edit_preview(project_root, novel_id, preview_token)
+        )
+        if preview_error:
+            return {
+                "ok": False,
+                "applied": False,
+                "error": "document_preview_invalid",
+                "message": preview_error,
+            }
+        args = {
+            **args,
+            "path": stored_preview["path"],
+            "edits": stored_preview["edits"],
+            "revision": stored_preview["revision"],
+        }
+
     path_result = _resolve_project_document(project_root, novel_id, args)
     if isinstance(path_result, dict):
         return path_result
@@ -646,35 +672,173 @@ def _edit_project_document(
         return {"ok": False, "error": "单次最多编辑 50 个片段"}
     original = path.read_text(encoding="utf-8")
     revision = hashlib.sha256(original.encode("utf-8")).hexdigest()[:16]
+    if confirm and str(
+        args.get("revision") or args.get("base_revision") or ""
+    ).strip() != revision:
+        return {
+            "ok": False,
+            "applied": False,
+            "changed": False,
+            "path": relative,
+            "revision": revision,
+            "error": "document_revision_conflict",
+            "message": "文件已变化，请重新读取并预览后确认。",
+        }
     revised = original
     applied: list[dict[str, Any]] = []
     for index, edit in enumerate(edits):
         if not isinstance(edit, dict):
             return {"ok": False, "error": f"第 {index + 1} 个修改不是对象"}
+        start_text = str(edit.get("start_text") or "").strip()
+        end_text = str(edit.get("end_text") or "").strip()
         old_text = str(edit.get("old_text") or "")
         new_text = str(edit.get("new_text") or "")
         replace_all = bool(edit.get("replace_all"))
+        if start_text or end_text:
+            if not start_text or not end_text:
+                missing = "start_text" if not start_text else "end_text"
+                return {
+                    "ok": False,
+                    "error": "missing_range_anchor",
+                    "message": (
+                        f"第 {index + 1} 个修改缺少 {missing}；"
+                        "范围替换需要同时提供 start_text 和 end_text。"
+                    ),
+                    "revision": revision,
+                    "details": {
+                        "field_path": f"$.edits[{index}].{missing}",
+                        "retry_revision": revision,
+                    },
+                }
+            replacement = _replace_document_text_range(
+                revised,
+                start_text,
+                end_text,
+                new_text,
+            )
+            if not replacement["ok"]:
+                return {
+                    "ok": False,
+                    "error": replacement["error"],
+                    "message": f"第 {index + 1} 个修改{replacement['message']}",
+                    "revision": revision,
+                    "details": {
+                        "field_paths": [
+                            f"$.edits[{index}].start_text",
+                            f"$.edits[{index}].end_text",
+                        ],
+                        "retry_revision": revision,
+                        **dict(replacement.get("details") or {}),
+                    },
+                }
+            revised = str(replacement["source"])
+            applied.append(
+                {
+                    "index": index + 1,
+                    "mode": "range",
+                    "automatic": False,
+                    "start_line": replacement["start_line"],
+                    "end_line": replacement["end_line"],
+                    "replacements": 1,
+                    "replace_all": False,
+                }
+            )
+            continue
         if not old_text:
-            return {"ok": False, "error": f"第 {index + 1} 个修改缺少 old_text"}
+            return {
+                "ok": False,
+                "error": "missing_edit_selector",
+                "message": (
+                    f"第 {index + 1} 个修改没有定位信息；"
+                    "长范围使用 start_text/end_text，短句使用 old_text。"
+                ),
+                "revision": revision,
+                "details": {
+                    "field_paths": [
+                        f"$.edits[{index}].start_text",
+                        f"$.edits[{index}].end_text",
+                        f"$.edits[{index}].old_text",
+                    ],
+                    "retry_revision": revision,
+                },
+            }
         occurrences = revised.count(old_text)
         if occurrences == 0:
+            long_text = len(old_text) >= DOCUMENT_LONG_OLD_TEXT_CHARS
+            automatic_anchors = (
+                _range_anchors_from_long_document_text(old_text) if long_text else None
+            )
+            if automatic_anchors:
+                replacement = _replace_document_text_range(
+                    revised,
+                    automatic_anchors[0],
+                    automatic_anchors[1],
+                    new_text,
+                )
+                if replacement["ok"]:
+                    revised = str(replacement["source"])
+                    applied.append(
+                        {
+                            "index": index + 1,
+                            "mode": "range",
+                            "automatic": True,
+                            "start_line": replacement["start_line"],
+                            "end_line": replacement["end_line"],
+                            "replacements": 1,
+                            "replace_all": False,
+                        }
+                    )
+                    continue
+            diagnostics = _document_edit_diagnostics(revised, old_text)
+            if long_text:
+                diagnostics["suggested_old_text"] = ""
+                diagnostics["suggested_old_text_truncated"] = False
+                diagnostics["suggested_start_text"] = (
+                    automatic_anchors[0] if automatic_anchors else ""
+                )
+                diagnostics["suggested_end_text"] = (
+                    automatic_anchors[1] if automatic_anchors else ""
+                )
+            if long_text:
+                failure_message = (
+                    f"第 {index + 1} 个长 old_text 未匹配；"
+                    "请重新读取文件，并改用唯一的 start_text/end_text。"
+                )
+            elif diagnostics.get("suggested_old_text"):
+                failure_message = (
+                    f"第 {index + 1} 个 old_text 不存在；"
+                    "请使用 details.suggested_old_text 返回的准确原文重试。"
+                )
+            else:
+                failure_message = (
+                    f"第 {index + 1} 个 old_text 不存在，请重新读取文件。"
+                )
             return {
                 "ok": False,
                 "error": "old_text_not_found",
-                "message": f"第 {index + 1} 个 old_text 不存在，请重新读取文件。",
+                "message": failure_message,
                 "revision": revision,
+                "details": {
+                    "field_path": f"$.edits[{index}].old_text",
+                    "retry_revision": revision,
+                    **diagnostics,
+                },
             }
         if occurrences > 1 and not replace_all:
             return {
                 "ok": False,
                 "error": "ambiguous_old_text",
-                "message": f"第 {index + 1} 个 old_text 匹配到 {occurrences} 处。",
+                "message": (
+                    f"第 {index + 1} 个 old_text 匹配到 {occurrences} 处；"
+                    "请改用唯一的 start_text/end_text。"
+                ),
                 "revision": revision,
             }
         revised = revised.replace(old_text, new_text, -1 if replace_all else 1)
         applied.append(
             {
                 "index": index + 1,
+                "mode": "text",
                 "replacements": occurrences if replace_all else 1,
                 "replace_all": replace_all,
             }
@@ -696,17 +860,22 @@ def _edit_project_document(
         "edit_count": len(applied),
         "edits": applied,
         "diff": diff,
-        "next_action": "确认后使用相同 path/edits/revision，并设置 confirm=true",
+        "next_action": "用户确认后仅传 preview_token，并设置 confirm=true",
     }
-    if not bool(args.get("confirm")) or revised == original:
+    if not confirm:
+        if revised != original:
+            payload["preview_token"] = _save_document_edit_preview(
+                project_root,
+                novel_id,
+                relative,
+                revision,
+                edits,
+            )
         return payload
-    if str(args.get("revision") or args.get("base_revision") or "").strip() != revision:
-        return {
-            **payload,
-            "ok": False,
-            "error": "document_revision_conflict",
-            "message": "文件已变化，请重新读取后确认。",
-        }
+    if revised == original:
+        if stored_preview_path is not None:
+            stored_preview_path.unlink(missing_ok=True)
+        return payload
     with tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
@@ -718,11 +887,291 @@ def _edit_project_document(
         handle.write(revised)
         temporary = Path(handle.name)
     os.replace(temporary, path)
+    if stored_preview_path is not None:
+        stored_preview_path.unlink(missing_ok=True)
     return {
         **payload,
         "applied": True,
         "revision": hashlib.sha256(revised.encode("utf-8")).hexdigest()[:16],
     }
+
+
+def _replace_document_text_range(
+    source: str,
+    start_text: str,
+    end_text: str,
+    new_text: str,
+) -> dict[str, Any]:
+    start_anchor = str(start_text or "").strip()
+    end_anchor = str(end_text or "").strip()
+    if not start_anchor or not end_anchor:
+        return {
+            "ok": False,
+            "error": "missing_range_anchor",
+            "message": "范围替换需要同时提供 start_text 和 end_text。",
+            "details": {},
+        }
+    start_positions = [
+        match.start() for match in re.finditer(re.escape(start_anchor), source)
+    ]
+    end_positions = [
+        match.start() for match in re.finditer(re.escape(end_anchor), source)
+    ]
+    if not start_positions or not end_positions:
+        missing = []
+        if not start_positions:
+            missing.append("start_text")
+        if not end_positions:
+            missing.append("end_text")
+        return {
+            "ok": False,
+            "error": "text_range_not_found",
+            "message": f"找不到{'和'.join(missing)}锚点。",
+            "details": {
+                "missing_anchors": missing,
+                "start_occurrences": len(start_positions),
+                "end_occurrences": len(end_positions),
+            },
+        }
+
+    ranges: list[tuple[int, int]] = []
+    if start_anchor == end_anchor:
+        ranges = [
+            (position, position + len(end_anchor)) for position in start_positions
+        ]
+    else:
+        for start in start_positions:
+            minimum_end = start + len(start_anchor)
+            for end in end_positions:
+                if end >= minimum_end:
+                    ranges.append((start, end + len(end_anchor)))
+    if not ranges:
+        return {
+            "ok": False,
+            "error": "text_range_not_found",
+            "message": "找到了首尾锚点，但它们的顺序不成立。",
+            "details": {
+                "start_occurrences": len(start_positions),
+                "end_occurrences": len(end_positions),
+            },
+        }
+    if len(ranges) > 1:
+        return {
+            "ok": False,
+            "error": "ambiguous_text_range",
+            "message": (
+                f"首尾锚点组合成 {len(ranges)} 个可能范围；"
+                "请增加锚点文字，直到只定位一处。"
+            ),
+            "details": {
+                "range_count": len(ranges),
+                "start_occurrences": len(start_positions),
+                "end_occurrences": len(end_positions),
+            },
+        }
+
+    start, end = ranges[0]
+    return {
+        "ok": True,
+        "source": source[:start] + str(new_text or "") + source[end:],
+        "start_line": source.count("\n", 0, start) + 1,
+        "end_line": source.count("\n", 0, end) + 1,
+    }
+
+
+def _range_anchors_from_long_document_text(old_text: str) -> tuple[str, str] | None:
+    text = str(old_text or "").strip()
+    if len(text) < DOCUMENT_LONG_OLD_TEXT_CHARS:
+        return None
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) >= 2:
+        start = lines[0][:DOCUMENT_RANGE_ANCHOR_CHARS]
+        end = lines[-1][-DOCUMENT_RANGE_ANCHOR_CHARS:]
+    elif len(text) >= DOCUMENT_RANGE_ANCHOR_CHARS * 2:
+        start = text[:DOCUMENT_RANGE_ANCHOR_CHARS]
+        end = text[-DOCUMENT_RANGE_ANCHOR_CHARS:]
+    else:
+        return None
+    if not start or not end or start == end:
+        return None
+    return start, end
+
+
+def _document_edit_diagnostics(
+    source: str,
+    submitted: str,
+    *,
+    max_suggestion_chars: int = 6000,
+) -> dict[str, Any]:
+    """Return an exact current span only when a fuzzy match is unambiguous."""
+
+    normalized_source, source_positions = _collapse_whitespace_with_positions(source)
+    normalized_submitted, _ = _collapse_whitespace_with_positions(submitted.strip())
+    suggested = ""
+    similarity = 0.0
+    if normalized_submitted:
+        matches = [
+            match.start()
+            for match in re.finditer(
+                re.escape(normalized_submitted),
+                normalized_source,
+            )
+        ]
+        if len(matches) == 1:
+            start = source_positions[matches[0]]
+            normalized_end = matches[0] + len(normalized_submitted) - 1
+            end = source_positions[normalized_end] + 1
+            suggested = source[start:end]
+            similarity = 1.0
+
+    if not suggested:
+        source_lines = source.splitlines(keepends=True)
+        submitted_line_count = max(1, len(submitted.splitlines()))
+        candidates: list[tuple[float, str]] = []
+        for start in range(max(0, len(source_lines) - submitted_line_count + 1)):
+            candidate = "".join(source_lines[start : start + submitted_line_count])
+            if not submitted.endswith(("\n", "\r")):
+                candidate = candidate.rstrip("\r\n")
+            score = difflib.SequenceMatcher(
+                None,
+                " ".join(submitted.split()),
+                " ".join(candidate.split()),
+            ).ratio()
+            candidates.append((score, candidate))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        if candidates:
+            best_score, best_candidate = candidates[0]
+            second_score = candidates[1][0] if len(candidates) > 1 else 0.0
+            if best_score >= 0.8 and best_score - second_score >= 0.08:
+                suggested = best_candidate
+                similarity = best_score
+
+    suggestion_truncated = len(suggested) > max_suggestion_chars
+    if suggestion_truncated:
+        suggested = ""
+    return {
+        "suggested_old_text": suggested,
+        "suggested_old_text_truncated": suggestion_truncated,
+        "similarity": round(similarity, 3),
+    }
+
+
+def _collapse_whitespace_with_positions(value: str) -> tuple[str, list[int]]:
+    normalized: list[str] = []
+    positions: list[int] = []
+    in_whitespace = False
+    for index, character in enumerate(value):
+        if character.isspace():
+            if not in_whitespace:
+                normalized.append(" ")
+                positions.append(index)
+            in_whitespace = True
+            continue
+        normalized.append(character)
+        positions.append(index)
+        in_whitespace = False
+    return "".join(normalized), positions
+
+
+def _document_edit_preview_root(project_root: Path, novel_id: str) -> Path:
+    return (
+        project_root
+        / "data"
+        / "novels"
+        / novel_id
+        / "data"
+        / "workflows"
+        / "document_edit_previews"
+    )
+
+
+def _document_edit_preview_record(
+    novel_id: str,
+    path: str,
+    revision: str,
+    edits: list[Any],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "novel_id": novel_id,
+        "path": path,
+        "revision": revision,
+        "edits": edits,
+    }
+
+
+def _document_edit_preview_token(record: dict[str, Any]) -> str:
+    serialized = json.dumps(
+        record,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
+
+
+def _save_document_edit_preview(
+    project_root: Path,
+    novel_id: str,
+    path: str,
+    revision: str,
+    edits: list[Any],
+) -> str:
+    record = _document_edit_preview_record(novel_id, path, revision, edits)
+    token = _document_edit_preview_token(record)
+    preview_root = _document_edit_preview_root(project_root, novel_id)
+    preview_root.mkdir(parents=True, exist_ok=True)
+    target = preview_root / f"{token}.json"
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=preview_root,
+        prefix=f".{token}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        json.dump(record, handle, ensure_ascii=False, sort_keys=True, indent=2)
+        handle.write("\n")
+        temporary = Path(handle.name)
+    os.replace(temporary, target)
+    return token
+
+
+def _load_document_edit_preview(
+    project_root: Path,
+    novel_id: str,
+    preview_token: str,
+) -> tuple[dict[str, Any], Path | None, str]:
+    if not re.fullmatch(r"[a-f0-9]{24}", preview_token):
+        return {}, None, "文档预览凭据格式无效，请重新预览。"
+    preview_root = _document_edit_preview_root(project_root, novel_id).resolve()
+    path = (preview_root / f"{preview_token}.json").resolve()
+    if preview_root not in path.parents or not path.is_file():
+        return {}, None, "文档预览凭据不存在或已使用，请重新预览。"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}, None, "文档预览凭据损坏，请重新预览。"
+    if not isinstance(raw, dict):
+        return {}, None, "文档预览凭据损坏，请重新预览。"
+    edits = raw.get("edits")
+    if (
+        raw.get("schema_version") != 1
+        or raw.get("novel_id") != novel_id
+        or not isinstance(raw.get("path"), str)
+        or not isinstance(raw.get("revision"), str)
+        or not isinstance(edits, list)
+    ):
+        return {}, None, "文档预览凭据与当前作品不匹配，请重新预览。"
+    record = _document_edit_preview_record(
+        novel_id,
+        raw["path"],
+        raw["revision"],
+        edits,
+    )
+    if _document_edit_preview_token(record) != preview_token:
+        return {}, None, "文档预览凭据校验失败，请重新预览。"
+    return record, path, ""
 
 
 def _resolve_project_document(

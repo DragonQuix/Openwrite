@@ -32,6 +32,8 @@
     <symbol id="icon-tasks" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></symbol>
     <symbol id="icon-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></symbol>
     <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></symbol>
+    <symbol id="icon-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+    <symbol id="icon-play" viewBox="0 0 24 24"><path d="m6 3 14 9-14 9Z"/></symbol>
   </svg>
   <a class="skip-link" href="#workspace-main">跳到正文</a>
   <div id="app" class="app" aria-busy="true">
@@ -536,26 +538,34 @@
                 <p class="relationship-format-help"><code>//**A~&gt;B:具体关系**</code> 注册有向关系；<code>//**人物[维度]：旧状态 -&gt; 新状态**</code> 记录状态变化。同章以正文事实为准。</p>
               </div>
               <div class="relationship-controls" aria-label="关系图控制">
-                <label for="relationship-search">搜索</label>
-                <input id="relationship-search" type="search" placeholder="节点、摘要或关系" autocomplete="off" spellcheck="false">
-                <label for="relationship-filter">类型</label>
-                <select id="relationship-filter">
-                  <option value="all">全部节点</option>
-                  <option value="character">人物</option>
-                  <option value="faction">势力</option>
-                  <option value="place">地点</option>
-                  <option value="concept">概念</option>
-                  <option value="unknown">其他 / 未归档</option>
-                </select>
-                <label for="relationship-origin">关系</label>
-                <select id="relationship-origin">
-                  <option value="all">全部关系</option>
-                  <option value="canonical">资料字段</option>
-                  <option value="annotation">内联注册</option>
-                </select>
-                <button id="relationship-fit" class="quiet-button" type="button">适合视图</button>
-                <button id="relationship-layout" class="quiet-button" type="button" aria-pressed="false">暂停布局</button>
-                <button id="relationship-reset" class="quiet-button" type="button">重置布局</button>
+                <label class="relationship-control relationship-search-control" for="relationship-search">
+                  <span>搜索</span>
+                  <input id="relationship-search" type="search" placeholder="节点、摘要或关系" autocomplete="off" spellcheck="false">
+                </label>
+                <label class="relationship-control" for="relationship-filter">
+                  <span>类型</span>
+                  <select id="relationship-filter">
+                    <option value="all">全部节点</option>
+                    <option value="character">人物</option>
+                    <option value="faction">势力</option>
+                    <option value="place">地点</option>
+                    <option value="concept">概念</option>
+                    <option value="unknown">其他 / 未归档</option>
+                  </select>
+                </label>
+                <label class="relationship-control" for="relationship-origin">
+                  <span>关系</span>
+                  <select id="relationship-origin">
+                    <option value="all">全部关系</option>
+                    <option value="canonical">资料字段</option>
+                    <option value="annotation">内联注册</option>
+                  </select>
+                </label>
+                <div class="relationship-control-actions" aria-label="布局控制">
+                  <button id="relationship-fit" class="icon-button relationship-icon-button" type="button" aria-label="适合视图" title="适合视图"><svg><use href="#icon-focus"/></svg></button>
+                  <button id="relationship-layout" class="icon-button relationship-icon-button" type="button" aria-label="暂停布局" title="暂停布局" aria-pressed="false"><svg><use href="#icon-pause"/></svg></button>
+                  <button id="relationship-reset" class="icon-button relationship-icon-button" type="button" aria-label="重置布局" title="重置布局"><svg><use href="#icon-refresh"/></svg></button>
+                </div>
               </div>
             </div>
             <p id="relationship-search-status" class="relationship-search-status" role="status" aria-live="polite"></p>

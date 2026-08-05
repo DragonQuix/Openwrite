@@ -20,7 +20,11 @@ from ..runtime_skills import (
 )
 from ..shared_documents import CHARACTER_MARKDOWN_CONTRACT
 from .book_state import BookState, BookStateStore
-from .confirmation import guard_confirmable_executors, remember_relation_previews
+from .confirmation import (
+    guard_confirmable_executors,
+    remember_document_edit_previews,
+    remember_relation_previews,
+)
 from .manuscript_safety import manual_chapter_delete_guidance
 from .react import OPENWRITE_TOOLS, ReActAgent, ToolDefinition
 from .session_state import DanteSessionState, SessionStateStore, SessionTurn
@@ -41,7 +45,9 @@ DEFAULT_DANTE_SYSTEM_PROMPT = (
     "并设置 confirm=true 写入。"
     "普通讨论、分析和未确认建议不得写入关系。"
     "修改已有角色、故事资料、世界设定或正文时，先 read_project_document 读取 revision，"
-    "再 edit_project_document(confirm=false) 预览 diff；只有用户明确确认后才写入。"
+    "再 edit_project_document(confirm=false) 预览 diff；长范围使用唯一的 start_text/end_text，"
+    "短句才使用 old_text；只有用户明确确认后才仅使用预览返回的"
+    " preview_token 和 confirm=true 写入，不得重新生成 path/edits。"
     "写章前优先用 get_outline_structure 定位明确的章纲 ID、所属卷幕节与建议目标，"
     "不要仅按最大章节号盲目创建下一章。"
     "如果状态显示 pending_confirmation=outline_scope，或阶段仍是 rolling_outline 但用户明确要求"
@@ -539,6 +545,18 @@ class DanteChatAgent:
                 combined.update(actions)
         combined.update(self.tool_executors)
         combined.update(self.action_executors)
+        combined = remember_document_edit_previews(
+            combined,
+            working_memory=lambda: (
+                self.session_state.working_memory if self.session_state is not None else {}
+            ),
+            persist=lambda: (
+                self.session_store.save(self.session_state)
+                if self.session_state is not None
+                else None
+            ),
+            instruction=lambda: self._active_user_instruction,
+        )
         combined = remember_relation_previews(
             combined,
             working_memory=lambda: (

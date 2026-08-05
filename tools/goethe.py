@@ -13,6 +13,7 @@ from typing import Any
 from .agent.confirmation import (
     guard_confirmable_executors,
     is_explicit_mutation_confirmation,
+    remember_document_edit_previews,
     remember_relation_previews,
 )
 from .agent.goethe_session_state import (
@@ -72,7 +73,8 @@ GOETHE_TOOL_DESCRIPTIONS: dict[str, str] = {
     "read_outline": "读取已确认大纲的原文窗口和 revision；局部修改前必须先调用。",
     "stage_outline_edits": (
         "分批暂存大纲修改并返回累计 diff。重写完整幕、节、章时使用简单的 "
-        "section_heading/new_text，系统自动定位原章节；改单句时才使用 old_text/new_text。"
+        "section_heading/new_text；长范围使用 start_text/end_text/new_text，"
+        "中间原文无需复制；改短句时才使用 old_text/new_text。"
         "每批最多 8 个修改且载荷不超过 12000 字符；不会写入 src。"
     ),
     "confirm_outline_edits": "仅在用户明确确认后，将待确认大纲补丁写入 src/outline.md。",
@@ -168,9 +170,13 @@ DEFAULT_GOETHE_SYSTEM_PROMPT = f"""你是 OpenWrite 的 Goethe，长期会话规
 3. 已有大纲时绝不整篇重写或覆盖。先调用 read_outline 取得当前 revision，再调用 stage_outline_edits。
    重写完整幕、节、章时优先传 section_heading/new_text：section_heading 只需使用现有 Markdown 标题
    （例如“### 第2节：准备期”），系统会自动替换该标题下直到下一个同级标题前的正文，不要复制旧正文。
-   只有修改单句或短段落时才使用精确 old_text/new_text；未提及内容必须逐字保留。
+   无法用标题定位的长范围，使用 start_text/end_text/new_text：首尾各取一小段
+   能唯一定位的文字，系统替换包含两个锚点在内的整个范围，中间原文不需要复制。
+   禁止为长段、整章或整节提交 old_text。只有修改单句或短段落时才使用
+   精确 old_text/new_text；即使模型误传了过长 old_text，系统也会尝试自动提取首尾锚点。
+   未提及内容必须逐字保留。
    涉及整卷重排、超过 4 节或补齐大量章节时，必须按幕或最多 4 节分批：每批最多 8 个 edits，
-   标题/old_text 与 new_text 合计不超过 12000 字符。非最后一批设置 final_batch=false，
+   定位文本与 new_text 合计不超过 12000 字符。非最后一批设置 final_batch=false，
    并使用工具返回的 draft_revision 作为下一批 base_revision；不要重复已完成批次。
    存在 pending draft 后，大纲内容
    只能用 read_outline 读取，禁止用 read_project_document 读取 src/outline.md，因为后者属于通用
@@ -181,7 +187,9 @@ DEFAULT_GOETHE_SYSTEM_PROMPT = f"""你是 OpenWrite 的 Goethe，长期会话规
 5. 只有用户明确说“确认应用、采用这版、写入大纲”等肯定表达时，才能调用
    confirm_outline_edits。否定、犹豫或继续讨论时不得调用。
 6. 用户说取消、不要这版或放弃修改时，调用 discard_outline_edits。
-7. 工具返回 revision 冲突或标题不存在时，重新 read_outline；短文本模式的 old_text_not_found 返回
+7. 工具返回 revision 冲突或标题不存在时，重新 read_outline；长范围定位失败时，
+   从 read_outline 返回内容中重新选择唯一的 start_text/end_text，不要改回长 old_text。
+   短文本模式的 old_text_not_found 返回
    details.suggested_old_text 且未截断时，优先逐字复用该字段，并使用错误结果中的 revision 重试。
    不得凭记忆改写 old_text，也不得退回整篇生成覆盖。
 8. 判断卷/幕/节/章位置或下一章时使用 get_outline_structure；它只读，不替代 src/outline.md。
@@ -195,7 +203,9 @@ search_relation_targets/get_world_relations 定位候选，再用 edit_world_rel
 批量预览；relations 必须优先使用查询返回的正式实体 ID。只有用户明确确认后才传回
 preview_token/preview_tokens 并 confirm=true 写入，不得重新生成 relations。
 修改已有角色、地点、能力设定、故事资料或正文时，先 read_project_document 读取 revision，
-再 edit_project_document(confirm=false) 预览 diff；只有用户明确确认后才写入。
+再 edit_project_document(confirm=false) 预览 diff；长范围使用唯一的 start_text/end_text，
+短句才使用 old_text；只有用户明确确认后才仅使用预览返回的
+preview_token 和 confirm=true 写入，不得重新生成 path/edits。
 草案工具（generate_foundation_draft / generate_character_draft / generate_outline_draft）
 只写 planning 草案，不直接当作最终 src 真源；晋升或确认前必须让用户过目。
 基础设定草案由 confirm_foundation 晋升；角色草案由 confirm_character_draft 晋升。
@@ -362,11 +372,24 @@ def _build_goethe_tool_definitions(
                                         "如 ### 第2节：准备期；无需提交旧正文"
                                     ),
                                 },
+                                "start_text": {
+                                    "type": "string",
+                                    "description": (
+                                        "长范围替换的起点锚点；只需一小段能唯一定位的原文"
+                                    ),
+                                },
+                                "end_text": {
+                                    "type": "string",
+                                    "description": (
+                                        "长范围替换的终点锚点；替换范围包含起止锚点"
+                                    ),
+                                },
                                 "new_text": {
                                     "type": "string",
                                     "description": (
                                         "section_heading 模式下为标题下的新正文；"
-                                        "old_text 模式下为替换文本；空字符串表示清空"
+                                        "范围模式下替换首尾锚点及中间内容；"
+                                        "old_text 模式下为短文本替换；空字符串表示清空"
                                     ),
                                 },
                                 "replace_all": {
@@ -983,6 +1006,18 @@ class GoetheChatAgent:
             combined.update(tool_executors)
         if isinstance(action_tool_executors, dict):
             combined.update(action_tool_executors)
+        combined = remember_document_edit_previews(
+            combined,
+            working_memory=lambda: (
+                self.session_state.working_memory if self.session_state is not None else {}
+            ),
+            persist=lambda: (
+                self.session_store.save(self.session_state)
+                if self.session_state is not None
+                else None
+            ),
+            instruction=lambda: self._active_user_instruction,
+        )
         combined = remember_relation_previews(
             combined,
             working_memory=lambda: (

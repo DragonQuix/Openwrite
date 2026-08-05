@@ -210,6 +210,60 @@ def test_relation_preview_tokens_survive_turns_and_replace_regenerated_arguments
     assert len(persisted) == 3
 
 
+def test_document_preview_tokens_survive_turns_and_follow_document_paths():
+    from tools.agent.confirmation import (
+        DOCUMENT_PREVIEWS_KEY,
+        remember_document_edit_previews,
+    )
+
+    memory: dict[str, object] = {}
+    persisted: list[dict[str, object]] = []
+    instruction = {"text": "修改两份设定"}
+    calls: list[dict] = []
+    preview_tokens = iter(("a" * 24, "b" * 24))
+
+    def executor(args):
+        calls.append(args)
+        if args.get("confirm"):
+            return {"ok": True, "applied": True}
+        return {
+            "ok": True,
+            "applied": False,
+            "path": args["path"],
+            "preview_token": next(preview_tokens),
+        }
+
+    wrapped = remember_document_edit_previews(
+        {"edit_project_document": executor},
+        working_memory=lambda: memory,
+        persist=lambda: persisted.append(dict(memory)),
+        instruction=lambda: instruction["text"],
+    )["edit_project_document"]
+
+    wrapped({"path": "src/foundation.md", "edits": [{"old_text": "a"}]})
+    wrapped({"path": "src/world/rules.md", "edits": [{"old_text": "b"}]})
+    assert memory[DOCUMENT_PREVIEWS_KEY] == [
+        {"path": "src/foundation.md", "preview_token": "a" * 24},
+        {"path": "src/world/rules.md", "preview_token": "b" * 24},
+    ]
+
+    instruction["text"] = "确认应用两份文档修改"
+    first = wrapped(
+        {
+            "path": "src/world/rules.md",
+            "edits": [{"old_text": "模型重新生成的内容"}],
+            "confirm": True,
+        }
+    )
+    assert calls[-1] == {"confirm": True, "preview_token": "b" * 24}
+    assert first["pending_document_previews"] == 1
+
+    wrapped({"confirm": True})
+    assert calls[-1] == {"confirm": True, "preview_token": "a" * 24}
+    assert DOCUMENT_PREVIEWS_KEY not in memory
+    assert len(persisted) == 4
+
+
 def test_truth_tools_return_complete_documents_and_use_revisioned_append_preview(
     tmp_path: Path,
 ):
@@ -584,6 +638,22 @@ summary = "沈烛在回响中逐渐掌握的感知能力。"
     assert read["revision"]
     assert "旧动机" in read["content"]
 
+    mismatch = executors["edit_project_document"](
+        {
+            "path": "src/characters/hero.md",
+            "edits": [
+                {
+                    "old_text": 'role: "主角"',
+                    "new_text": 'role = "核心主角"',
+                }
+            ],
+        }
+    )
+    assert mismatch["error"] == "old_text_not_found"
+    assert mismatch["details"]["field_path"] == "$.edits[0].old_text"
+    assert mismatch["details"]["suggested_old_text"] == 'role = "主角"'
+    assert mismatch["details"]["retry_revision"] == read["revision"]
+
     edit_args = {
         "path": "src/characters/hero.md",
         "edits": [
@@ -597,17 +667,119 @@ summary = "沈烛在回响中逐渐掌握的感知能力。"
     preview = executors["edit_project_document"](edit_args)
     assert preview["ok"] is True
     assert preview["applied"] is False
+    assert preview["preview_token"]
     assert "+新动机：查清幽都转轮府与回响异动的关联。" in preview["diff"]
     assert "旧动机：只想远离归墟。" in hero.read_text(encoding="utf-8")
 
     applied = executors["edit_project_document"](
-        {**edit_args, "revision": preview["revision"], "confirm": True}
+        {"preview_token": preview["preview_token"], "confirm": True}
     )
     assert applied["ok"] is True
     assert applied["applied"] is True
     assert "新动机：查清幽都转轮府与回响异动的关联。" in hero.read_text(
         encoding="utf-8"
     )
+    reused = executors["edit_project_document"](
+        {"preview_token": preview["preview_token"], "confirm": True}
+    )
+    assert reused["error"] == "document_preview_invalid"
+
+    stale_preview = executors["edit_project_document"](
+        {
+            "path": "src/characters/hero.md",
+            "edits": [
+                {
+                    "old_text": 'role = "主角"',
+                    "new_text": 'role = "核心主角"',
+                }
+            ],
+        }
+    )
+    hero.write_text(hero.read_text(encoding="utf-8") + "\n外部变更。\n", encoding="utf-8")
+    stale = executors["edit_project_document"](
+        {"preview_token": stale_preview["preview_token"], "confirm": True}
+    )
+    assert stale["error"] == "document_revision_conflict"
+    assert 'role = "主角"' in hero.read_text(encoding="utf-8")
+
+    range_document = novel_root / "src" / "world" / "range_rules.md"
+    range_document.write_text(
+        "# 范围规则\n\n"
+        "【范围起点】锚点后的旧内容。\n"
+        "这是无需复制的长篇中间内容。\n"
+        "【范围终点】旧内容到此结束。\n\n"
+        "## 保留章节\n不得被范围替换。\n",
+        encoding="utf-8",
+    )
+    range_preview = executors["edit_project_document"](
+        {
+            "path": "src/world/range_rules.md",
+            "edits": [
+                {
+                    "start_text": "【范围起点】",
+                    "end_text": "【范围终点】旧内容到此结束。",
+                    "new_text": "【新范围】\n只写替换后的完整内容。",
+                }
+            ],
+        }
+    )
+    assert range_preview["ok"] is True
+    assert range_preview["edits"][0]["mode"] == "range"
+    assert range_preview["edits"][0]["automatic"] is False
+    assert "无需复制的长篇中间内容" in range_document.read_text(encoding="utf-8")
+    range_applied = executors["edit_project_document"](
+        {"preview_token": range_preview["preview_token"], "confirm": True}
+    )
+    assert range_applied["applied"] is True
+    range_content = range_document.read_text(encoding="utf-8")
+    assert "【新范围】" in range_content
+    assert "不得被范围替换" in range_content
+
+    automatic_document = novel_root / "src" / "world" / "automatic_range.md"
+    start_line = "自动起点：" + "甲" * 110
+    end_line = "自动终点：" + "乙" * 110
+    automatic_document.write_text(
+        f"{start_line}\n文件中的真实中间内容。\n{end_line}\n",
+        encoding="utf-8",
+    )
+    inaccurate_long_text = (
+        f"{start_line}\n模型记错的中间内容，并且这一段足够长。"
+        f"{'错' * 80}\n{end_line}"
+    )
+    automatic_preview = executors["edit_project_document"](
+        {
+            "path": "src/world/automatic_range.md",
+            "edits": [
+                {
+                    "old_text": inaccurate_long_text,
+                    "new_text": "自动首尾锚点替换成功。",
+                }
+            ],
+        }
+    )
+    assert automatic_preview["ok"] is True
+    assert automatic_preview["edits"][0]["mode"] == "range"
+    assert automatic_preview["edits"][0]["automatic"] is True
+
+    ambiguous_document = novel_root / "src" / "world" / "ambiguous_range.md"
+    ambiguous_document.write_text(
+        "共同起点\n第一段\n共同终点\n共同起点\n第二段\n共同终点\n",
+        encoding="utf-8",
+    )
+    ambiguous = executors["edit_project_document"](
+        {
+            "path": "src/world/ambiguous_range.md",
+            "edits": [
+                {
+                    "start_text": "共同起点",
+                    "end_text": "共同终点",
+                    "new_text": "不应写入",
+                }
+            ],
+        }
+    )
+    assert ambiguous["error"] == "ambiguous_text_range"
+    assert "不应写入" not in ambiguous_document.read_text(encoding="utf-8")
 
     candidates = executors["search_relation_targets"](
         {"query": "沈烛 出身 能力", "limit": 10}

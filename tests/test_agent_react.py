@@ -803,6 +803,90 @@ def test_react_agent_applies_exact_old_text_suggestion_on_matching_retry():
     assert '"corrected_fields": ["$.edits[0].old_text"]' in repaired_result
 
 
+def test_document_edit_failures_and_repairs_are_isolated_by_path():
+    paths = ("src/foundation.md", "src/world/rules.md")
+    wrong_old_text = ("错误的基础设定", "错误的规则设定")
+    exact_old_text = ("准确的基础设定", "准确的规则设定")
+
+    def calls(prefix: str):
+        return [
+            {
+                "id": f"{prefix}-{index}",
+                "name": "edit_project_document",
+                "arguments": json.dumps(
+                    {
+                        "path": path,
+                        "edits": [
+                            {
+                                "old_text": wrong_old_text[index],
+                                "new_text": f"新内容-{index}",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+            for index, path in enumerate(paths)
+        ]
+
+    client = RecordingClient(
+        [
+            _tool_response(tool_calls=calls("first")),
+            _tool_response(tool_calls=calls("retry")),
+            _tool_response("两份设定均已成功预览"),
+        ]
+    )
+    executed: list[dict] = []
+
+    def edit_document(args):
+        executed.append(args)
+        path_index = paths.index(args["path"])
+        if args["edits"][0]["old_text"] != exact_old_text[path_index]:
+            return {
+                "ok": False,
+                "error": "old_text_not_found",
+                "message": "old_text 不存在",
+                "details": {
+                    "field_path": "$.edits[0].old_text",
+                    "suggested_old_text": exact_old_text[path_index],
+                    "suggested_old_text_truncated": False,
+                    "retry_revision": f"revision-{path_index}",
+                },
+            }
+        return {"ok": True, "applied": False, "preview_token": str(path_index) * 24}
+
+    agent = ReActAgent(
+        client=client,
+        model="demo",
+        tools=[
+            ToolDefinition(
+                name="edit_project_document",
+                description="预览文档编辑",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "revision": {"type": "string"},
+                        "edits": {"type": "array"},
+                    },
+                    "required": ["path", "edits"],
+                },
+            )
+        ],
+        system_prompt="系统提示",
+    )
+    agent._register_tool_executors({"edit_project_document": edit_document})
+
+    result = asyncio.run(agent.run("同时修改基础设定和规则设定"))
+
+    assert result == "两份设定均已成功预览"
+    assert len(executed) == 4
+    assert executed[2]["edits"][0]["old_text"] == exact_old_text[0]
+    assert executed[2]["revision"] == "revision-0"
+    assert executed[3]["edits"][0]["old_text"] == exact_old_text[1]
+    assert executed[3]["revision"] == "revision-1"
+
+
 def test_retry_suggestion_is_not_applied_when_replacement_changed():
     repaired, corrected = ReActAgent._apply_retry_suggestions(
         "stage_outline_edits",

@@ -23,6 +23,8 @@ CONFIRMABLE_TOOLS = {
 }
 
 CONFIRMATION_BLOCK_ERROR = "explicit_user_confirmation_required"
+DOCUMENT_PREVIEWS_KEY = "pending_document_edit_previews"
+DOCUMENT_PREVIEW_REQUEST_KEY = "pending_document_edit_preview_request"
 RELATION_PREVIEW_TOKENS_KEY = "pending_relation_preview_tokens"
 RELATION_PREVIEW_REQUEST_KEY = "pending_relation_preview_request"
 
@@ -262,6 +264,100 @@ def remember_relation_previews(
     return wrapped
 
 
+def remember_document_edit_previews(
+    executors: Mapping[str, Callable[[dict[str, Any]], Any]],
+    *,
+    working_memory: Callable[[], dict[str, Any]],
+    persist: Callable[[], None],
+    instruction: Callable[[], str],
+) -> dict[str, Callable[[dict[str, Any]], Any]]:
+    """Persist document preview tokens and restore them on confirmation turns."""
+
+    wrapped = dict(executors)
+    executor = wrapped.get("edit_project_document")
+    if executor is None:
+        return wrapped
+
+    def execute(args: dict[str, Any]) -> Any:
+        payload = dict(args) if isinstance(args, dict) else {}
+        memory = working_memory()
+        pending = _document_preview_entries(memory.get(DOCUMENT_PREVIEWS_KEY))
+        selected_token = ""
+        requested_token = str(payload.get("preview_token") or "").strip()
+
+        if payload.get("confirm") and pending:
+            requested_path = str(
+                payload.get("path") or payload.get("source_path") or ""
+            ).strip()
+            selected = next(
+                (
+                    entry
+                    for entry in pending
+                    if requested_path and entry["path"] == requested_path
+                ),
+                None,
+            )
+            if selected is None:
+                selected = next(
+                    (
+                        entry
+                        for entry in pending
+                        if requested_token
+                        and entry["preview_token"] == requested_token
+                    ),
+                    pending[0],
+                )
+            selected_token = selected["preview_token"]
+            payload = {
+                "confirm": True,
+                "preview_token": selected_token,
+            }
+
+        result = executor(payload)
+        if not isinstance(result, Mapping):
+            return result
+
+        changed = False
+        preview_token = str(result.get("preview_token") or "").strip()
+        preview_path = str(result.get("path") or "").strip()
+        if result.get("ok") and not result.get("applied") and preview_token and preview_path:
+            request_fingerprint = hashlib.sha256(
+                str(instruction() or "").strip().encode("utf-8")
+            ).hexdigest()[:16]
+            if memory.get(DOCUMENT_PREVIEW_REQUEST_KEY) != request_fingerprint:
+                pending = []
+            pending = [entry for entry in pending if entry["path"] != preview_path]
+            pending.append({"path": preview_path, "preview_token": preview_token})
+            memory[DOCUMENT_PREVIEWS_KEY] = pending[-12:]
+            memory[DOCUMENT_PREVIEW_REQUEST_KEY] = request_fingerprint
+            changed = True
+        elif result.get("ok") and payload.get("confirm") and selected_token:
+            pending = [
+                entry
+                for entry in pending
+                if entry["preview_token"] != selected_token
+            ]
+            if pending:
+                memory[DOCUMENT_PREVIEWS_KEY] = pending
+            else:
+                memory.pop(DOCUMENT_PREVIEWS_KEY, None)
+                memory.pop(DOCUMENT_PREVIEW_REQUEST_KEY, None)
+            changed = True
+
+        if changed:
+            persist()
+        if result.get("ok") and payload.get("confirm") and pending:
+            return {
+                **result,
+                "pending_document_previews": len(pending),
+                "next_action": "继续逐个确认剩余文档预览。",
+            }
+        return result
+
+    wrapped["edit_project_document"] = execute
+    return wrapped
+
+
 def _relation_preview_tokens(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -272,6 +368,24 @@ def _relation_preview_tokens(value: Any) -> list[str]:
             if str(item or "").strip()
         )
     )
+
+
+def _document_preview_entries(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    entries: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    for item in reversed(value):
+        if not isinstance(item, Mapping):
+            continue
+        path = str(item.get("path") or "").strip()
+        token = str(item.get("preview_token") or "").strip()
+        if not path or not token or path in seen_paths:
+            continue
+        entries.append({"path": path, "preview_token": token})
+        seen_paths.add(path)
+    entries.reverse()
+    return entries
 
 
 def _guard_executor(

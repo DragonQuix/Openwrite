@@ -368,9 +368,10 @@ class ReActAgent:
             for tool_call, tc_args in decoded_tool_calls:
                 tc_id = tool_call.get("id", "")
                 tc_name = tool_call.get("name", "")
+                failure_key = self._tool_failure_key(tc_name, tc_args)
                 inherited_fields: list[str] = []
                 corrected_fields: list[str] = []
-                previous_failure = failed_tool_arguments.get(tc_name)
+                previous_failure = failed_tool_arguments.get(failure_key)
                 if previous_failure is not None:
                     tc_args, inherited_fields = self._inherit_retry_arguments(
                         tc_name,
@@ -385,6 +386,7 @@ class ReActAgent:
                         previous_failure[0],
                         previous_failure[2],
                     )
+                    failure_key = self._tool_failure_key(tc_name, tc_args)
                 repair_notes = []
                 if inherited_fields:
                     repair_notes.append(
@@ -458,22 +460,22 @@ class ReActAgent:
                             self._tool_failure_argument_repairs(result)
                         )
                         if invalid_roots or retry_suggestions:
-                            failed_tool_arguments[tc_name] = (
+                            failed_tool_arguments[failure_key] = (
                                 copy.deepcopy(tc_args),
                                 invalid_roots,
                                 retry_suggestions,
                             )
                         else:
-                            failed_tool_arguments.pop(tc_name, None)
-                        failed_tool_counts[tc_name] = (
-                            failed_tool_counts.get(tc_name, 0) + 1
+                            failed_tool_arguments.pop(failure_key, None)
+                        failed_tool_counts[failure_key] = (
+                            failed_tool_counts.get(failure_key, 0) + 1
                         )
-                        if failed_tool_counts[tc_name] >= self.max_tool_failures:
+                        if failed_tool_counts[failure_key] >= self.max_tool_failures:
                             partial_response = self._partial_success_response(
                                 successful_tool_results,
                                 failed_tool=tc_name,
                                 failure_reason=failure_reason,
-                                failure_count=failed_tool_counts[tc_name],
+                                failure_count=failed_tool_counts[failure_key],
                             )
                             if partial_response:
                                 self._emit_activity(
@@ -489,7 +491,7 @@ class ReActAgent:
                                     {
                                         "turn": turn + 1,
                                         "tool_call_id": tc_id,
-                                        "failures": failed_tool_counts[tc_name],
+                                        "failures": failed_tool_counts[failure_key],
                                         "reason": failure_reason,
                                     }
                                 ),
@@ -499,17 +501,17 @@ class ReActAgent:
                                 turn=turn + 1,
                                 tool=tc_name,
                                 reason=failure_reason,
-                                failure_count=failed_tool_counts[tc_name],
+                                failure_count=failed_tool_counts[failure_key],
                             )
                             return (
                                 f"工具 {tc_name} 连续失败 "
-                                f"{failed_tool_counts[tc_name]} 次，"
+                                f"{failed_tool_counts[failure_key]} 次，"
                                 "我已停止本轮以避免继续重复消耗。"
                                 f"最后原因：{failure_reason}"
                             )
                     else:
-                        failed_tool_counts.pop(tc_name, None)
-                        failed_tool_arguments.pop(tc_name, None)
+                        failed_tool_counts.pop(failure_key, None)
+                        failed_tool_arguments.pop(failure_key, None)
                         successful_tool_results.append((tc_name, result))
                     messages.append(
                         Message(
@@ -534,7 +536,7 @@ class ReActAgent:
                             )
                             return terminal_response
                 except Exception as e:
-                    failed_tool_arguments.pop(tc_name, None)
+                    failed_tool_arguments.pop(failure_key, None)
                     failure_reason = str(e)
                     error_result = json.dumps({"error": failure_reason})
                     on_tool_result and on_tool_result(tc_name, error_result)
@@ -558,13 +560,15 @@ class ReActAgent:
                         reason=failure_reason,
                         result=error_result,
                     )
-                    failed_tool_counts[tc_name] = failed_tool_counts.get(tc_name, 0) + 1
-                    if failed_tool_counts[tc_name] >= self.max_tool_failures:
+                    failed_tool_counts[failure_key] = (
+                        failed_tool_counts.get(failure_key, 0) + 1
+                    )
+                    if failed_tool_counts[failure_key] >= self.max_tool_failures:
                         partial_response = self._partial_success_response(
                             successful_tool_results,
                             failed_tool=tc_name,
                             failure_reason=failure_reason,
-                            failure_count=failed_tool_counts[tc_name],
+                            failure_count=failed_tool_counts[failure_key],
                         )
                         if partial_response:
                             self._emit_activity(
@@ -580,7 +584,7 @@ class ReActAgent:
                                 {
                                     "turn": turn + 1,
                                     "tool_call_id": tc_id,
-                                    "failures": failed_tool_counts[tc_name],
+                                    "failures": failed_tool_counts[failure_key],
                                     "reason": failure_reason,
                                 }
                             ),
@@ -590,11 +594,11 @@ class ReActAgent:
                             turn=turn + 1,
                             tool=tc_name,
                             reason=failure_reason,
-                            failure_count=failed_tool_counts[tc_name],
+                            failure_count=failed_tool_counts[failure_key],
                         )
                         return (
                             f"工具 {tc_name} 连续失败 "
-                            f"{failed_tool_counts[tc_name]} 次，"
+                            f"{failed_tool_counts[failure_key]} 次，"
                             "我已停止本轮以避免继续重复消耗。"
                             f"最后原因：{failure_reason}"
                         )
@@ -931,9 +935,12 @@ class ReActAgent:
             and not details.get("suggested_old_text_truncated")
         ):
             suggestions[field_path] = details["suggested_old_text"]
-        retry_revision = details.get("retry_base_revision")
+        retry_base_revision = details.get("retry_base_revision")
+        if isinstance(retry_base_revision, str) and retry_base_revision:
+            suggestions["$.base_revision"] = retry_base_revision
+        retry_revision = details.get("retry_revision")
         if isinstance(retry_revision, str) and retry_revision:
-            suggestions["$.base_revision"] = retry_revision
+            suggestions["$.revision"] = retry_revision
         return invalid_roots, suggestions
 
     @staticmethod
@@ -943,15 +950,18 @@ class ReActAgent:
         previous_args: dict[str, Any],
         suggestions: dict[str, Any],
     ) -> tuple[dict[str, Any], list[str]]:
-        if name != "stage_outline_edits" or not suggestions:
+        if name not in {"stage_outline_edits", "edit_project_document"} or not suggestions:
             return args, []
         repaired = copy.deepcopy(args)
         corrected: list[str] = []
-        retry_revision = suggestions.get("$.base_revision")
+        revision_field = (
+            "base_revision" if name == "stage_outline_edits" else "revision"
+        )
+        retry_revision = suggestions.get(f"$.{revision_field}")
         if isinstance(retry_revision, str) and retry_revision:
-            if repaired.get("base_revision") != retry_revision:
-                repaired["base_revision"] = retry_revision
-                corrected.append("$.base_revision")
+            if repaired.get(revision_field) != retry_revision:
+                repaired[revision_field] = retry_revision
+                corrected.append(f"$.{revision_field}")
 
         current_edits = repaired.get("edits")
         previous_edits = previous_args.get("edits")
@@ -974,6 +984,16 @@ class ReActAgent:
                 current_edit["old_text"] = suggested_value
                 corrected.append(path)
         return repaired, corrected
+
+    @staticmethod
+    def _tool_failure_key(name: str, args: dict[str, Any]) -> str:
+        """Keep independent document edits from consuming each other's retry budget."""
+
+        if name == "edit_project_document":
+            path = str(args.get("path") or args.get("source_path") or "").strip()
+            if path:
+                return f"{name}:{path}"
+        return name
 
     @staticmethod
     def _annotate_argument_repair(
@@ -1648,8 +1668,10 @@ OPENWRITE_TOOLS = [
     ToolDefinition(
         name="edit_project_document",
         description=(
-            "用精确 old_text/new_text 补丁安全修改小说文档。默认只预览 diff；"
-            "用户明确确认后传入 revision/base_revision 并设置 confirm=true 才写入。"
+            "安全修改小说文档：长范围优先使用唯一的 start_text/end_text/new_text，"
+            "短句才使用精确 old_text/new_text。默认只预览 diff；"
+            "预览需传 path/edits，并返回不可变 preview_token；"
+            "用户明确确认后仅传 preview_token 并设置 confirm=true 才写入。"
         ),
         parameters={
             "type": "object",
@@ -1657,28 +1679,41 @@ OPENWRITE_TOOLS = [
                 "path": {"type": "string", "description": "read_project_document 返回的 path"},
                 "revision": {
                     "type": "string",
-                    "description": "read_project_document 或预览返回的 revision",
+                    "description": "兼容旧确认流程；新流程使用 preview_token",
+                },
+                "preview_token": {
+                    "type": "string",
+                    "description": "预览返回的一次性凭据；确认时原样传回",
                 },
                 "edits": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "old_text": {"type": "string", "description": "原文精确片段"},
+                            "old_text": {
+                                "type": "string",
+                                "description": "仅改单句或短段时使用的精确原文",
+                            },
+                            "start_text": {
+                                "type": "string",
+                                "description": "长范围替换的唯一开头锚点",
+                            },
+                            "end_text": {
+                                "type": "string",
+                                "description": "长范围替换的唯一结尾锚点",
+                            },
                             "new_text": {"type": "string", "description": "替换后的内容"},
                             "replace_all": {
                                 "type": "boolean",
                                 "description": "是否替换所有匹配；默认 false",
                             },
                         },
-                        "required": ["old_text", "new_text"],
+                        "required": ["new_text"],
                     },
                 },
                 "confirm": {"type": "boolean", "description": "默认 false 只预览 diff"},
             },
-            "required": ["path", "edits"],
         },
-        required=["path", "edits"],
     ),
     ToolDefinition(
         name="list_chapters",
@@ -2208,7 +2243,9 @@ OPENWRITE_SYSTEM_PROMPT = f"""你是 OpenWrite 小说创作引擎的 Agent。
 - 修改已有大纲树时先读取 revision，并以 edit_outline_structure(confirm=false)
   预览 diff；只有用户明确确认后才以相同 revision 和 confirm=true 写入
 - 修改人物、故事、世界实体、正文等文档时先 read_project_document，再
-  edit_project_document(confirm=false) 预览 diff；只有用户明确确认后才写入
+  edit_project_document(confirm=false) 预览 diff；长范围使用唯一的 start_text/end_text，
+  短句才使用 old_text；只有用户明确确认后才仅使用预览返回的
+  preview_token 和 confirm=true 写入，不得重新生成 path/edits
 - 连接人物、出身地点、能力设定、组织或物品时先 search_relation_targets /
   get_world_relations 定位候选，再 edit_world_relations(confirm=false) 预览 diff；
   relations 使用查询返回的正式实体 ID；只有用户明确确认后才使用预览返回的

@@ -66,10 +66,15 @@ def test_project_document_tools_require_revisioned_preview_contract():
 
     assert read_tool.required == ["path"]
     assert "src、data/manuscript、data/foreshadowing" in read_tool.description
-    assert edit_tool.required == ["path", "edits"]
+    assert edit_tool.required == []
     assert "old_text/new_text" in edit_tool.description
     assert "默认只预览 diff" in edit_tool.description
     assert "revision" in properties
+    assert "preview_token" in properties
+    assert "不可变" in edit_tool.description
+    edit_properties = properties["edits"]["items"]["properties"]
+    assert {"start_text", "end_text"}.issubset(edit_properties)
+    assert properties["edits"]["items"]["required"] == ["new_text"]
     assert "confirm" in properties
     assert "默认 false" in properties["confirm"]["description"]
 

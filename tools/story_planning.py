@@ -24,6 +24,8 @@ from .frontmatter import compose_toml_document, parse_toml_front_matter, strip_f
 
 MAX_OUTLINE_EDIT_BATCH_EDITS = 8
 MAX_OUTLINE_EDIT_BATCH_CHARS = 12_000
+LONG_OLD_TEXT_CHARS = 240
+AUTO_RANGE_ANCHOR_CHARS = 96
 
 
 class StoryPlanningStore:
@@ -497,7 +499,10 @@ class StoryPlanningStore:
                 revision=expected_revision,
             )
         batch_chars = sum(
-            len(str(edit.get("section_heading") or edit.get("old_text") or ""))
+            len(str(edit.get("section_heading") or ""))
+            + len(str(edit.get("start_text") or ""))
+            + len(str(edit.get("end_text") or ""))
+            + len(str(edit.get("old_text") or ""))
             + len(str(edit.get("new_text", "")))
             for edit in edits
             if isinstance(edit, dict)
@@ -522,6 +527,8 @@ class StoryPlanningStore:
                     revision=expected_revision,
                 )
             section_heading = str(edit.get("section_heading", "")).strip()
+            start_text = str(edit.get("start_text", "")).strip()
+            end_text = str(edit.get("end_text", "")).strip()
             old_text = str(edit.get("old_text", ""))
             new_text = str(edit.get("new_text", ""))
             replace_all = bool(edit.get("replace_all", False))
@@ -558,18 +565,73 @@ class StoryPlanningStore:
                     }
                 )
                 continue
+            if start_text or end_text:
+                if not start_text or not end_text:
+                    missing = "start_text" if not start_text else "end_text"
+                    return self._outline_edit_error(
+                        "missing_range_anchor",
+                        (
+                            f"第 {index + 1} 个修改缺少 {missing}；"
+                            "范围替换只需同时提供 start_text 和 end_text。"
+                        ),
+                        revision=expected_revision,
+                        details={
+                            "edit_index": index + 1,
+                            "field_path": f"$.edits[{index}].{missing}",
+                            "batch_applied": False,
+                        },
+                    )
+                replacement = self._replace_text_range(
+                    revised,
+                    start_text,
+                    end_text,
+                    new_text,
+                )
+                if not replacement["ok"]:
+                    return self._outline_edit_error(
+                        str(replacement["error"]),
+                        f"第 {index + 1} 个修改{replacement['message']}本批未写入。",
+                        revision=expected_revision,
+                        details={
+                            "edit_index": index + 1,
+                            "field_paths": [
+                                f"$.edits[{index}].start_text",
+                                f"$.edits[{index}].end_text",
+                            ],
+                            "source_kind": source_kind,
+                            "batch_applied": False,
+                            "retry_base_revision": expected_revision,
+                            **dict(replacement.get("details") or {}),
+                        },
+                    )
+                revised = str(replacement["source"])
+                applied.append(
+                    {
+                        "index": index + 1,
+                        "mode": "range",
+                        "automatic": False,
+                        "start_line": replacement["start_line"],
+                        "end_line": replacement["end_line"],
+                        "replacements": 1,
+                        "replace_all": False,
+                    }
+                )
+                continue
             if not old_text:
                 return self._outline_edit_error(
                     "missing_edit_selector",
                     (
-                        f"第 {index + 1} 个修改缺少 section_heading 或 old_text；"
-                        "重写完整幕、节、章时只需传 section_heading。"
+                        f"第 {index + 1} 个修改没有定位信息；"
+                        "整节用 section_heading，长范围用 start_text/end_text，"
+                        "短句才用 old_text。"
                     ),
                     revision=expected_revision,
                     details={
                         "edit_index": index + 1,
                         "field_paths": [
                             f"$.edits[{index}].section_heading",
+                            f"$.edits[{index}].start_text",
+                            f"$.edits[{index}].end_text",
                             f"$.edits[{index}].old_text",
                         ],
                         "batch_applied": False,
@@ -577,6 +639,29 @@ class StoryPlanningStore:
                 )
             occurrences = revised.count(old_text)
             if occurrences == 0:
+                if len(old_text) >= LONG_OLD_TEXT_CHARS:
+                    auto_anchors = self._range_anchors_from_long_text(old_text)
+                    if auto_anchors:
+                        replacement = self._replace_text_range(
+                            revised,
+                            auto_anchors[0],
+                            auto_anchors[1],
+                            new_text,
+                        )
+                        if replacement["ok"]:
+                            revised = str(replacement["source"])
+                            applied.append(
+                                {
+                                    "index": index + 1,
+                                    "mode": "range",
+                                    "automatic": True,
+                                    "start_line": replacement["start_line"],
+                                    "end_line": replacement["end_line"],
+                                    "replacements": 1,
+                                    "replace_all": False,
+                                }
+                            )
+                            continue
                 diagnostics = self._outline_anchor_diagnostics(revised, old_text)
                 anchor = str(diagnostics.get("anchor") or "")
                 mismatch = diagnostics.get("first_difference")
@@ -586,7 +671,18 @@ class StoryPlanningStore:
                     else 0
                 )
                 source_label = "待确认草稿" if source_kind == "pending_draft" else "正式大纲"
+                long_text = len(old_text) >= LONG_OLD_TEXT_CHARS
+                if long_text:
+                    auto_anchors = self._range_anchors_from_long_text(old_text)
+                    diagnostics["suggested_old_text"] = ""
+                    diagnostics["suggested_old_text_truncated"] = False
+                    diagnostics["suggested_start_text"] = auto_anchors[0] if auto_anchors else ""
+                    diagnostics["suggested_end_text"] = auto_anchors[1] if auto_anchors else ""
                 guidance = (
+                    "这是长范围修改，不要再复制整段 old_text；"
+                    "请改用当前内容中唯一的 start_text 和 end_text 定位首尾。"
+                    if long_text
+                    else
                     f"系统在{source_label}中找到了唯一锚点“{anchor}”，但提交文本"
                     f"从第 {mismatch_offset} 个字符开始不同。请直接复用 "
                     "details.suggested_old_text，"
@@ -622,7 +718,10 @@ class StoryPlanningStore:
             if occurrences > 1 and not replace_all:
                 return self._outline_edit_error(
                     "ambiguous_old_text",
-                    f"第 {index + 1} 个修改匹配到 {occurrences} 处，请扩大 old_text 上下文。",
+                    (
+                        f"第 {index + 1} 个修改匹配到 {occurrences} 处；"
+                        "请用 section_heading，或传唯一的 start_text/end_text。"
+                    ),
                     revision=expected_revision,
                 )
             revised = revised.replace(old_text, new_text, -1 if replace_all else 1)
@@ -914,6 +1013,108 @@ class StoryPlanningStore:
             "start_line": target["line"],
             "end_line": end_line,
         }
+
+    @staticmethod
+    def _replace_text_range(
+        source: str,
+        start_text: str,
+        end_text: str,
+        new_text: str,
+    ) -> dict[str, Any]:
+        start_anchor = str(start_text or "").strip()
+        end_anchor = str(end_text or "").strip()
+        if not start_anchor or not end_anchor:
+            return {
+                "ok": False,
+                "error": "missing_range_anchor",
+                "message": "范围替换需要同时提供 start_text 和 end_text；",
+                "details": {},
+            }
+        start_positions = [
+            match.start() for match in re.finditer(re.escape(start_anchor), source)
+        ]
+        end_positions = [
+            match.start() for match in re.finditer(re.escape(end_anchor), source)
+        ]
+        if not start_positions or not end_positions:
+            missing = []
+            if not start_positions:
+                missing.append("start_text")
+            if not end_positions:
+                missing.append("end_text")
+            return {
+                "ok": False,
+                "error": "text_range_not_found",
+                "message": f"找不到{'和'.join(missing)}锚点；",
+                "details": {
+                    "missing_anchors": missing,
+                    "start_occurrences": len(start_positions),
+                    "end_occurrences": len(end_positions),
+                },
+            }
+
+        ranges: list[tuple[int, int]] = []
+        if start_anchor == end_anchor:
+            ranges = [
+                (position, position + len(end_anchor)) for position in start_positions
+            ]
+        else:
+            for start in start_positions:
+                minimum_end = start + len(start_anchor)
+                for end in end_positions:
+                    if end >= minimum_end:
+                        ranges.append((start, end + len(end_anchor)))
+        if not ranges:
+            return {
+                "ok": False,
+                "error": "text_range_not_found",
+                "message": "找到了首尾锚点，但它们的顺序不成立；",
+                "details": {
+                    "start_occurrences": len(start_positions),
+                    "end_occurrences": len(end_positions),
+                },
+            }
+        if len(ranges) > 1:
+            return {
+                "ok": False,
+                "error": "ambiguous_text_range",
+                "message": (
+                    f"首尾锚点组合成 {len(ranges)} 个可能范围；"
+                    "请各增加几个字，直到只定位一处；"
+                ),
+                "details": {
+                    "range_count": len(ranges),
+                    "start_occurrences": len(start_positions),
+                    "end_occurrences": len(end_positions),
+                },
+            }
+
+        start, end = ranges[0]
+        replacement = str(new_text or "")
+        return {
+            "ok": True,
+            "source": source[:start] + replacement + source[end:],
+            "start_line": source.count("\n", 0, start) + 1,
+            "end_line": source.count("\n", 0, end) + 1,
+        }
+
+    @staticmethod
+    def _range_anchors_from_long_text(old_text: str) -> tuple[str, str] | None:
+        text = str(old_text or "").strip()
+        if len(text) < LONG_OLD_TEXT_CHARS:
+            return None
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if len(lines) >= 2:
+            start = lines[0][:AUTO_RANGE_ANCHOR_CHARS]
+            end = lines[-1][-AUTO_RANGE_ANCHOR_CHARS:]
+        elif len(text) >= AUTO_RANGE_ANCHOR_CHARS * 2:
+            start = text[:AUTO_RANGE_ANCHOR_CHARS]
+            end = text[-AUTO_RANGE_ANCHOR_CHARS:]
+        else:
+            return None
+        if not start or not end or start == end:
+            return None
+        return start, end
 
     @staticmethod
     def _outline_anchor_diagnostics(

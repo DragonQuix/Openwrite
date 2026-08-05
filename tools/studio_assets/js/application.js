@@ -4862,12 +4862,20 @@ function initializeRelationshipPositions(nodes, reset = false) {
   nodes.forEach((node, index) => {
     if (!reset && state.relationship.positions.has(node.id)) return;
     const hash = Array.from(node.id).reduce((value, char) => ((value * 31) + char.charCodeAt(0)) >>> 0, 7);
-    const angle = (index / count) * Math.PI * 2 + (hash % 17) / 40;
-    const ring = 145 + (hash % 3) * 55;
+    const angle = index * Math.PI * (3 - Math.sqrt(5)) + (hash % 23) / 50;
+    const radius = Math.sqrt((index + 0.6) / count);
     state.relationship.positions.set(node.id, {
-      x: 480 + Math.cos(angle) * ring, y: 280 + Math.sin(angle) * ring, vx: 0, vy: 0, fixed: false,
+      x: 480 + Math.cos(angle) * 390 * radius,
+      y: 265 + Math.sin(angle) * 215 * radius,
+      vx: 0, vy: 0, fixed: false,
     });
   });
+}
+
+function relationshipNodeCollisionWidth(node) {
+  const labelLength = Array.from(String(node.label || "")).length;
+  const displayedLength = Math.min(labelLength, 8);
+  return Math.max(54, Math.min(104, displayedLength * 11 + 16));
 }
 
 function buildRelationshipSvg(nodes, edges) {
@@ -4904,13 +4912,16 @@ function buildRelationshipSvg(nodes, edges) {
     group.setAttribute("tabindex", "0");
     group.setAttribute("role", "button");
     group.setAttribute("aria-label", `${node.label}，${relationshipKinds[node.kind] || "其他"}节点`);
+    const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    title.textContent = node.label;
     const shape = relationshipNodeShape(node.kind);
     shape.classList.add("relationship-node-shape");
     const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
     label.classList.add("relationship-node-label");
     label.setAttribute("y", "34");
-    label.textContent = node.label.length > 12 ? `${node.label.slice(0, 11)}…` : node.label;
-    group.append(shape, label);
+    const labelCharacters = Array.from(node.label);
+    label.textContent = labelCharacters.length > 8 ? `${labelCharacters.slice(0, 7).join("")}…` : node.label;
+    group.append(title, shape, label);
     group.addEventListener("pointerdown", beginRelationshipNodeDrag);
     group.addEventListener("keydown", moveRelationshipNodeWithKeyboard);
     group.addEventListener("click", () => selectRelationshipNode(node.id));
@@ -4974,6 +4985,7 @@ function stopRelationshipSimulation() {
 function simulateRelationshipStep() {
   const nodes = state.relationship.nodes;
   const positions = state.relationship.positions;
+  const collisionWidths = nodes.map(relationshipNodeCollisionWidth);
   for (let i = 0; i < nodes.length; i += 1) {
     const a = positions.get(nodes[i].id);
     if (!a || a.fixed) continue;
@@ -4983,28 +4995,46 @@ function simulateRelationshipStep() {
       let dx = a.x - b.x; let dy = a.y - b.y;
       const distance2 = Math.max(dx * dx + dy * dy, 100);
       const distance = Math.sqrt(distance2);
-      const force = Math.min(1.5, 1500 / distance2);
+      const force = Math.min(2.2, 2600 / distance2);
       dx /= distance; dy /= distance;
       a.vx += dx * force; a.vy += dy * force;
       if (!b.fixed) { b.vx -= dx * force; b.vy -= dy * force; }
+
+      const minX = (collisionWidths[i] + collisionWidths[j]) / 2;
+      const minY = 58;
+      const overlapX = minX - Math.abs(a.x - b.x);
+      const overlapY = minY - Math.abs(a.y - b.y);
+      if (overlapX > 0 && overlapY > 0) {
+        const separateOnX = (overlapX / minX) < (overlapY / minY);
+        const direction = separateOnX ? (a.x >= b.x ? 1 : -1) : (a.y >= b.y ? 1 : -1);
+        const collisionForce = Math.min(3.2, (separateOnX ? overlapX : overlapY) * 0.08);
+        if (separateOnX) {
+          a.vx += direction * collisionForce;
+          if (!b.fixed) b.vx -= direction * collisionForce;
+        } else {
+          a.vy += direction * collisionForce;
+          if (!b.fixed) b.vy -= direction * collisionForce;
+        }
+      }
     }
-    a.vx += (480 - a.x) * 0.0015; a.vy += (280 - a.y) * 0.0015;
+    a.vx += (480 - a.x) * 0.0008; a.vy += (265 - a.y) * 0.0008;
   }
   state.relationship.edges.forEach((edge) => {
     const source = positions.get(edge.source); const target = positions.get(edge.target);
     if (!source || !target) return;
     const dx = target.x - source.x; const dy = target.y - source.y;
     const distance = Math.max(Math.hypot(dx, dy), 1);
-    const force = (distance - 120) * 0.004;
+    const force = (distance - 145) * 0.0025;
     if (!source.fixed) { source.vx += (dx / distance) * force; source.vy += (dy / distance) * force; }
     if (!target.fixed) { target.vx -= (dx / distance) * force; target.vy -= (dy / distance) * force; }
   });
-  nodes.forEach((node) => {
+  nodes.forEach((node, index) => {
     const point = positions.get(node.id);
     if (!point || point.fixed) return;
-    point.vx *= 0.86; point.vy *= 0.86;
-    point.x = Math.max(35, Math.min(925, point.x + point.vx));
-    point.y = Math.max(35, Math.min(525, point.y + point.vy));
+    point.vx *= 0.84; point.vy *= 0.84;
+    const halfWidth = collisionWidths[index] / 2;
+    point.x = Math.max(halfWidth + 8, Math.min(952 - halfWidth, point.x + point.vx));
+    point.y = Math.max(28, Math.min(510, point.y + point.vy));
   });
 }
 
@@ -5108,7 +5138,10 @@ function toggleRelationshipSimulation() {
 function updateRelationshipPauseButton() {
   const button = $("#relationship-layout");
   button.setAttribute("aria-pressed", String(state.relationship.paused));
-  button.textContent = state.relationship.paused ? "继续布局" : "暂停布局";
+  const label = state.relationship.paused ? "继续布局" : "暂停布局";
+  button.setAttribute("aria-label", label);
+  button.setAttribute("title", label);
+  button.querySelector("use")?.setAttribute("href", state.relationship.paused ? "#icon-play" : "#icon-pause");
 }
 
 function moveRelationshipNodeWithKeyboard(event) {

@@ -338,7 +338,10 @@ def test_goethe_exposes_incremental_outline_react_tools():
     assert "final_batch" in stage_tool.parameters["properties"]
     edit_schema = stage_tool.parameters["properties"]["edits"]["items"]
     assert "section_heading" in edit_schema["properties"]
+    assert "start_text" in edit_schema["properties"]
+    assert "end_text" in edit_schema["properties"]
     assert edit_schema["required"] == ["new_text"]
+    assert "禁止为长段、整章或整节提交 old_text" in DEFAULT_GOETHE_SYSTEM_PROMPT
     assert "edit_world_relation" in DEFAULT_GOETHE_SYSTEM_PROMPT
     assert "confirm=false" in DEFAULT_GOETHE_SYSTEM_PROMPT
 
