@@ -15,6 +15,7 @@ from tools.agent.book_state import BookStage, BookStateStore
 from tools.cli import _save_chapter
 from tools.context_builder import ContextBuilder
 from tools.init_project import init_project
+from tools.llm.response import ProviderResponseError
 from tools.model_profiles import ModelProfileStore
 from tools.project_registry import ProjectRegistry
 from tools.studio import (
@@ -45,8 +46,8 @@ def test_studio_assets_load_shared_core_as_an_es_module():
     tasks = (assets / "js" / "tasks.js").read_text(encoding="utf-8")
     structured_assets = (assets / "js" / "assets.js").read_text(encoding="utf-8")
 
-    assert '<script type="module" src="/app.js?v=agent-activity-1"></script>' in html
-    assert 'import "/js/application.js?v=agent-activity-1"' in app
+    assert '<script type="module" src="/app.js?v=startup-recovery-1"></script>' in html
+    assert 'import "/js/application.js?v=startup-recovery-1"' in app
     assert 'from "/js/core.js"' in application
     assert "export const state" in core
     assert "export async function api" in core
@@ -205,7 +206,9 @@ def test_studio_continuity_distinguishes_field_and_registered_relations():
 
     assert 'id="relationship-origin"' in html
     assert '<option value="canonical">资料字段</option>' in html
-    assert '<option value="annotation">正文注册</option>' in html
+    assert '<option value="annotation">内联注册</option>' in html
+    assert "//**A~&gt;B:具体关系**" in html
+    assert "同章以正文事实为准" in html
     assert 'line.classList.toggle("annotation", edge.origin === "annotation")' in javascript
     assert 'refreshContinuity: loadContinuity' in javascript
     assert ".relationship-edge.annotation" in styles
@@ -352,7 +355,7 @@ def test_studio_onboarding_ui_guides_new_projects_and_next_actions():
     assert "productTourDebugMode" in javascript
     assert 'get("debug") === "onboarding"' in javascript
     assert '"?debug=onboarding"' in javascript
-    assert 'localStorage.setItem(productTourStorageKey, "seen")' in javascript
+    assert 'writeLocalValue(productTourStorageKey, "seen")' in javascript
     assert "startProductTour" in javascript
     assert "advanceProductTourAfterAction" in javascript
     assert "const tourAction" in javascript
@@ -494,6 +497,11 @@ def test_studio_uses_local_vditor_for_markdown_editing_surfaces():
     assert 'cdn: VDITOR_CDN' in editor_adapter
     assert 'body > svg[version="1.1"]:not(.icon-sprite)' in styles
     assert "initializePrimaryMarkdownEditor" in application
+    assert 'className = "markdown-editor-fallback"' in editor_adapter
+    assert 'id="editor-fallback-notice"' in html
+    assert 'id="bootstrap-error"' in html
+    assert "showBootstrapError" in application
+    assert "retryBootstrap" in application
     assert "mountMarkdownEditor(editorHost" in application
     assert 'key === "body_markdown"' in structured_assets
     assert "mountMarkdownEditor(input" in structured_assets
@@ -528,6 +536,8 @@ def test_agent_chat_ui_supports_sessions_and_collapsible_inspector():
     assert "preserveHistory: true" in javascript
     assert "/api/agent/activity" in javascript
     assert "finishAgentActivity" in javascript
+    assert 'case "model_retry"' in javascript
+    assert "模型输出校验失败，自动修复" in javascript
     assert "耗时较久" in javascript
     assert "可能异常" in javascript
     assert "toggleInspectorCollapsed" in javascript
@@ -1344,6 +1354,13 @@ def test_studio_http_serves_ui_api_and_blocks_unsigned_writes(tmp_path: Path):
             assert "javascript" in response.headers["Content-Type"]
             assert "export async function api" in core_module
 
+        with pytest.raises(HTTPError) as missing_asset:
+            opener.open(f"{base}/js/missing-startup-module.js")
+        assert missing_asset.value.code == HTTPStatus.NOT_FOUND
+        missing_payload = json.loads(missing_asset.value.read())
+        assert missing_payload["code"] == "STATIC_ASSET_NOT_FOUND"
+        assert missing_payload["details"]["path"] == "js/missing-startup-module.js"
+
         agent_surface = _read_json(f"{base}/api/agents?agent=goethe&session_id=default&limit=5")
         assert agent_surface["active_session_id"] == "default"
         assert agent_surface["sessions"][0]["id"] == "default"
@@ -1569,6 +1586,52 @@ def test_studio_chat_and_source_extraction_use_injected_real_surfaces(
     assert source_calls[0]["focus"] == "style"
     packs = extracted["workspace"]["operations"]["source_packs"]
     assert packs[0]["source_id"] == "reference_01"
+
+
+def test_studio_chat_exposes_recoverable_model_output_errors(tmp_path: Path):
+    init_project(tmp_path, "demo")
+
+    def malformed_chat(root: Path, novel_id: str, agent: str, message: str) -> dict:
+        raise ProviderResponseError(
+            "MALFORMED_TOOL_ARGUMENTS",
+            "工具 stage_outline_edits 的参数不是有效 JSON：第 1 行第 42 列，字符串没有闭合",
+            details={
+                "tool_name": "stage_outline_edits",
+                "line": 1,
+                "column": 42,
+                "likely_truncated": True,
+            },
+        )
+
+    preferences = StudioModelSettingsStore(tmp_path / "preferences")
+    app = StudioApplication(
+        tmp_path,
+        chat_executor=malformed_chat,
+        project_registry=ProjectRegistry(
+            tmp_path / "registry.yaml",
+            allow_ephemeral=True,
+        ),
+        model_settings_store=preferences,
+        model_profile_store=ModelProfileStore(preferences.directory),
+    )
+
+    with pytest.raises(StudioError) as raised:
+        app.chat_turn(
+            {
+                "agent": "goethe",
+                "run_id": "run-malformed-tool-arguments",
+                "message": "重排整卷大纲",
+            }
+        )
+
+    assert raised.value.status == HTTPStatus.BAD_GATEWAY
+    assert raised.value.code == "MALFORMED_TOOL_ARGUMENTS"
+    assert raised.value.recoverable is True
+    assert raised.value.details["failed_tool_executed"] is False
+    activity = app.agent_activity("run-malformed-tool-arguments")
+    assert activity["status"] == "error"
+    assert "stage_outline_edits" in activity["note"]
+    assert "第 1 行第 42 列" in activity["note"]
 
 
 def test_studio_source_analysis_v2_exposes_evidence_profile_and_confirmed_promotion(

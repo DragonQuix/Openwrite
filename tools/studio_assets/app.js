@@ -1,1 +1,1 @@
-import "/js/application.js?v=agent-activity-1";
+import "/js/application.js?v=startup-recovery-1";

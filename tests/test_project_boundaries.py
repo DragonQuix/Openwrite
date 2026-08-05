@@ -21,6 +21,24 @@ def test_distribution_excludes_deepresearch_runtime_artifacts() -> None:
     assert "prune integrations/deepresearch/packages/*/artifacts" in manifest
 
 
+def test_distribution_includes_local_studio_editor_assets() -> None:
+    root = Path(__file__).parents[1]
+    manifest = (root / "MANIFEST.in").read_text(encoding="utf-8")
+    ignore = (root / ".gitignore").read_text(encoding="utf-8")
+    required = [
+        "index.css",
+        "index.min.js",
+        "js/icons/ant.js",
+        "js/lute/lute.min.js",
+    ]
+
+    assert "recursive-include tools/studio_assets *" in manifest
+    assert "!/tools/studio_assets/vendor/vditor/dist/**" in ignore
+    for relative in required:
+        asset = root / "tools" / "studio_assets" / "vendor" / "vditor" / "dist" / relative
+        assert asset.is_file()
+
+
 @pytest.mark.parametrize(
     "novel_id",
     ["", "a", "../escape", "/tmp/book", "book/part", "含空格", "two words"],

@@ -8,9 +8,22 @@ from pathlib import Path
 from typing import Any
 
 STATIC_ROOT = Path(__file__).parent / "studio_assets"
+REQUIRED_STATIC_ASSETS = (
+    "index.html",
+    "styles.css",
+    "app.js",
+    "js/application.js",
+    "js/core.js",
+    "js/markdown-editor.js",
+)
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 MAX_ASSET_PACKAGE_REQUEST_BYTES = 35 * 1024 * 1024
 WRITE_HEADER = "X-OpenWrite-Studio"
+
+
+def missing_required_static_assets(root: Path = STATIC_ROOT) -> list[str]:
+    """Return shell assets whose absence prevents Studio from reporting errors."""
+    return [relative for relative in REQUIRED_STATIC_ASSETS if not (root / relative).is_file()]
 
 
 class StudioError(Exception):

@@ -22,6 +22,9 @@ import yaml
 
 from .frontmatter import compose_toml_document, parse_toml_front_matter, strip_front_matter_padding
 
+MAX_OUTLINE_EDIT_BATCH_EDITS = 8
+MAX_OUTLINE_EDIT_BATCH_CHARS = 12_000
+
 
 class StoryPlanningStore:
     """管理立项聊天、基础设定和滚动大纲的草案文件。
@@ -410,6 +413,8 @@ class StoryPlanningStore:
             "query_found": not query or query.casefold() in editing_source.casefold(),
             "pending_edit": bool(pending),
             "pending_draft_revision": str(pending.get("draft_revision", "")),
+            "pending_batch_count": int(pending.get("batch_count", 0) or 0),
+            "pending_final_batch": bool(pending.get("final_batch", False)),
         }
 
     def stage_outline_edits(
@@ -417,8 +422,10 @@ class StoryPlanningStore:
         *,
         base_revision: str,
         edits: list[dict[str, Any]],
+        batch_label: str = "",
+        final_batch: bool = True,
     ) -> dict[str, Any]:
-        """按精确文本替换暂存增量补丁，未提及内容保持字节级不变。"""
+        """按 Markdown 章节或精确文本分批暂存修改。"""
         canonical = self.read_outline_source()
         canonical_revision = self._hash_text(canonical)
         if not self.outline_src_path.exists():
@@ -429,8 +436,11 @@ class StoryPlanningStore:
             )
         pending = self._load_outline_edit_state()
         working_source = canonical
+        source_kind = "canonical"
         expected_revision = canonical_revision
         previous_edit_count = 0
+        previous_batch_count = 0
+        previous_batches: list[dict[str, Any]] = []
         if pending and self.outline_draft_path.exists():
             if str(pending.get("base_revision", "")) != canonical_revision:
                 return self._outline_edit_error(
@@ -439,6 +449,7 @@ class StoryPlanningStore:
                     revision=canonical_revision,
                 )
             working_source = self.outline_draft_path.read_text(encoding="utf-8")
+            source_kind = "pending_draft"
             expected_revision = self._hash_text(working_source)
             if str(pending.get("draft_revision", "")) != expected_revision:
                 return self._outline_edit_error(
@@ -450,6 +461,14 @@ class StoryPlanningStore:
                 previous_edit_count = int(pending.get("edit_count", 0) or 0)
             except (TypeError, ValueError):
                 previous_edit_count = 0
+            try:
+                previous_batch_count = int(pending.get("batch_count", 0) or 0)
+            except (TypeError, ValueError):
+                previous_batch_count = 0
+            if isinstance(pending.get("batches"), list):
+                previous_batches = [
+                    dict(item) for item in pending["batches"] if isinstance(item, dict)
+                ]
         if not str(base_revision or "").strip():
             return self._outline_edit_error(
                 "missing_base_revision",
@@ -468,10 +487,28 @@ class StoryPlanningStore:
                 "没有可暂存的大纲修改。",
                 revision=expected_revision,
             )
-        if len(edits) > 50:
+        if len(edits) > MAX_OUTLINE_EDIT_BATCH_EDITS:
             return self._outline_edit_error(
                 "too_many_edits",
-                "单次最多暂存 50 个精确修改。",
+                (
+                    f"单批最多暂存 {MAX_OUTLINE_EDIT_BATCH_EDITS} 个精确修改；"
+                    "请按幕或最多 4 节拆分，并使用返回的 draft_revision 继续下一批。"
+                ),
+                revision=expected_revision,
+            )
+        batch_chars = sum(
+            len(str(edit.get("section_heading") or edit.get("old_text") or ""))
+            + len(str(edit.get("new_text", "")))
+            for edit in edits
+            if isinstance(edit, dict)
+        )
+        if batch_chars > MAX_OUTLINE_EDIT_BATCH_CHARS:
+            return self._outline_edit_error(
+                "outline_edit_batch_too_large",
+                (
+                    f"本批补丁共 {batch_chars} 字符，超过 {MAX_OUTLINE_EDIT_BATCH_CHARS} 字符上限；"
+                    "请缩小到一个幕或最多 4 节，再分批暂存。"
+                ),
                 revision=expected_revision,
             )
 
@@ -484,21 +521,103 @@ class StoryPlanningStore:
                     f"第 {index + 1} 个修改不是对象。",
                     revision=expected_revision,
                 )
+            section_heading = str(edit.get("section_heading", "")).strip()
             old_text = str(edit.get("old_text", ""))
             new_text = str(edit.get("new_text", ""))
             replace_all = bool(edit.get("replace_all", False))
+            if section_heading:
+                replacement = self._replace_markdown_section(
+                    revised,
+                    section_heading,
+                    new_text,
+                )
+                if not replacement["ok"]:
+                    return self._outline_edit_error(
+                        str(replacement["error"]),
+                        f"第 {index + 1} 个修改{replacement['message']}本批未写入。",
+                        revision=expected_revision,
+                        details={
+                            "edit_index": index + 1,
+                            "field_path": f"$.edits[{index}].section_heading",
+                            "source_kind": source_kind,
+                            "batch_applied": False,
+                            "retry_base_revision": expected_revision,
+                            **dict(replacement.get("details") or {}),
+                        },
+                    )
+                revised = str(replacement["source"])
+                applied.append(
+                    {
+                        "index": index + 1,
+                        "mode": "section",
+                        "section_heading": replacement["section_heading"],
+                        "start_line": replacement["start_line"],
+                        "end_line": replacement["end_line"],
+                        "replacements": 1,
+                        "replace_all": False,
+                    }
+                )
+                continue
             if not old_text:
                 return self._outline_edit_error(
-                    "empty_old_text",
-                    f"第 {index + 1} 个修改缺少 old_text。",
+                    "missing_edit_selector",
+                    (
+                        f"第 {index + 1} 个修改缺少 section_heading 或 old_text；"
+                        "重写完整幕、节、章时只需传 section_heading。"
+                    ),
                     revision=expected_revision,
+                    details={
+                        "edit_index": index + 1,
+                        "field_paths": [
+                            f"$.edits[{index}].section_heading",
+                            f"$.edits[{index}].old_text",
+                        ],
+                        "batch_applied": False,
+                    },
                 )
             occurrences = revised.count(old_text)
             if occurrences == 0:
+                diagnostics = self._outline_anchor_diagnostics(revised, old_text)
+                anchor = str(diagnostics.get("anchor") or "")
+                mismatch = diagnostics.get("first_difference")
+                mismatch_offset = (
+                    int(mismatch.get("offset", 0)) + 1
+                    if isinstance(mismatch, dict)
+                    else 0
+                )
+                source_label = "待确认草稿" if source_kind == "pending_draft" else "正式大纲"
+                guidance = (
+                    f"系统在{source_label}中找到了唯一锚点“{anchor}”，但提交文本"
+                    f"从第 {mismatch_offset} 个字符开始不同。请直接复用 "
+                    "details.suggested_old_text，"
+                    "不要凭记忆重写 old_text。"
+                    if (
+                        anchor
+                        and diagnostics.get("suggested_old_text")
+                        and not diagnostics.get("suggested_old_text_truncated")
+                    )
+                    else (
+                        f"请调用 read_outline(query={diagnostics.get('suggested_query')!r}) "
+                        f"重新读取{source_label}，并逐字复制返回内容。"
+                    )
+                )
                 return self._outline_edit_error(
                     "old_text_not_found",
-                    f"第 {index + 1} 个修改的 old_text 不存在，请重新读取原文。",
+                    (
+                        f"第 {index + 1} 个修改的 old_text 未匹配当前{source_label}；"
+                        f"本批未写入。{guidance}继续时使用 revision {expected_revision}。"
+                    ),
                     revision=expected_revision,
+                    details={
+                        "edit_index": index + 1,
+                        "field_path": f"$.edits[{index}].old_text",
+                        "cause": "exact_text_mismatch",
+                        "source_kind": source_kind,
+                        "batch_applied": False,
+                        "retry_base_revision": expected_revision,
+                        "submitted_chars": len(old_text),
+                        **diagnostics,
+                    },
                 )
             if occurrences > 1 and not replace_all:
                 return self._outline_edit_error(
@@ -510,6 +629,7 @@ class StoryPlanningStore:
             applied.append(
                 {
                     "index": index + 1,
+                    "mode": "text",
                     "replacements": occurrences if replace_all else 1,
                     "replace_all": replace_all,
                 }
@@ -526,18 +646,49 @@ class StoryPlanningStore:
         state = self._load_outline_edit_state()
         state["edit_count"] = previous_edit_count + len(applied)
         state["applied"] = applied
+        state["batch_count"] = previous_batch_count + 1
+        state["final_batch"] = bool(final_batch)
+        state["batches"] = [
+            *previous_batches,
+            {
+                "index": previous_batch_count + 1,
+                "label": str(batch_label or "").strip(),
+                "edit_count": len(applied),
+                "payload_chars": batch_chars,
+                "final": bool(final_batch),
+            },
+        ]
         self._save_outline_edit_state(state)
         diff = self._outline_diff(canonical, revised)
+        draft_revision = self._hash_text(revised)
         return {
             "ok": True,
             "blocked": False,
-            "next_action": "confirm_outline_edits",
-            "message": "大纲增量修改已暂存，src/outline.md 尚未改变。",
+            "next_action": (
+                "confirm_outline_edits" if final_batch else "continue_outline_edit_batches"
+            ),
+            "message": (
+                "大纲全部批次已暂存，请向用户展示累计 diff 并等待确认；"
+                "src/outline.md 尚未改变。"
+                if final_batch
+                else (
+                    f"大纲第 {previous_batch_count + 1} 批已暂存；请使用 draft_revision "
+                    "继续下一批，不要重复已完成的修改，也不要提前请求用户确认。"
+                )
+            ),
             "path": str(self.outline_src_path),
             "draft_path": str(self.outline_draft_path),
             "base_revision": canonical_revision,
-            "draft_revision": self._hash_text(revised),
+            "draft_revision": draft_revision,
             "edit_count": previous_edit_count + len(applied),
+            "applied": applied,
+            "batch_count": previous_batch_count + 1,
+            "batch_label": str(batch_label or "").strip(),
+            "final_batch": bool(final_batch),
+            "batch_limits": {
+                "max_edits": MAX_OUTLINE_EDIT_BATCH_EDITS,
+                "max_payload_chars": MAX_OUTLINE_EDIT_BATCH_CHARS,
+            },
             "diff": diff,
         }
 
@@ -589,6 +740,15 @@ class StoryPlanningStore:
             encoding="utf-8"
         ) == self.outline_draft_path.read_text(encoding="utf-8")
 
+    def outline_edit_batches_complete(self) -> bool:
+        """判断分批增量编辑是否已经明确提交了最后一批。"""
+        state = self._load_outline_edit_state()
+        return not (
+            state.get("mode") == "incremental"
+            and "final_batch" in state
+            and state.get("final_batch") is not True
+        )
+
     def promote_outline(self, confirmed: bool) -> bool:
         """确认后原子写入 outline；revision 冲突时拒绝覆盖。"""
         if not confirmed:
@@ -603,6 +763,8 @@ class StoryPlanningStore:
         draft = self.outline_draft_path.read_text(encoding="utf-8")
         state = self._load_outline_edit_state()
         if state:
+            if not self.outline_edit_batches_complete():
+                return False
             source_exists = self.outline_src_path.exists()
             source = self.read_outline_source()
             if bool(state.get("base_exists", False)) != source_exists:
@@ -654,6 +816,7 @@ class StoryPlanningStore:
         message: str,
         *,
         revision: str = "",
+        details: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "ok": False,
@@ -661,7 +824,188 @@ class StoryPlanningStore:
             "error": error,
             "message": message,
             "revision": revision,
+            "details": details or {},
             "next_action": "read_outline",
+        }
+
+    @staticmethod
+    def _replace_markdown_section(
+        source: str,
+        requested_heading: str,
+        new_body: str,
+    ) -> dict[str, Any]:
+        lines = source.splitlines(keepends=True)
+        requested = str(requested_heading or "").strip()
+        requested_match = re.fullmatch(r"(#{1,6})[ \t]+(.+?)", requested)
+        requested_level = len(requested_match.group(1)) if requested_match else 0
+        requested_label = (
+            requested_match.group(2).strip()
+            if requested_match
+            else requested.lstrip("#").strip()
+        )
+        headings: list[dict[str, Any]] = []
+        offset = 0
+        for index, line in enumerate(lines):
+            plain = line.rstrip("\r\n")
+            match = re.fullmatch(r"(#{1,6})[ \t]+(.+?)[ \t]*", plain)
+            if match:
+                headings.append(
+                    {
+                        "index": index,
+                        "line": index + 1,
+                        "level": len(match.group(1)),
+                        "label": match.group(2).strip(),
+                        "heading": plain,
+                        "start": offset,
+                        "content_start": offset + len(line),
+                    }
+                )
+            offset += len(line)
+        matches = [
+            item
+            for item in headings
+            if item["label"] == requested_label
+            and (not requested_level or item["level"] == requested_level)
+        ]
+        if not matches:
+            return {
+                "ok": False,
+                "error": "section_heading_not_found",
+                "message": f"找不到 Markdown 标题“{requested_heading}”；",
+                "details": {
+                    "submitted_heading": requested_heading,
+                    "available_headings": [item["heading"] for item in headings[:80]],
+                },
+            }
+        if len(matches) > 1:
+            return {
+                "ok": False,
+                "error": "ambiguous_section_heading",
+                "message": (
+                    f"标题“{requested_heading}”匹配到 {len(matches)} 处；"
+                    "请带上 Markdown 的 # 层级；"
+                ),
+                "details": {
+                    "submitted_heading": requested_heading,
+                    "matching_headings": [item["heading"] for item in matches],
+                },
+            }
+
+        target = matches[0]
+        end = len(source)
+        end_line = len(lines)
+        for item in headings:
+            if item["index"] > target["index"] and item["level"] <= target["level"]:
+                end = int(item["start"])
+                end_line = int(item["line"]) - 1
+                break
+        heading_line = lines[int(target["index"])]
+        newline = "\r\n" if heading_line.endswith("\r\n") else "\n"
+        body = str(new_body or "").strip("\r\n")
+        replacement = str(target["heading"]) + newline + newline
+        if body:
+            replacement += body + newline
+        if end < len(source):
+            replacement += newline
+        return {
+            "ok": True,
+            "source": source[: int(target["start"])] + replacement + source[end:],
+            "section_heading": target["heading"],
+            "start_line": target["line"],
+            "end_line": end_line,
+        }
+
+    @staticmethod
+    def _outline_anchor_diagnostics(
+        source: str,
+        submitted: str,
+        *,
+        max_suggestion_chars: int = 6000,
+    ) -> dict[str, Any]:
+        """Find a stable line anchor and return the exact current block around it."""
+        source_lines = source.splitlines(keepends=True)
+        plain_source_lines = [line.rstrip("\r\n") for line in source_lines]
+        submitted_lines = submitted.splitlines()
+        nonempty = [line for line in submitted_lines if line.strip()]
+        heading_lines = [line for line in nonempty if re.match(r"^#{1,6}\s+", line)]
+        candidates = list(dict.fromkeys([*heading_lines, *nonempty[:6]]))
+
+        anchor = ""
+        anchor_index = -1
+        for candidate in candidates:
+            matches = [
+                index for index, line in enumerate(plain_source_lines) if line == candidate
+            ]
+            if len(matches) == 1:
+                anchor = candidate
+                anchor_index = matches[0]
+                break
+
+        closest_line = ""
+        similarity = 0.0
+        if anchor_index < 0 and nonempty and plain_source_lines:
+            target = nonempty[0]
+            scored = (
+                (difflib.SequenceMatcher(None, target, line).ratio(), index, line)
+                for index, line in enumerate(plain_source_lines)
+                if line.strip()
+            )
+            similarity, candidate_index, closest_line = max(
+                scored,
+                default=(0.0, -1, ""),
+            )
+            if similarity >= 0.55 and plain_source_lines.count(closest_line) == 1:
+                anchor = closest_line
+                anchor_index = candidate_index
+
+        suggested = ""
+        suggestion_truncated = False
+        if anchor_index >= 0:
+            end_index = min(
+                len(source_lines),
+                anchor_index + max(len(submitted_lines), 1),
+            )
+            heading_match = re.match(r"^(#{1,6})\s+", anchor)
+            if heading_match:
+                heading_level = len(heading_match.group(1))
+                for index in range(anchor_index + 1, len(plain_source_lines)):
+                    next_heading = re.match(r"^(#{1,6})\s+", plain_source_lines[index])
+                    if next_heading and len(next_heading.group(1)) <= heading_level:
+                        end_index = index
+                        break
+                else:
+                    end_index = len(source_lines)
+            suggested = "".join(source_lines[anchor_index:end_index])
+            if len(suggested) > max_suggestion_chars:
+                suggested = suggested[:max_suggestion_chars]
+                suggestion_truncated = True
+
+        first_difference: dict[str, Any] = {}
+        if suggested:
+            shared = min(len(submitted), len(suggested))
+            offset = next(
+                (index for index in range(shared) if submitted[index] != suggested[index]),
+                shared,
+            )
+            if offset < max(len(submitted), len(suggested)):
+                excerpt_start = max(0, offset - 40)
+                excerpt_end = offset + 80
+                first_difference = {
+                    "offset": offset,
+                    "submitted": submitted[excerpt_start:excerpt_end],
+                    "current": suggested[excerpt_start:excerpt_end],
+                }
+
+        suggested_query = anchor or closest_line or (nonempty[0] if nonempty else "")
+        return {
+            "anchor": anchor,
+            "anchor_line": anchor_index + 1 if anchor_index >= 0 else 0,
+            "suggested_query": suggested_query[:240],
+            "suggested_old_text": suggested,
+            "suggested_old_text_truncated": suggestion_truncated,
+            "closest_line": closest_line,
+            "similarity": round(similarity, 3),
+            "first_difference": first_difference,
         }
 
     @staticmethod

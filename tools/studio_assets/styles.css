@@ -356,6 +356,84 @@ select:focus-visible {
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--inspector-width);
 }
 
+.system-notice {
+  display: flex;
+  margin: 20px 28px 0;
+  padding: 14px 16px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border: 1px solid var(--border-strong);
+  border-left: 4px solid var(--danger);
+  border-radius: 4px;
+  background: var(--surface);
+}
+
+.system-notice[hidden] {
+  display: none;
+}
+
+.system-notice.warning {
+  border-left-color: var(--accent);
+}
+
+.system-notice-copy {
+  min-width: 0;
+}
+
+.system-notice-copy strong {
+  font-size: 13px;
+}
+
+.system-notice-copy p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.system-notice-copy code {
+  display: block;
+  margin-top: 5px;
+  color: var(--faint);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.system-notice-copy code[hidden] {
+  display: none;
+}
+
+.system-notice-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.system-notice-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.system-notice-actions svg {
+  width: 15px;
+  height: 15px;
+}
+
+@media (max-width: 700px) {
+  .system-notice {
+    margin: 14px 14px 0;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .system-notice-actions {
+    flex-wrap: wrap;
+  }
+}
+
 .app.inspector-collapsed .workspace-shell {
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0;
 }
@@ -2712,6 +2790,18 @@ select:focus-visible {
   font-size: 12px;
 }
 
+.relationship-format-help {
+  max-width: 680px;
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.relationship-format-help code {
+  overflow-wrap: anywhere;
+}
+
 .relationship-controls {
   flex-wrap: wrap;
   justify-content: flex-end;
@@ -3864,6 +3954,33 @@ button.next-action-button:focus-visible {
   outline: 0;
   background: var(--surface);
   color: var(--text);
+}
+
+.markdown-editor-host.fallback {
+  display: block;
+}
+
+.markdown-editor-fallback {
+  width: 100%;
+  min-height: 520px;
+  padding: 28px clamp(18px, 5vw, 64px) 80px;
+  border: 0;
+  outline: 0;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.8;
+  resize: vertical;
+  tab-size: 4;
+}
+
+.markdown-editor-host.compact .markdown-editor-fallback {
+  min-height: 180px;
+  padding: 14px;
+}
+
+.markdown-editor-fallback:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 
 .markdown-editor-host.vditor {

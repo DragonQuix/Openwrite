@@ -20,6 +20,22 @@ import {
 const libraryViews = ["core", "characters", "settings"];
 const legacyLibraryViews = { story: "core", world: "settings", assets: "characters" };
 
+function readLocalValue(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch (error) {
+    return null;
+  }
+}
+
+function writeLocalValue(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (error) {
+    // The current session remains usable when browser storage is unavailable.
+  }
+}
+
 async function loadWorkspace() {
   state.workspace = await api("/api/workspace");
   renderWorkspace();
@@ -27,6 +43,50 @@ async function loadWorkspace() {
   document.querySelector("#app").setAttribute("aria-busy", "false");
   if (!state.workspace.initialized) suggestProjectPath();
   if (state.workspace.initialized) refreshTasks();
+}
+
+function showBootstrapError(error) {
+  const status = Number(error?.status || 0);
+  const hint = status >= 500
+    ? "当前作品可能包含旧版或损坏的数据；可先重试，或打开其他作品继续排查。"
+    : (status === 0
+      ? "无法连接本地 Studio 服务，请确认启动窗口仍在运行。"
+      : "可重试载入，或打开其他作品检查是否仅当前项目受影响。");
+  const detail = $("#bootstrap-error-detail");
+  if (detail) detail.textContent = `${error?.message || "未知启动错误"} ${hint}`;
+  const reference = [error?.code, error?.requestId].filter(Boolean).join(" · ");
+  const request = $("#bootstrap-error-request");
+  if (request) {
+    request.textContent = reference;
+    request.hidden = !reference;
+  }
+  const alert = $("#bootstrap-error");
+  if (alert) alert.hidden = false;
+  const title = $("#book-title");
+  if (title) title.textContent = "作品载入失败";
+  const location = $("#book-location");
+  if (location) location.textContent = "OpenWrite Studio 仍可切换作品";
+  $("#app")?.setAttribute("aria-busy", "false");
+  showToast(error?.message || "作品载入失败", true);
+}
+
+function hideBootstrapError() {
+  const alert = $("#bootstrap-error");
+  if (alert) alert.hidden = true;
+}
+
+async function retryBootstrap() {
+  const button = $("#bootstrap-retry");
+  button.disabled = true;
+  $("#app").setAttribute("aria-busy", "true");
+  try {
+    await loadWorkspace();
+    await routeFromLocation();
+  } catch (error) {
+    showBootstrapError(error);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function loadResearch() {
@@ -308,6 +368,7 @@ function renderWorkspace() {
   syncChapterDeleteControl();
   renderOperations();
   renderInspectorContext();
+  hideBootstrapError();
 }
 
 function renderReadiness(readiness) {
@@ -2061,11 +2122,11 @@ function preferredTourStep() {
 function startProductTour(forcedStep = "") {
   const isAutomatic = !forcedStep;
   const debugMode = productTourDebugMode();
-  if (isAutomatic && !debugMode && localStorage.getItem(productTourStorageKey)) return;
+  if (isAutomatic && !debugMode && readLocalValue(productTourStorageKey)) return;
   const step = forcedStep || "workspace";
   const guide = productTourSteps[step];
   if (!guide) return;
-  if (isAutomatic && !debugMode) localStorage.setItem(productTourStorageKey, "seen");
+  if (isAutomatic && !debugMode) writeLocalValue(productTourStorageKey, "seen");
   state.productTour.active = true;
   state.productTour.step = step;
   if (guide.view && state.view !== guide.view) setView(guide.view);
@@ -2134,7 +2195,7 @@ function finishProductTour() {
   state.productTour.active = false;
   state.productTour.step = "";
   $("#product-tour").hidden = true;
-  if (!productTourDebugMode()) localStorage.setItem(productTourStorageKey, "done");
+  if (!productTourDebugMode()) writeLocalValue(productTourStorageKey, "done");
   showToast("引导已完成。随时可从总览重新打开。");
 }
 
@@ -4329,6 +4390,7 @@ function describeAgentActivityEvent(activityEvent) {
     case "model_completed": return Number(activityEvent.tool_count || 0)
       ? `决定调用 ${Number(activityEvent.tool_count)} 个工具`
       : "本轮分析完成";
+    case "model_retry": return `模型输出校验失败，自动修复第 ${Number(activityEvent.repair_attempt || 1)} 次`;
     case "tool_started": return `调用 ${toolLabel}`;
     case "tool_completed": return `${toolLabel}${activityEvent.ok === false ? "失败" : "返回结果"}`;
     case "response_ready": return "整理最终回复";
@@ -4730,7 +4792,7 @@ function renderRelationshipGraph(graph) {
   const relationHint = totalNodes && !totalEdges
     ? " · 暂无已注册连线，请添加 related 或关系批注"
     : "";
-  $("#relationship-summary").textContent = `${totalNodes} 个节点 · ${totalEdges} 条关系（资料字段 ${canonicalEdges} · 正文注册 ${annotationEdges}）${relationDiagnostics.length ? ` · 注册错误 ${relationDiagnostics.length}` : ""}${graph.truncated ? " · 已按性能上限截取" : ""}${relationHint}`;
+  $("#relationship-summary").textContent = `${totalNodes} 个节点 · ${totalEdges} 条关系（资料字段 ${canonicalEdges} · 内联注册 ${annotationEdges}）${relationDiagnostics.length ? ` · 注册错误 ${relationDiagnostics.length}` : ""}${graph.truncated ? " · 已按性能上限截取" : ""}${relationHint}`;
   $("#relationship-visible-count").textContent = String(visibleNodes.length);
   $("#relationship-search-status").textContent = query
     ? (matchIds.size
@@ -4825,7 +4887,7 @@ function buildRelationshipSvg(nodes, edges) {
     line.classList.toggle("search-related", searchRelated);
     line.classList.toggle("search-context", Boolean(state.relationship.query) && !searchRelated);
     const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-    title.textContent = `${edge.label} · ${edge.origin === "canonical" ? "资料字段" : "正文注册"}`;
+    title.textContent = `${edge.label} · ${edge.origin === "canonical" ? "资料字段" : (edge.source_label || "内联注册")}`;
     line.append(title);
     edgeRoot.append(line);
   });
@@ -5137,7 +5199,7 @@ function renderRelationshipDetail() {
     text.textContent = `${neighbor?.label || neighborId}：${edge.label}`;
     const origin = document.createElement("small");
     origin.className = `relationship-edge-origin ${edge.origin || "annotation"}`;
-    origin.textContent = edge.origin === "canonical" ? "资料字段" : "正文注册";
+    origin.textContent = edge.origin === "canonical" ? "资料字段" : (edge.source_label || "内联注册");
     item.append(text, origin);
     list.append(item);
   });
@@ -5766,7 +5828,7 @@ function toggleInspectorCollapsed(collapsed, options = {}) {
   $("#inspector-collapse").setAttribute("aria-expanded", String(!collapsed));
   if (persist) {
     state.outlineInspectorAutoCollapsed = false;
-    localStorage.setItem("openwrite-inspector-collapsed", collapsed ? "1" : "0");
+    writeLocalValue("openwrite-inspector-collapsed", collapsed ? "1" : "0");
   }
 }
 
@@ -5774,7 +5836,7 @@ function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   $(".brand-logo").src = theme === "dark" ? "/brand/logo-dark.svg" : "/brand/logo.svg";
   setMarkdownEditorTheme(theme);
-  localStorage.setItem("openwrite-theme", theme);
+  writeLocalValue("openwrite-theme", theme);
 }
 
 function setToolHelpExpanded(button, expanded) {
@@ -5814,6 +5876,8 @@ function toggleMobileNavigation(open, restoreFocus = true) {
 }
 
 function bindEvents() {
+  $("#bootstrap-retry")?.addEventListener("click", retryBootstrap);
+  $("#bootstrap-open-project")?.addEventListener("click", openProjectDialog);
   $$(".nav-item").forEach((button) => {
     button.addEventListener("click", () => {
       if (button.dataset.navCommand === "tasks") {
@@ -6145,23 +6209,32 @@ async function routeFromLocation() {
 }
 
 async function start() {
-  const storedTheme = localStorage.getItem("openwrite-theme");
+  const storedTheme = readLocalValue("openwrite-theme");
   const systemDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
   applyTheme(storedTheme || (systemDark ? "dark" : "light"));
-  await initializePrimaryMarkdownEditor({
-    onInput: () => markEditorDirty(),
-    onSelection: () => syncRevisionControls(),
-  });
-  bindEvents();
-  const inspectorPreference = localStorage.getItem("openwrite-inspector-collapsed");
+  try {
+    bindEvents();
+  } catch (error) {
+    showBootstrapError(new Error(`页面资源版本不一致：${error.message}`));
+    return;
+  }
+  const inspectorPreference = readLocalValue("openwrite-inspector-collapsed");
   toggleInspectorCollapsed(inspectorPreference === null || inspectorPreference === "1");
+  try {
+    const editor = await initializePrimaryMarkdownEditor({
+      onInput: () => markEditorDirty(),
+      onSelection: () => syncRevisionControls(),
+    });
+    $("#editor-fallback-notice").hidden = editor.enhanced;
+  } catch (error) {
+    $("#editor-fallback-notice").hidden = false;
+  }
   try {
     await loadWorkspace();
     await routeFromLocation();
     startProductTour();
   } catch (error) {
-    document.querySelector("#app").setAttribute("aria-busy", "false");
-    showToast(error.message, true);
+    showBootstrapError(error);
   }
 }
 

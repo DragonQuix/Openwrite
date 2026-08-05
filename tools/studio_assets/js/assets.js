@@ -340,7 +340,7 @@ function addRelationField(root, relations, relationView = {}) {
 
   const syncCount = () => {
     const value = list.querySelectorAll(".asset-relation-row").length;
-    count.textContent = `资料字段 ${value} · 正文注册 ${registered.length} · 被引用 ${incoming.length}`;
+    count.textContent = `资料字段 ${value} · 内联注册 ${registered.length} · 被引用 ${incoming.length}`;
     list.classList.toggle("empty", value === 0);
   };
   const renderOptions = () => {
@@ -430,7 +430,7 @@ function addRelationField(root, relations, relationView = {}) {
   });
   wrapper.append(heading, picker);
   wrapper.append(createRelationGroup("资料字段", list));
-  if (registered.length) wrapper.append(createRelationGroup("正文注册", registeredList));
+  if (registered.length) wrapper.append(createRelationGroup("内联注册", registeredList));
   if (incoming.length) wrapper.append(createRelationGroup("被其他资料引用", incomingList));
   root.append(wrapper);
   syncCount();
@@ -456,7 +456,7 @@ function createRelationReferenceRow(relation) {
   const note = document.createElement("span");
   note.textContent = relation.note || "关联";
   const source = document.createElement("small");
-  source.textContent = relation.origin === "canonical" ? "资料字段" : (relation.source_label || "正文注册");
+  source.textContent = relation.origin === "canonical" ? "资料字段" : (relation.source_label || "内联注册");
   detail.append(kind, note, source);
   row.append(identity, detail);
   return row;

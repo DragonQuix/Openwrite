@@ -75,6 +75,7 @@ from tools.studio_contracts import (
     STATIC_ROOT,
     WRITE_HEADER,
     StudioError,
+    missing_required_static_assets,
 )
 from tools.studio_http import (
     OpenWriteStudioServer as ModularOpenWriteStudioServer,
@@ -354,6 +355,16 @@ class StudioApplication:
                         else "模型已完成本轮分析，正在整理回复。"
                     ),
                 )
+            elif event_name == "model_retry":
+                attempt = int(event.get("repair_attempt") or 1)
+                limit = int(event.get("repair_limit") or attempt)
+                reason = str(event.get("reason") or "模型输出未通过校验")
+                activity.update(
+                    phase="thinking",
+                    step_index=1,
+                    title=f"{label} 正在自动修复输出",
+                    note=f"第 {attempt}/{limit} 次修复：{reason}",
+                )
             elif event_name == "tool_started":
                 activity.update(
                     phase="tool_running",
@@ -422,6 +433,8 @@ class StudioApplication:
                     "reason": self._agent_activity_detail(
                         event.get("reason"), limit=900
                     ),
+                    "repair_attempt": int(event.get("repair_attempt") or 0),
+                    "repair_limit": int(event.get("repair_limit") or 0),
                     "timestamp": now,
                 }
             )
@@ -2380,6 +2393,16 @@ class StudioApplication:
                 status="error",
                 message=str(exc),
             )
+            from tools.llm.response import ProviderResponseError
+
+            if isinstance(exc, ProviderResponseError):
+                raise StudioError(
+                    str(exc),
+                    HTTPStatus.BAD_GATEWAY,
+                    code=exc.code,
+                    recoverable=True,
+                    details={**exc.details, "failed_tool_executed": False},
+                ) from exc
             raise
         finally:
             self._write_lock.release()
@@ -3965,7 +3988,7 @@ class LegacyStudioRequestHandler(SimpleHTTPRequestHandler):
         if STATIC_ROOT.resolve() not in path.parents and path != STATIC_ROOT.resolve():
             raise StudioError("资源不存在", HTTPStatus.NOT_FOUND)
         if not path.is_file():
-            path = STATIC_ROOT / "index.html"
+            raise StudioError("资源不存在", HTTPStatus.NOT_FOUND)
         content = path.read_bytes()
         self.send_response(HTTPStatus.OK)
         self._security_headers()
@@ -4054,6 +4077,14 @@ def create_server(
 ) -> ModularOpenWriteStudioServer:
     if not STATIC_ROOT.is_dir():
         raise StudioError(f"Studio 静态资源缺失: {STATIC_ROOT}")
+    missing_assets = missing_required_static_assets()
+    if missing_assets:
+        raise StudioError(
+            "OpenWrite 安装不完整，缺少 Studio 核心资源: " + ", ".join(missing_assets),
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            code="STUDIO_INSTALLATION_INCOMPLETE",
+            details={"missing_assets": missing_assets},
+        )
     app = StudioApplication(
         project_root,
         writer_executor=writer_executor,

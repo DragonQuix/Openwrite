@@ -67,10 +67,10 @@ def test_parser_reports_unscoped_and_malformed_annotations():
 
 
 def test_relation_annotation_parser_is_explicit_and_ignores_fenced_examples():
-    text = """//**沈烬~白续:互相试探的敌对关系**
+    text = """//**沈烬~>白续:互相试探的敌对关系**
 
 ```text
-//**示例甲~示例乙:不应注册**
+//**示例甲~>示例乙:不应注册**
 ```
 
 ## 关系网络
@@ -93,8 +93,14 @@ def test_relation_annotation_parser_is_explicit_and_ignores_fenced_examples():
     assert state_records == []
     assert state_diagnostics == []
 
+    legacy, legacy_diagnostics = parse_relation_annotations(
+        "//**沈烬~白续:旧项目关系**\n", source_path="src/characters/shen_jin.md"
+    )
+    assert [(item.source, item.target) for item in legacy] == [("沈烬", "白续")]
+    assert legacy_diagnostics == []
+
     malformed, malformed_diagnostics = parse_relation_annotations(
-        "//**沈烬~白续**\n", source_path="src/characters/shen_jin.md"
+        "//**沈烬~>白续**\n", source_path="src/characters/shen_jin.md"
     )
     assert malformed == []
     assert malformed_diagnostics[0]["code"] == "invalid_relation_annotation"
@@ -157,12 +163,16 @@ def test_query_uses_active_book_state_when_editing_older_chapter(tmp_path: Path)
 
 def test_actual_annotation_wins_over_outline_at_same_chapter(tmp_path: Path):
     root, novel_root = _project(tmp_path)
+    previous = novel_root / "data" / "manuscript" / "arc_001" / "ch_062.md"
+    previous.write_text(
+        "# 第六十二章\n//**沈烬[位置]：旧城 -> 工坊**\n", encoding="utf-8"
+    )
     (novel_root / "src" / "outline.md").write_text(
         "#### 第六十三章\n//**沈烬[位置]：工坊 -> 计划地点**\n", encoding="utf-8"
     )
     chapter = novel_root / "data" / "manuscript" / "arc_001" / "ch_063.md"
     chapter.write_text(
-        "# 第六十三章\n//**沈烬[位置]：计划地点 -> 实际地点**\n", encoding="utf-8"
+        "# 第六十三章\n//**沈烬[位置]：工坊 -> 实际地点**\n", encoding="utf-8"
     )
 
     result = CharacterStateIndex(root, "demo").query(
@@ -172,6 +182,11 @@ def test_actual_annotation_wins_over_outline_at_same_chapter(tmp_path: Path):
     assert result["current"][0]["state"] == "实际地点"
     assert result["current"][0]["source_kind"] == "actual"
     assert result["continuity_conflicts"] == []
+    assert [item["source_kind"] for item in result["history"]] == [
+        "actual",
+        "planned",
+        "actual",
+    ]
 
 
 def test_query_refreshes_rebuildable_index_after_external_edit(tmp_path: Path):
@@ -197,7 +212,7 @@ def test_strip_annotations_preserves_surrounding_prose():
     text = (
         "第一段。\n"
         "//**沈烬[位置]：工坊 -> 归墟港**\n"
-        "//**沈烬~白续:敌对关系**\n"
+        "//**沈烬~>白续:敌对关系**\n"
         "第二段。\n"
     )
 

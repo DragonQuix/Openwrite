@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>OpenWrite Studio</title>
   <link rel="stylesheet" href="/vendor/vditor/dist/index.css">
-  <link rel="stylesheet" href="/styles.css?v=agent-activity-1">
+  <link rel="stylesheet" href="/styles.css?v=startup-recovery-1">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true">
@@ -106,6 +106,23 @@
       <button id="inspector-backdrop" class="inspector-backdrop" type="button" aria-label="关闭助手背景层" hidden></button>
 
       <main id="workspace-main" class="main-panel" tabindex="-1">
+        <section id="bootstrap-error" class="system-notice error" role="alert" aria-labelledby="bootstrap-error-title" hidden>
+          <div class="system-notice-copy">
+            <strong id="bootstrap-error-title">作品载入失败</strong>
+            <p id="bootstrap-error-detail"></p>
+            <code id="bootstrap-error-request" hidden></code>
+          </div>
+          <div class="system-notice-actions">
+            <button id="bootstrap-retry" class="quiet-button" type="button"><svg aria-hidden="true"><use href="#icon-refresh"/></svg><span>重试</span></button>
+            <button id="bootstrap-open-project" class="quiet-button" type="button">打开其他作品</button>
+          </div>
+        </section>
+        <section id="editor-fallback-notice" class="system-notice warning" role="status" hidden>
+          <div class="system-notice-copy">
+            <strong>富文本编辑器资源未载入</strong>
+            <p>Studio 已切换到基础文本编辑模式，作品读取、切换和保存仍可使用。请重新安装完整发布包后刷新页面。</p>
+          </div>
+        </section>
         <section id="dashboard-view" class="dashboard-view" aria-labelledby="dashboard-title">
           <div class="section-title-row">
             <div>
@@ -516,6 +533,7 @@
                 <p class="eyebrow">RELATION MAP</p>
                 <h2 id="relationship-title">关系拓扑</h2>
                 <p id="relationship-summary" class="relationship-summary" aria-live="polite">正在读取实体关系…</p>
+                <p class="relationship-format-help"><code>//**A~&gt;B:具体关系**</code> 注册有向关系；<code>//**人物[维度]：旧状态 -&gt; 新状态**</code> 记录状态变化。同章以正文事实为准。</p>
               </div>
               <div class="relationship-controls" aria-label="关系图控制">
                 <label for="relationship-search">搜索</label>
@@ -533,7 +551,7 @@
                 <select id="relationship-origin">
                   <option value="all">全部关系</option>
                   <option value="canonical">资料字段</option>
-                  <option value="annotation">正文注册</option>
+                  <option value="annotation">内联注册</option>
                 </select>
                 <button id="relationship-fit" class="quiet-button" type="button">适合视图</button>
                 <button id="relationship-layout" class="quiet-button" type="button" aria-pressed="false">暂停布局</button>
@@ -548,7 +566,7 @@
               <span data-kind="concept">概念 · 六边形</span>
               <span data-kind="unknown">其他 · 虚线圆</span>
               <span class="relationship-origin-key canonical">资料字段 · 实线</span>
-              <span class="relationship-origin-key annotation">正文注册 · 点线</span>
+              <span class="relationship-origin-key annotation">内联注册 · 点线</span>
             </div>
             <div class="relationship-workspace">
               <div id="relationship-stage" class="relationship-stage">
@@ -1635,6 +1653,6 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script id="openwrite-vditor-icons" src="/vendor/vditor/dist/js/icons/ant.js"></script>
   <script src="/vendor/vditor/dist/index.min.js"></script>
-  <script type="module" src="/app.js?v=agent-activity-1"></script>
+  <script type="module" src="/app.js?v=startup-recovery-1"></script>
 </body>
 </html>

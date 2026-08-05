@@ -37,8 +37,19 @@ def test_structured_parser_accepts_preface_and_rejects_malformed_output():
 
 def test_tool_arguments_are_validated_and_credentials_are_redacted():
     with pytest.raises(ProviderResponseError) as raised:
-        validate_tool_arguments([{"name": "read", "arguments": "{broken"}])
+        validate_tool_arguments(
+            [
+                {
+                    "name": "stage_outline_edits",
+                    "arguments": '{"edits":[{"old_text":"未闭合',
+                }
+            ]
+        )
     assert raised.value.code == "MALFORMED_TOOL_ARGUMENTS"
+    assert raised.value.details["tool_name"] == "stage_outline_edits"
+    assert raised.value.details["line"] == 1
+    assert raised.value.details["likely_truncated"] is True
+    assert "字符串没有闭合" in str(raised.value)
     assert "sk-" not in redact_sensitive_text("authorization: Bearer sk-example123456")
     assert "private-value" not in redact_sensitive_text(
         "Authorization: Bearer private-value"

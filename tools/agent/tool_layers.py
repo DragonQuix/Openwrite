@@ -203,6 +203,8 @@ def build_goethe_tool_layers(
         "stage_outline_edits": lambda args: adapter.stage_outline_edits(
             base_revision=_read_text_arg(args, "base_revision", "revision"),
             edits=args.get("edits") if isinstance(args.get("edits"), list) else [],
+            batch_label=_read_text_arg(args, "batch_label"),
+            final_batch=bool(args.get("final_batch", True)),
         ),
         "confirm_outline_edits": lambda args: adapter.confirm_outline_edits(),
         "discard_outline_edits": lambda args: adapter.discard_outline_edits(),
@@ -266,6 +268,29 @@ def build_goethe_tool_layers(
             for name, executor in action_tool_executors.items()
             if name in action_toolkit
         }
+    direct_tool_executors = {
+        name: tool_executors[name]
+        for name in direct_toolkit
+        if name in tool_executors
+    }
+    if "read_project_document" in direct_tool_executors:
+        project_document_reader = direct_tool_executors["read_project_document"]
+
+        def read_goethe_project_document(args: dict[str, Any]) -> dict[str, Any]:
+            requested_path = _read_text_arg(args, "path").replace("\\", "/")
+            if requested_path == "src/outline.md" or requested_path.endswith(
+                "/src/outline.md"
+            ):
+                payload = adapter.read_outline()
+                payload["redirected_from"] = "read_project_document"
+                payload["message"] = (
+                    "已自动改用 read_outline，返回当前可编辑版本；存在分批草稿时内容来自 "
+                    "pending draft，而不是 canonical 大纲。"
+                )
+                return payload
+            return project_document_reader(args)
+
+        direct_tool_executors["read_project_document"] = read_goethe_project_document
     return {
         "tool_executors": tool_executors,
         "direct_toolkit": (
@@ -278,11 +303,7 @@ def build_goethe_tool_layers(
             if action_toolkit == set(GOETHE_ACTION_TOOLKIT)
             else action_toolkit
         ),
-        "direct_tool_executors": {
-            name: tool_executors[name]
-            for name in direct_toolkit
-            if name in tool_executors
-        },
+        "direct_tool_executors": direct_tool_executors,
         "action_tool_executors": action_tool_executors,
         "runtime_resolution": runtime_resolution,
     }

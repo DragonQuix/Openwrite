@@ -8,6 +8,7 @@
 """
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -15,6 +16,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..llm.response import ProviderResponseError, load_tool_arguments
 from ..outline_contract import OUTLINE_MARKDOWN_CONTRACT
 from ..shared_documents import CHARACTER_MARKDOWN_CONTRACT
 
@@ -58,6 +60,97 @@ def _debug_json(value: Any) -> str:
         sort_keys=True,
         default=str,
     )
+
+
+def _tool_argument_issues(
+    value: Any,
+    schema: dict[str, Any],
+    *,
+    path: str = "$",
+) -> list[str]:
+    issues: list[str] = []
+    expected = schema.get("type")
+    expected_types = [expected] if isinstance(expected, str) else list(expected or [])
+    type_matches = not expected_types or any(
+        _matches_json_type(value, expected_type) for expected_type in expected_types
+    )
+    if not type_matches:
+        expected_label = " / ".join(_json_type_label(item) for item in expected_types)
+        return [f"字段 {path} 应为{expected_label}，实际为{_python_type_label(value)}"]
+
+    allowed = schema.get("enum")
+    if isinstance(allowed, list) and value not in allowed:
+        choices = "、".join(repr(item) for item in allowed)
+        issues.append(f"字段 {path} 的值无效，可选值为 {choices}")
+
+    if isinstance(value, dict):
+        required = schema.get("required")
+        if isinstance(required, list):
+            for name in required:
+                if name not in value:
+                    issues.append(f"缺少必填字段 {path}.{name}")
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for name, item in value.items():
+                item_schema = properties.get(name)
+                if isinstance(item_schema, dict):
+                    issues.extend(
+                        _tool_argument_issues(item, item_schema, path=f"{path}.{name}")
+                    )
+    elif isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for index, item in enumerate(value):
+            issues.extend(
+                _tool_argument_issues(
+                    item,
+                    schema["items"],
+                    path=f"{path}[{index}]",
+                )
+            )
+    return issues[:8]
+
+
+def _matches_json_type(value: Any, expected: str) -> bool:
+    checks = {
+        "object": lambda: isinstance(value, dict),
+        "array": lambda: isinstance(value, list),
+        "string": lambda: isinstance(value, str),
+        "integer": lambda: isinstance(value, int) and not isinstance(value, bool),
+        "number": lambda: isinstance(value, (int, float)) and not isinstance(value, bool),
+        "boolean": lambda: isinstance(value, bool),
+        "null": lambda: value is None,
+    }
+    check = checks.get(str(expected))
+    return True if check is None else check()
+
+
+def _json_type_label(value: str) -> str:
+    return {
+        "object": "对象",
+        "array": "数组",
+        "string": "字符串",
+        "integer": "整数",
+        "number": "数字",
+        "boolean": "布尔值",
+        "null": "空值",
+    }.get(value, value)
+
+
+def _python_type_label(value: Any) -> str:
+    if isinstance(value, bool):
+        return "布尔值"
+    if isinstance(value, dict):
+        return "对象"
+    if isinstance(value, list):
+        return "数组"
+    if isinstance(value, str):
+        return "字符串"
+    if isinstance(value, int):
+        return "整数"
+    if isinstance(value, float):
+        return "数字"
+    if value is None:
+        return "空值"
+    return type(value).__name__
 
 
 @dataclass
@@ -118,6 +211,7 @@ class ReActAgent:
         system_prompt: str,
         max_turns: int = 20,
         max_tool_failures: int = 2,
+        max_model_repairs: int = 1,
         activity_callback: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.client = client
@@ -126,6 +220,7 @@ class ReActAgent:
         self.system_prompt = system_prompt
         self.max_turns = max_turns
         self.max_tool_failures = max(1, int(max_tool_failures))
+        self.max_model_repairs = max(0, int(max_model_repairs))
         self.activity_callback = activity_callback
 
     async def run(
@@ -159,7 +254,13 @@ class ReActAgent:
         final_content = ""
         saw_tool_calls = False
         failed_tool_counts: dict[str, int] = {}
+        failed_tool_arguments: dict[
+            str,
+            tuple[dict[str, Any], set[str], dict[str, Any]],
+        ] = {}
         successful_tool_results: list[tuple[str, str]] = []
+        model_repairs = 0
+        model_output_tokens: int | None = None
         active_tools, requested_tool = self._tools_for_instruction(instruction)
         self._emit_activity(
             "run_started",
@@ -175,7 +276,68 @@ class ReActAgent:
                 max_turns=self.max_turns,
             )
 
-            response = self._chat_with_tools(messages, active_tools)
+            try:
+                response = self._chat_with_tools(
+                    messages,
+                    active_tools,
+                    max_tokens=model_output_tokens,
+                )
+                decoded_tool_calls = [
+                    (tool_call, load_tool_arguments(tool_call, index=index))
+                    for index, tool_call in enumerate(response.tool_calls or [])
+                ]
+            except ProviderResponseError as exc:
+                if (
+                    exc.code in self._repairable_model_error_codes()
+                    and model_repairs < self.max_model_repairs
+                ):
+                    model_repairs += 1
+                    previous_output_tokens = model_output_tokens
+                    if exc.code == "MODEL_OUTPUT_TRUNCATED":
+                        previous_output_tokens, retry_output_tokens = (
+                            self._next_truncation_output_budget(model_output_tokens)
+                        )
+                        if (
+                            retry_output_tokens is not None
+                            and retry_output_tokens != previous_output_tokens
+                        ):
+                            model_output_tokens = retry_output_tokens
+                    feedback = self._model_repair_feedback(
+                        exc,
+                        model_repairs,
+                        previous_output_tokens=previous_output_tokens,
+                        retry_output_tokens=model_output_tokens,
+                    )
+                    messages.append(Message("user", feedback))
+                    budget_message = ""
+                    if (
+                        previous_output_tokens is not None
+                        and model_output_tokens is not None
+                        and model_output_tokens > previous_output_tokens
+                    ):
+                        budget_message = (
+                            "系统已将本次重试的最大输出从 "
+                            f"{previous_output_tokens:,} 提高到 {model_output_tokens:,} Token。"
+                        )
+                    self._emit_activity(
+                        "model_retry",
+                        turn=turn + 1,
+                        reason=str(exc),
+                        repair_attempt=model_repairs,
+                        repair_limit=self.max_model_repairs,
+                        details=exc.details,
+                        message=budget_message,
+                    )
+                    continue
+                failure = self._exhausted_model_error(exc, model_repairs)
+                self._emit_activity(
+                    "run_failed",
+                    turn=turn + 1,
+                    reason=str(failure),
+                    error_code=failure.code,
+                )
+                raise failure from exc
+            model_repairs = 0
             self._emit_activity(
                 "model_completed",
                 turn=turn + 1,
@@ -203,14 +365,35 @@ class ReActAgent:
                     )
                     break
 
-            for tool_call in response.tool_calls:
+            for tool_call, tc_args in decoded_tool_calls:
                 tc_id = tool_call.get("id", "")
                 tc_name = tool_call.get("name", "")
-                tc_args = (
-                    json.loads(tool_call.get("arguments", "{}"))
-                    if tool_call.get("arguments")
-                    else {}
-                )
+                inherited_fields: list[str] = []
+                corrected_fields: list[str] = []
+                previous_failure = failed_tool_arguments.get(tc_name)
+                if previous_failure is not None:
+                    tc_args, inherited_fields = self._inherit_retry_arguments(
+                        tc_name,
+                        tc_args,
+                        previous_failure[0],
+                        invalid_roots=previous_failure[1],
+                        tools=active_tools,
+                    )
+                    tc_args, corrected_fields = self._apply_retry_suggestions(
+                        tc_name,
+                        tc_args,
+                        previous_failure[0],
+                        previous_failure[2],
+                    )
+                repair_notes = []
+                if inherited_fields:
+                    repair_notes.append(
+                        "继承仍有效的必填字段：" + "、".join(inherited_fields)
+                    )
+                if corrected_fields:
+                    repair_notes.append(
+                        "按工具诊断精确修正：" + "、".join(corrected_fields)
+                    )
                 on_tool_call and on_tool_call(tc_name, tc_args)
                 self._emit_activity(
                     "tool_started",
@@ -218,6 +401,9 @@ class ReActAgent:
                     tool=tc_name,
                     tool_call_id=tc_id,
                     arguments=tc_args,
+                    message="系统已自动修复本次重试参数；" + "；".join(repair_notes)
+                    if repair_notes
+                    else "",
                 )
                 logger.debug(
                     "react.tool_call %s %s",
@@ -238,6 +424,12 @@ class ReActAgent:
                         tc_args,
                         active_tools,
                     )
+                    if inherited_fields or corrected_fields:
+                        result = self._annotate_argument_repair(
+                            result,
+                            inherited_fields,
+                            corrected_fields,
+                        )
                     on_tool_result and on_tool_result(tc_name, result)
                     logger.debug(
                         "react.tool_result %s %s",
@@ -262,6 +454,17 @@ class ReActAgent:
                         result=result,
                     )
                     if failure_reason:
+                        invalid_roots, retry_suggestions = (
+                            self._tool_failure_argument_repairs(result)
+                        )
+                        if invalid_roots or retry_suggestions:
+                            failed_tool_arguments[tc_name] = (
+                                copy.deepcopy(tc_args),
+                                invalid_roots,
+                                retry_suggestions,
+                            )
+                        else:
+                            failed_tool_arguments.pop(tc_name, None)
                         failed_tool_counts[tc_name] = (
                             failed_tool_counts.get(tc_name, 0) + 1
                         )
@@ -306,6 +509,7 @@ class ReActAgent:
                             )
                     else:
                         failed_tool_counts.pop(tc_name, None)
+                        failed_tool_arguments.pop(tc_name, None)
                         successful_tool_results.append((tc_name, result))
                     messages.append(
                         Message(
@@ -330,6 +534,7 @@ class ReActAgent:
                             )
                             return terminal_response
                 except Exception as e:
+                    failed_tool_arguments.pop(tc_name, None)
                     failure_reason = str(e)
                     error_result = json.dumps({"error": failure_reason})
                     on_tool_result and on_tool_result(tc_name, error_result)
@@ -420,6 +625,81 @@ class ReActAgent:
         self._emit_activity("run_completed", content_chars=0)
         return ""
 
+    @staticmethod
+    def _repairable_model_error_codes() -> set[str]:
+        return {
+            "MALFORMED_TOOL_ARGUMENTS",
+            "MODEL_OUTPUT_TRUNCATED",
+            "MODEL_EMPTY_RESPONSE",
+            "MODEL_REASONING_ONLY",
+        }
+
+    @staticmethod
+    def _model_repair_feedback(
+        error: ProviderResponseError,
+        attempt: int,
+        *,
+        previous_output_tokens: int | None = None,
+        retry_output_tokens: int | None = None,
+    ) -> str:
+        details = error.details
+        lines = [
+            "系统校验反馈：你刚才的模型输出未通过校验，任何对应工具都没有执行。",
+            f"错误代码：{error.code}",
+            f"具体问题：{error}",
+        ]
+        tool_name = str(details.get("tool_name") or "")
+        if tool_name:
+            lines.append(f"出错工具：{tool_name}")
+        if details.get("line") and details.get("column"):
+            lines.append(
+                f"错误位置：JSON 第 {details['line']} 行第 {details['column']} 列"
+            )
+        if details.get("context"):
+            lines.append(f"错误附近：{details['context']}")
+        lines.extend(
+            [
+                f"这是第 {attempt} 次自动修复。请根据上面的字段和位置重新生成。",
+                "只返回合法、完整的工具调用参数；所有键名和字符串使用英文双引号，"
+                "正文中的双引号必须转义。不要重复已经成功的工具操作。",
+            ]
+        )
+        if details.get("likely_truncated") or error.code == "MODEL_OUTPUT_TRUNCATED":
+            if (
+                previous_output_tokens is not None
+                and retry_output_tokens is not None
+                and retry_output_tokens > previous_output_tokens
+            ):
+                lines.append(
+                    "系统已将本次重试的最大输出从 "
+                    f"{previous_output_tokens:,} 提高到 {retry_output_tokens:,} Token。"
+                )
+            lines.append(
+                "本次输出可能被截断。请缩小单次修改范围；大纲重构按幕或最多 4 节分批，"
+                "每批调用一次 stage_outline_edits。"
+            )
+        return "\n".join(lines)
+
+    def _exhausted_model_error(
+        self,
+        error: ProviderResponseError,
+        repairs: int,
+    ) -> ProviderResponseError:
+        attempts = repairs + 1
+        suggestion = (
+            "请缩小单次任务；大纲重构可按幕或最多 4 节分批处理。"
+            if error.code in {"MALFORMED_TOOL_ARGUMENTS", "MODEL_OUTPUT_TRUNCATED"}
+            else "请稍后重试或更换当前操作使用的模型。"
+        )
+        return ProviderResponseError(
+            error.code,
+            (
+                f"模型连续 {attempts} 次未能生成可执行输出。最后问题：{error}。"
+                f"失败的工具调用没有执行。{suggestion}"
+            ),
+            details={**error.details, "attempts": attempts, "repairs": repairs},
+        )
+
     def _emit_activity(self, event: str, **payload: Any) -> None:
         callback = self.activity_callback
         if callback is None:
@@ -494,6 +774,8 @@ class ReActAgent:
         self,
         messages: list,
         tools: Sequence[ToolDefinition] | None = None,
+        *,
+        max_tokens: int | None = None,
     ) -> Any:
         """调用 LLM（带工具）"""
 
@@ -509,7 +791,30 @@ class ReActAgent:
             for t in (self.tools if tools is None else tools)
         ]
 
-        return self.client.chat_with_tools(messages, llm_tools)
+        if max_tokens is None:
+            return self.client.chat_with_tools(messages, llm_tools)
+        return self.client.chat_with_tools(messages, llm_tools, max_tokens=max_tokens)
+
+    def _next_truncation_output_budget(
+        self,
+        current: int | None,
+    ) -> tuple[int | None, int | None]:
+        config = getattr(self.client, "config", None)
+        configured = getattr(config, "max_tokens", None)
+        context_tokens = getattr(config, "context_tokens", None)
+        try:
+            base = int(current if current is not None else configured)
+        except (TypeError, ValueError):
+            return current, current
+        if base <= 0:
+            return current, current
+        try:
+            context_limit = int(context_tokens)
+        except (TypeError, ValueError):
+            context_limit = 0
+        safe_ceiling = context_limit // 2 if context_limit > 0 else base * 2
+        retry = max(base, min(base * 2, safe_ceiling))
+        return base, retry
 
     def _execute_tool(
         self,
@@ -526,10 +831,28 @@ class ReActAgent:
         if not tool:
             return json.dumps({"error": f"Unknown tool: {name}"})
 
-        # 验证参数
-        for req in tool.required:
-            if req not in args:
-                return json.dumps({"error": f"Missing required argument: {req}"})
+        schema_required = tool.parameters.get("required")
+        required = list(
+            dict.fromkeys(
+                [
+                    *tool.required,
+                    *(schema_required if isinstance(schema_required, list) else []),
+                ]
+            )
+        )
+        issues = [f"缺少必填字段 $.{field}" for field in required if field not in args]
+        issues.extend(_tool_argument_issues(args, tool.parameters))
+        issues = list(dict.fromkeys(issues))[:8]
+        if issues:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "error": "工具参数校验失败：" + "；".join(issues),
+                    "code": "INVALID_TOOL_ARGUMENTS",
+                    "details": {"tool": name, "issues": issues},
+                },
+                ensure_ascii=False,
+            )
 
         # 调用注册的执行器
         if hasattr(self, f"_tool_{name}"):
@@ -537,6 +860,142 @@ class ReActAgent:
             return json.dumps(result) if isinstance(result, dict) else str(result)
 
         return json.dumps({"error": f"Tool '{name}' not implemented"})
+
+    @staticmethod
+    def _inherit_retry_arguments(
+        name: str,
+        args: dict[str, Any],
+        previous_args: dict[str, Any],
+        *,
+        invalid_roots: set[str],
+        tools: Sequence[ToolDefinition],
+    ) -> tuple[dict[str, Any], list[str]]:
+        tool = next((item for item in tools if item.name == name), None)
+        if tool is None:
+            return args, []
+        schema_required = tool.parameters.get("required")
+        required = list(
+            dict.fromkeys(
+                [
+                    *tool.required,
+                    *(schema_required if isinstance(schema_required, list) else []),
+                ]
+            )
+        )
+        merged = copy.deepcopy(args)
+        inherited: list[str] = []
+        for field_name in required:
+            if (
+                field_name not in merged
+                and field_name in previous_args
+                and field_name not in invalid_roots
+            ):
+                merged[field_name] = copy.deepcopy(previous_args[field_name])
+                inherited.append(f"$.{field_name}")
+        return merged, inherited
+
+    @staticmethod
+    def _tool_failure_argument_repairs(
+        result: str,
+    ) -> tuple[set[str], dict[str, Any]]:
+        try:
+            payload = json.loads(result)
+        except (TypeError, json.JSONDecodeError):
+            return set(), {}
+        if not isinstance(payload, dict):
+            return set(), {}
+        details = payload.get("details")
+        if not isinstance(details, dict):
+            return set(), {}
+        candidates: list[str] = []
+        field_path = details.get("field_path")
+        if isinstance(field_path, str):
+            candidates.append(field_path)
+        field_paths = details.get("field_paths")
+        if isinstance(field_paths, list):
+            candidates.extend(str(item) for item in field_paths)
+        issues = details.get("issues")
+        if isinstance(issues, list):
+            candidates.extend(str(item) for item in issues)
+        invalid_roots = {
+            match.group(1)
+            for candidate in candidates
+            for match in re.finditer(r"\$\.([A-Za-z_][A-Za-z0-9_]*)", candidate)
+        }
+        suggestions: dict[str, Any] = {}
+        if (
+            isinstance(field_path, str)
+            and field_path.endswith(".old_text")
+            and isinstance(details.get("suggested_old_text"), str)
+            and details["suggested_old_text"]
+            and not details.get("suggested_old_text_truncated")
+        ):
+            suggestions[field_path] = details["suggested_old_text"]
+        retry_revision = details.get("retry_base_revision")
+        if isinstance(retry_revision, str) and retry_revision:
+            suggestions["$.base_revision"] = retry_revision
+        return invalid_roots, suggestions
+
+    @staticmethod
+    def _apply_retry_suggestions(
+        name: str,
+        args: dict[str, Any],
+        previous_args: dict[str, Any],
+        suggestions: dict[str, Any],
+    ) -> tuple[dict[str, Any], list[str]]:
+        if name != "stage_outline_edits" or not suggestions:
+            return args, []
+        repaired = copy.deepcopy(args)
+        corrected: list[str] = []
+        retry_revision = suggestions.get("$.base_revision")
+        if isinstance(retry_revision, str) and retry_revision:
+            if repaired.get("base_revision") != retry_revision:
+                repaired["base_revision"] = retry_revision
+                corrected.append("$.base_revision")
+
+        current_edits = repaired.get("edits")
+        previous_edits = previous_args.get("edits")
+        if not isinstance(current_edits, list) or not isinstance(previous_edits, list):
+            return repaired, corrected
+        for path, suggested_value in suggestions.items():
+            match = re.fullmatch(r"\$\.edits\[(\d+)]\.old_text", path)
+            if match is None or not isinstance(suggested_value, str):
+                continue
+            index = int(match.group(1))
+            if index >= len(current_edits) or index >= len(previous_edits):
+                continue
+            current_edit = current_edits[index]
+            previous_edit = previous_edits[index]
+            if not isinstance(current_edit, dict) or not isinstance(previous_edit, dict):
+                continue
+            if current_edit.get("new_text") != previous_edit.get("new_text"):
+                continue
+            if current_edit.get("old_text") != suggested_value:
+                current_edit["old_text"] = suggested_value
+                corrected.append(path)
+        return repaired, corrected
+
+    @staticmethod
+    def _annotate_argument_repair(
+        result: str,
+        inherited_fields: list[str],
+        corrected_fields: list[str],
+    ) -> str:
+        try:
+            payload = json.loads(result)
+        except (TypeError, json.JSONDecodeError):
+            return result
+        if not isinstance(payload, dict):
+            return result
+        payload["argument_repair"] = {
+            "inherited_fields": inherited_fields,
+            "corrected_fields": corrected_fields,
+            "message": (
+                "系统已根据同一工具上一次失败结果补全未被判错的必填字段，并应用"
+                "可验证的精确修复建议；被判错的字段不会从旧调用中继承。"
+            ),
+        }
+        return json.dumps(payload, ensure_ascii=False)
 
     def _tools_for_instruction(
         self, instruction: str
@@ -567,21 +1026,62 @@ class ReActAgent:
     ) -> str:
         if not successful_results:
             return ""
-        names = list(dict.fromkeys(name for name, _ in successful_results))
-        details: list[str] = []
-        remaining = 8000
-        for name, result in successful_results:
-            if remaining <= 0:
-                break
-            excerpt = str(result)[:remaining]
-            details.append(f"{name}: {excerpt}")
-            remaining -= len(excerpt)
+        retained_results = [
+            (name, result)
+            for name, result in successful_results
+            if not ReActAgent._is_read_only_tool(name)
+        ]
+        if not retained_results:
+            return ""
+        names = list(dict.fromkeys(name for name, _ in retained_results))
+        details = [
+            ReActAgent._summarize_retained_result(name, result)
+            for name, result in retained_results[-4:]
+        ]
         return (
-            f"主操作 {'、'.join(names)} 已成功。之后的 {failed_tool} 连续失败 "
-            f"{failure_count} 次，我已停止后续调用；主操作结果不会回滚。"
-            f"最后原因：{failure_reason}\n\n已成功的工具结果：\n"
+            f"主操作 {'、'.join(names)} 已成功并保留。之后的 {failed_tool} 连续失败 "
+            f"{failure_count} 次，我已停止后续调用。最后原因：{failure_reason}"
+            "\n\n已保留的结果：\n"
             + "\n".join(details)
         )
+
+    @staticmethod
+    def _is_read_only_tool(name: str) -> bool:
+        return str(name or "").startswith(
+            ("read_", "get_", "list_", "query_", "search_", "inspect_", "validate_", "diagnose_")
+        )
+
+    @staticmethod
+    def _summarize_retained_result(name: str, result: str) -> str:
+        try:
+            payload = json.loads(result)
+        except (TypeError, json.JSONDecodeError):
+            return f"{name}: {str(result)[:1200]}"
+        if not isinstance(payload, dict):
+            return f"{name}: {str(result)[:1200]}"
+        if name == "stage_outline_edits":
+            revision = str(payload.get("draft_revision") or "")
+            return (
+                f"{name}: 已暂存至第 {int(payload.get('batch_count') or 1)} 批，"
+                f"draft_revision={revision[:12] or '未知'}，"
+                f"final_batch={str(bool(payload.get('final_batch'))).lower()}；"
+                "正式大纲尚未写入。"
+            )
+        compact_keys = (
+            "ok",
+            "action",
+            "message",
+            "next_action",
+            "source_id",
+            "profile_id",
+            "preview_id",
+            "promoted",
+            "applied",
+            "chapter_id",
+        )
+        compact = {key: payload[key] for key in compact_keys if key in payload}
+        rendered = json.dumps(compact or payload, ensure_ascii=False, default=str)
+        return f"{name}: {rendered[:2000]}"
 
     def _register_tool_executors(self, executors: dict):
         """注册工具执行器

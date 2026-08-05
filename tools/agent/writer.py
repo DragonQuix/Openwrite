@@ -24,6 +24,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..llm import Message
+from ..outline_contract import INLINE_ANNOTATION_CONTRACT
 from ..runtime_state_contract import RUNTIME_DELTA_PROMPT_CONTRACT
 from .base import BaseAgent
 
@@ -219,6 +220,7 @@ class WriterAgent(BaseAgent):
 - 章节结尾留有悬念
 - 适当的环境描写烘托气氛
 - 人物心理通过动作和表情展现""")
+        parts.append(INLINE_ANNOTATION_CONTRACT)
 
         # 题材指导
         if context.get("genre"):

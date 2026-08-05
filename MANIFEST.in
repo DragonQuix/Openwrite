@@ -1,5 +1,6 @@
 include 启动?OpenWrite.command
 include 启动?OpenWrite.bat
+recursive-include tools/studio_assets *
 
 prune integrations/deepresearch/node_modules
 prune integrations/deepresearch/artifacts

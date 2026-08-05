@@ -26,17 +26,13 @@ def test_readme_references_external_logo_svg():
     assert Path("assets/logo-dark.svg").exists()
 
 
-def test_readme_documents_dante_as_primary_entry():
+def test_readme_documents_studio_as_primary_entry():
     text = Path("README.md").read_text(encoding="utf-8")
 
-    assert "`openwrite dante`" in text
-    assert "`openwrite goethe`" in text
-    assert "`openwrite write" in text
-    assert "`openwrite review" in text
-    assert "`openwrite multi-write" in text
-    assert "openwrite agent 已退役" in text or "已退役" in text
-    assert "`openwrite agent` 是主编排入口" not in text
-    assert 'openwrite agent "' not in text
+    assert "openwrite studio" in text
+    assert "Studio 是 OpenWrite 首推的日常入口" in text
+    assert "CLI 与自动化（可选）" in text
+    assert "CLI 只是同一套能力面向脚本化与调试场景的补充" in text
 
 
 def test_skill_docs_no_longer_present_agent_as_primary_entry():

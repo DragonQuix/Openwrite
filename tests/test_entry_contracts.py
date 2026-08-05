@@ -8,10 +8,12 @@ from tools.agent.book_state import BookStateStore
 from tools.agent.tool_layers import build_goethe_tool_layers
 from tools.agent.tool_runtime import build_tool_executors
 from tools.init_project import init_project
+from tools.model_profiles import ModelProfileStore
 from tools.novel_service import NovelApplicationService, NovelServiceError
 from tools.source_pack import SourcePackService
 from tools.story_planning import StoryPlanningStore
 from tools.studio import StudioApplication
+from tools.studio_preferences import StudioModelSettingsStore
 
 
 def test_agent_and_studio_project_the_same_canonical_packet(tmp_path: Path):
@@ -34,6 +36,8 @@ def test_studio_and_agent_write_send_identical_normalized_payload(
 ):
     init_project(tmp_path, "demo", "统一写章")
     monkeypatch.setenv("LLM_API_KEY", "test-only")
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("OPENWRITE_CONTEXT_TOKENS", raising=False)
     calls: list[dict] = []
 
     def fake_pipeline(root: Path, args: dict) -> dict:
@@ -52,7 +56,12 @@ def test_studio_and_agent_write_send_identical_normalized_payload(
         "execute_write_chapter",
         fake_pipeline,
     )
-    studio = StudioApplication(tmp_path)
+    preferences = StudioModelSettingsStore(tmp_path / "model-settings")
+    studio = StudioApplication(
+        tmp_path,
+        model_settings_store=preferences,
+        model_profile_store=ModelProfileStore(preferences.directory),
+    )
     tools = build_tool_executors(tmp_path)
     studio.write_next_chapter(
         {"target_words": 800, "guidance": "雨夜开场", "temperature": 0.6}
@@ -143,6 +152,39 @@ def test_goethe_outline_tools_stage_diff_before_confirming_src(tmp_path: Path):
     assert confirmed["ok"] is True
     assert confirmed["action"] == "confirm_outline_edits"
     assert "核心主题: 记忆与代价" in source_path.read_text(encoding="utf-8")
+
+
+def test_goethe_generic_outline_read_is_redirected_to_pending_draft(tmp_path: Path):
+    init_project(tmp_path, "demo", "待确认大纲读取")
+    layers = build_goethe_tool_layers(tmp_path, "demo")
+    actions = layers["action_tool_executors"]
+    source_path = tmp_path / "data" / "novels" / "demo" / "src" / "outline.md"
+    original = source_path.read_text(encoding="utf-8")
+    snapshot = actions["read_outline"]({"query": "核心主题"})
+    staged = actions["stage_outline_edits"](
+        {
+            "base_revision": snapshot["revision"],
+            "edits": [
+                {
+                    "old_text": "核心主题: 待填写",
+                    "new_text": "核心主题: 待确认版本",
+                }
+            ],
+            "final_batch": False,
+        }
+    )
+    assert staged["ok"] is True
+
+    redirected = layers["direct_tool_executors"]["read_project_document"](
+        {"path": "src/outline.md"}
+    )
+
+    assert redirected["ok"] is True
+    assert redirected["redirected_from"] == "read_project_document"
+    assert redirected["source_kind"] == "pending_draft"
+    assert redirected["revision"] == staged["draft_revision"]
+    assert "核心主题: 待确认版本" in redirected["content"]
+    assert source_path.read_text(encoding="utf-8") == original
 
 
 def test_goethe_exposes_persistent_ideation_summary_confirmation(tmp_path: Path):

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
+
+import pytest
 
 from tools.agent.react import ReActAgent, ToolDefinition
 from tools.llm import Message
+from tools.llm.response import ProviderResponseError
 
 
 class RecordingClient:
@@ -385,6 +389,512 @@ def test_react_agent_emits_real_model_tool_and_completion_activity():
     assert '"stage": "chapter_preflight"' in events[4]["result"]
 
 
+def test_react_agent_repairs_malformed_tool_arguments_before_execution():
+    client = RecordingClient(
+        [
+            _tool_response(
+                tool_calls=[
+                    {
+                        "id": "broken",
+                        "name": "stage_outline_edits",
+                        "arguments": '{"base_revision":"rev-1","edits":[',
+                    }
+                ]
+            ),
+            _tool_response(
+                tool_calls=[
+                    {
+                        "id": "fixed",
+                        "name": "stage_outline_edits",
+                        "arguments": (
+                            '{"base_revision":"rev-1","edits":[],"final_batch":false}'
+                        ),
+                    }
+                ]
+            ),
+            _tool_response("已按批次暂存"),
+        ]
+    )
+    events: list[dict] = []
+    calls: list[dict] = []
+    agent = ReActAgent(
+        client=client,
+        model="demo",
+        tools=[
+            ToolDefinition(
+                name="stage_outline_edits",
+                description="分批暂存大纲",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "base_revision": {"type": "string"},
+                        "edits": {"type": "array"},
+                        "final_batch": {"type": "boolean"},
+                    },
+                    "required": ["base_revision", "edits"],
+                },
+            )
+        ],
+        system_prompt="系统提示",
+        activity_callback=events.append,
+    )
+    agent._register_tool_executors(
+        {"stage_outline_edits": lambda args: calls.append(args) or {"ok": True}}
+    )
+
+    result = asyncio.run(agent.run("重排整卷大纲"))
+
+    assert result == "已按批次暂存"
+    assert calls == [{"base_revision": "rev-1", "edits": [], "final_batch": False}]
+    assert len(client.calls) == 3
+    repair_message = client.calls[1]["messages"][-1].content
+    assert "stage_outline_edits" in repair_message
+    assert "任何对应工具都没有执行" in repair_message
+    assert "缩小单次修改范围" in repair_message
+    assert any(event["event"] == "model_retry" for event in events)
+
+
+def test_react_agent_reports_precise_error_after_repair_is_exhausted():
+    malformed = _tool_response(
+        tool_calls=[
+            {
+                "id": "broken",
+                "name": "stage_outline_edits",
+                "arguments": '{"edits":[{"old_text":"未闭合',
+            }
+        ]
+    )
+    events: list[dict] = []
+    agent = ReActAgent(
+        client=RecordingClient([malformed, malformed]),
+        model="demo",
+        tools=[],
+        system_prompt="系统提示",
+        max_model_repairs=1,
+        activity_callback=events.append,
+    )
+
+    with pytest.raises(ProviderResponseError) as raised:
+        asyncio.run(agent.run("重排整卷大纲"))
+
+    assert raised.value.code == "MALFORMED_TOOL_ARGUMENTS"
+    assert raised.value.details["attempts"] == 2
+    assert "失败的工具调用没有执行" in str(raised.value)
+    assert events[-1]["event"] == "run_failed"
+
+
+def test_react_agent_increases_output_budget_when_truncated():
+    class TruncatingClient(RecordingClient):
+        def __init__(self):
+            super().__init__([_tool_response("扩容后完成")])
+            self.config = SimpleNamespace(max_tokens=24000, context_tokens=160000)
+            self.attempts = 0
+
+        def chat_with_tools(self, messages, tools, **kwargs):
+            self.calls.append(
+                {
+                    "messages": list(messages),
+                    "tools": list(tools),
+                    "kwargs": dict(kwargs),
+                }
+            )
+            self.attempts += 1
+            if self.attempts == 1:
+                raise ProviderResponseError(
+                    "MODEL_OUTPUT_TRUNCATED",
+                    "模型输出因长度限制被截断",
+                )
+            return self.responses.pop(0)
+
+    client = TruncatingClient()
+    events: list[dict] = []
+    agent = ReActAgent(
+        client=client,
+        model="demo",
+        tools=[],
+        system_prompt="系统提示",
+        activity_callback=events.append,
+    )
+
+    result = asyncio.run(agent.run("重排整卷大纲"))
+
+    assert result == "扩容后完成"
+    assert client.calls[0]["kwargs"] == {}
+    assert client.calls[1]["kwargs"] == {"max_tokens": 48000}
+    retry_event = next(event for event in events if event["event"] == "model_retry")
+    assert "24,000" in retry_event["message"]
+    assert "48,000" in retry_event["message"]
+    repair_message = client.calls[1]["messages"][-1].content
+    assert "最大输出从 24,000 提高到 48,000 Token" in repair_message
+
+
+def test_truncation_output_budget_never_exceeds_half_context_window():
+    client = RecordingClient([])
+    client.config = SimpleNamespace(max_tokens=24000, context_tokens=64000)
+    agent = ReActAgent(
+        client=client,
+        model="demo",
+        tools=[],
+        system_prompt="系统提示",
+    )
+
+    assert agent._next_truncation_output_budget(None) == (24000, 32000)
+    assert agent._next_truncation_output_budget(32000) == (32000, 32000)
+
+
+def test_react_agent_returns_field_level_schema_feedback_to_model():
+    client = RecordingClient(
+        [
+            _tool_response(
+                tool_calls=[
+                    {
+                        "id": "wrong-type",
+                        "name": "stage_outline_edits",
+                        "arguments": '{"base_revision":"rev-1","edits":"整卷"}',
+                    }
+                ]
+            ),
+            _tool_response("请按数组格式重试"),
+        ]
+    )
+    calls: list[dict] = []
+    agent = ReActAgent(
+        client=client,
+        model="demo",
+        tools=[
+            ToolDefinition(
+                name="stage_outline_edits",
+                description="分批暂存大纲",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "base_revision": {"type": "string"},
+                        "edits": {"type": "array"},
+                    },
+                    "required": ["base_revision", "edits"],
+                },
+            )
+        ],
+        system_prompt="系统提示",
+    )
+    agent._register_tool_executors(
+        {"stage_outline_edits": lambda args: calls.append(args) or {"ok": True}}
+    )
+
+    result = asyncio.run(agent.run("修改大纲"))
+
+    assert result == "请按数组格式重试"
+    assert calls == []
+    tool_feedback = next(
+        message.content
+        for message in client.calls[1]["messages"]
+        if message.role == "tool"
+    )
+    assert "字段 $.edits 应为数组，实际为字符串" in tool_feedback
+
+
+def test_react_agent_inherits_valid_required_fields_when_retry_fixes_one_field():
+    client = RecordingClient(
+        [
+            _tool_response(
+                tool_calls=[
+                    {
+                        "id": "wrong-anchor",
+                        "name": "stage_outline_edits",
+                        "arguments": (
+                            '{"base_revision":"draft-1","edits":['
+                            '{"old_text":"错误标题","new_text":"新内容"}],'
+                            '"batch_label":"第二批","final_batch":false}'
+                        ),
+                    }
+                ]
+            ),
+            _tool_response(
+                tool_calls=[
+                    {
+                        "id": "fixed-anchor",
+                        "name": "stage_outline_edits",
+                        "arguments": (
+                            '{"base_revision":"draft-1","edits":['
+                            '{"old_text":"准确标题","new_text":"新内容"}],'
+                            '"batch_label":"第二批"}'
+                        ),
+                    }
+                ]
+            ),
+            _tool_response("已继续下一批"),
+        ]
+    )
+    calls: list[dict] = []
+    events: list[dict] = []
+
+    def stage(args):
+        calls.append(args)
+        if len(calls) == 1:
+            return {
+                "ok": False,
+                "error": "old_text_not_found",
+                "message": "第 1 个修改的 old_text 未匹配当前待确认草稿。",
+                "details": {"field_path": "$.edits[0].old_text"},
+            }
+        return {
+            "ok": True,
+            "batch_count": 2,
+            "draft_revision": "draft-2",
+            "final_batch": args["final_batch"],
+        }
+
+    agent = ReActAgent(
+        client=client,
+        model="demo",
+        tools=[
+            ToolDefinition(
+                name="stage_outline_edits",
+                description="分批暂存大纲",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "base_revision": {"type": "string"},
+                        "edits": {"type": "array"},
+                        "batch_label": {"type": "string"},
+                        "final_batch": {"type": "boolean"},
+                    },
+                    "required": ["base_revision", "edits", "final_batch"],
+                },
+            )
+        ],
+        system_prompt="系统提示",
+        activity_callback=events.append,
+    )
+    agent._register_tool_executors({"stage_outline_edits": stage})
+
+    result = asyncio.run(agent.run("继续分批修改大纲"))
+
+    assert result == "已继续下一批"
+    assert len(calls) == 2
+    assert calls[1]["edits"][0]["old_text"] == "准确标题"
+    assert calls[1]["final_batch"] is False
+    repaired_call = next(
+        event
+        for event in events
+        if event["event"] == "tool_started" and event["tool_call_id"] == "fixed-anchor"
+    )
+    assert repaired_call["message"].endswith("$.final_batch")
+    repaired_result = next(
+        message.content
+        for message in client.calls[2]["messages"]
+        if message.role == "tool" and message.tool_call_id == "fixed-anchor"
+    )
+    assert '"inherited_fields": ["$.final_batch"]' in repaired_result
+
+
+def test_react_agent_applies_exact_old_text_suggestion_on_matching_retry():
+    exact_old_text = "#### 第1章：拾荒者与潮涌\n\n> 戏剧位置: 起\n"
+    replacement = "#### 第1章：潮涌来临\n\n> 预估字数: 6000\n"
+    client = RecordingClient(
+        [
+            _tool_response(
+                tool_calls=[
+                    {
+                        "id": "wrong-anchor",
+                        "name": "stage_outline_edits",
+                        "arguments": json.dumps(
+                            {
+                                "base_revision": "draft-1",
+                                "edits": [
+                                    {
+                                        "old_text": "#### 第1章：拾荒者与潮涌\n戏剧位置: 起",
+                                        "new_text": replacement,
+                                    }
+                                ],
+                                "final_batch": False,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                ]
+            ),
+            _tool_response(
+                tool_calls=[
+                    {
+                        "id": "still-guessed",
+                        "name": "stage_outline_edits",
+                        "arguments": json.dumps(
+                            {
+                                "base_revision": "draft-1",
+                                "edits": [
+                                    {
+                                        "old_text": "#### 第1章：拾荒者与潮涌\n戏剧位置: 起",
+                                        "new_text": replacement,
+                                    }
+                                ],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    }
+                ]
+            ),
+            _tool_response("已继续下一批"),
+        ]
+    )
+    calls: list[dict] = []
+    events: list[dict] = []
+
+    def stage(args):
+        calls.append(args)
+        if len(calls) == 1:
+            return {
+                "ok": False,
+                "error": "old_text_not_found",
+                "message": "第 1 个修改的 old_text 未匹配当前正式大纲。",
+                "details": {
+                    "field_path": "$.edits[0].old_text",
+                    "suggested_old_text": exact_old_text,
+                    "suggested_old_text_truncated": False,
+                    "retry_base_revision": "draft-1",
+                },
+            }
+        return {
+            "ok": True,
+            "batch_count": 1,
+            "draft_revision": "draft-2",
+            "final_batch": args["final_batch"],
+        }
+
+    agent = ReActAgent(
+        client=client,
+        model="demo",
+        tools=[
+            ToolDefinition(
+                name="stage_outline_edits",
+                description="分批暂存大纲",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "base_revision": {"type": "string"},
+                        "edits": {"type": "array"},
+                        "final_batch": {"type": "boolean"},
+                    },
+                    "required": ["base_revision", "edits", "final_batch"],
+                },
+            )
+        ],
+        system_prompt="系统提示",
+        activity_callback=events.append,
+    )
+    agent._register_tool_executors({"stage_outline_edits": stage})
+
+    result = asyncio.run(agent.run("继续分批修改大纲"))
+
+    assert result == "已继续下一批"
+    assert calls[1]["edits"][0]["old_text"] == exact_old_text
+    assert calls[1]["final_batch"] is False
+    repaired_call = next(
+        event
+        for event in events
+        if event["event"] == "tool_started" and event["tool_call_id"] == "still-guessed"
+    )
+    assert "$.edits[0].old_text" in repaired_call["message"]
+    repaired_result = next(
+        message.content
+        for message in client.calls[2]["messages"]
+        if message.role == "tool" and message.tool_call_id == "still-guessed"
+    )
+    assert '"corrected_fields": ["$.edits[0].old_text"]' in repaired_result
+
+
+def test_retry_suggestion_is_not_applied_when_replacement_changed():
+    repaired, corrected = ReActAgent._apply_retry_suggestions(
+        "stage_outline_edits",
+        {
+            "edits": [
+                {
+                    "old_text": "模型重新设计的锚点",
+                    "new_text": "另一套修改内容",
+                }
+            ]
+        },
+        {
+            "edits": [
+                {
+                    "old_text": "首次错误锚点",
+                    "new_text": "原修改内容",
+                }
+            ]
+        },
+        {"$.edits[0].old_text": "工具返回的准确原文"},
+    )
+
+    assert corrected == []
+    assert repaired["edits"][0]["old_text"] == "模型重新设计的锚点"
+
+
+def test_react_agent_does_not_inherit_the_field_identified_as_invalid():
+    client = RecordingClient(
+        [
+            _tool_response(
+                tool_calls=[
+                    {
+                        "id": "wrong-anchor",
+                        "name": "stage_outline_edits",
+                        "arguments": (
+                            '{"base_revision":"draft-1","edits":['
+                            '{"old_text":"错误标题","new_text":"新内容"}],'
+                            '"final_batch":false}'
+                        ),
+                    }
+                ]
+            ),
+            _tool_response(
+                tool_calls=[
+                    {
+                        "id": "missing-edits",
+                        "name": "stage_outline_edits",
+                        "arguments": '{"base_revision":"draft-1","final_batch":false}',
+                    }
+                ]
+            ),
+        ]
+    )
+    calls: list[dict] = []
+
+    def stage(args):
+        calls.append(args)
+        return {
+            "ok": False,
+            "error": "old_text_not_found",
+            "message": "第 1 个修改的 old_text 未匹配当前待确认草稿。",
+            "details": {"field_path": "$.edits[0].old_text"},
+        }
+
+    agent = ReActAgent(
+        client=client,
+        model="demo",
+        tools=[
+            ToolDefinition(
+                name="stage_outline_edits",
+                description="分批暂存大纲",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "base_revision": {"type": "string"},
+                        "edits": {"type": "array"},
+                        "final_batch": {"type": "boolean"},
+                    },
+                    "required": ["base_revision", "edits", "final_batch"],
+                },
+            )
+        ],
+        system_prompt="系统提示",
+    )
+    agent._register_tool_executors({"stage_outline_edits": stage})
+
+    result = asyncio.run(agent.run("继续分批修改大纲"))
+
+    assert len(calls) == 1
+    assert "缺少必填字段 $.edits" in result
+
+
 def test_react_agent_stops_after_repeated_tool_failures():
     client = RecordingClient(
         [
@@ -590,6 +1100,32 @@ def test_react_agent_keeps_primary_success_when_followup_tool_repeatedly_fails()
     assert read_calls == []
     assert not any(event["event"] == "run_failed" for event in events)
     assert events[-1]["event"] == "run_completed"
+
+
+def test_partial_success_hides_read_payloads_and_summarizes_pending_outline_batch():
+    response = ReActAgent._partial_success_response(
+        [
+            ("read_outline", '{"ok":true,"content":"' + "大纲" * 5000 + '"}'),
+            (
+                "stage_outline_edits",
+                '{"ok":true,"batch_count":1,"draft_revision":"eeb55d09fbc4749f",'
+                '"final_batch":false,"diff":"' + "很长" * 5000 + '"}',
+            ),
+            ("read_project_document", '{"ok":true,"content":"canonical"}'),
+        ],
+        failed_tool="stage_outline_edits",
+        failure_reason="第 1 个修改的 old_text 未匹配当前待确认草稿",
+        failure_count=2,
+    )
+
+    assert response.startswith("主操作 stage_outline_edits 已成功并保留")
+    assert "draft_revision=eeb55d09fbc4" in response
+    assert "final_batch=false" in response
+    assert "正式大纲尚未写入" in response
+    assert "read_outline" not in response
+    assert "read_project_document" not in response
+    assert "canonical" not in response
+    assert len(response) < 600
 
 
 def test_react_agent_does_not_abort_on_confirmation_policy_blocks():

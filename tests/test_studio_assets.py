@@ -132,7 +132,7 @@ def test_studio_asset_api_exposes_inline_registered_relations(tmp_path: Path):
                 "kind": "character",
                 "id": "hero",
                 "data": {"name": "林舟"},
-                "body_markdown": "# 林舟\n\n//**林舟~苏遥:共同调查旧案**\n",
+                "body_markdown": "# 林舟\n\n//**林舟~>苏遥:共同调查旧案**\n",
             }
         )["asset"]
 

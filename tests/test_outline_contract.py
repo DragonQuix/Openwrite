@@ -8,7 +8,7 @@ from tools.agent.orchestrator import OpenWriteOrchestrator
 from tools.agent.react import OPENWRITE_SYSTEM_PROMPT
 from tools.architect import ArchitectAgent
 from tools.goethe import DEFAULT_GOETHE_SYSTEM_PROMPT
-from tools.outline_contract import OUTLINE_MARKDOWN_CONTRACT
+from tools.outline_contract import INLINE_ANNOTATION_CONTRACT, OUTLINE_MARKDOWN_CONTRACT
 from tools.outline_parser import OutlineMdParser
 
 REQUIRED_MARKDOWN_FIELDS = (
@@ -33,8 +33,18 @@ def test_outline_writing_agents_share_parser_aligned_contract() -> None:
         OPENWRITE_SYSTEM_PROMPT,
     ):
         assert OUTLINE_MARKDOWN_CONTRACT in prompt
+        assert INLINE_ANNOTATION_CONTRACT in prompt
         for field in REQUIRED_MARKDOWN_FIELDS:
             assert field in prompt
+
+
+def test_writer_receives_inline_annotation_contract() -> None:
+    from tools.agent.writer import WriterAgent
+
+    prompt = WriterAgent.__new__(WriterAgent)._build_creative_system_prompt({})
+
+    assert INLINE_ANNOTATION_CONTRACT in prompt
+    assert "//**关系源~>关系目标:具体关系**" in prompt
 
 
 def test_outline_draft_generator_uses_shared_contract(tmp_path, monkeypatch) -> None:

@@ -73,10 +73,14 @@ class GoethePlanningRuntime:
         *,
         base_revision: str,
         edits: list[dict[str, Any]],
+        batch_label: str = "",
+        final_batch: bool = True,
     ) -> dict[str, Any]:
         payload = self.story_planning_store.stage_outline_edits(
             base_revision=base_revision,
             edits=edits,
+            batch_label=batch_label,
+            final_batch=final_batch,
         )
         if not payload.get("ok"):
             return payload
@@ -991,6 +995,8 @@ class GoetheActionAdapter:
         *,
         base_revision: str,
         edits: list[dict[str, Any]],
+        batch_label: str = "",
+        final_batch: bool = True,
     ) -> dict[str, Any]:
         if not str(base_revision or "").strip():
             return self._missing_required("stage_outline_edits", "base_revision")
@@ -1001,6 +1007,8 @@ class GoetheActionAdapter:
             self.runtime.stage_outline_edits(
                 base_revision=base_revision,
                 edits=edits,
+                batch_label=batch_label,
+                final_batch=final_batch,
             ),
         )
 

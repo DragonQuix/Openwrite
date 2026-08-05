@@ -463,7 +463,7 @@ class TestGetRelationsTopology:
         world.mkdir(parents=True)
         characters.mkdir(parents=True)
         (world / "harbor.md").write_text(
-            "# 雾港\n\n> 地点 | 港口 | active\n\n故事起点。\n\n//**雾港~林岑:常驻**\n",
+            "# 雾港\n\n> 地点 | 港口 | active\n\n故事起点。\n\n//**雾港~>林岑:常驻**\n",
             encoding="utf-8",
         )
         (characters / "lin.md").write_text(
@@ -493,7 +493,7 @@ note = "长期调查"
         world = tmp_path / "data" / "novels" / "test" / "src" / "world" / "entities"
         world.mkdir(parents=True)
         (world / "a.md").write_text(
-            "# A\n\n> 概念 | | active\n\n//**A~missing:尚未归档**\n",
+            "# A\n\n> 概念 | | active\n\n//**A~>missing:尚未归档**\n",
             encoding="utf-8",
         )
 
@@ -576,7 +576,7 @@ note = "共同调查"
 - **苏遥**：正文中的重复描述
 - **周策（老周）**：普通正文描述
 
-//**林舟~周策:曾经的导师**
+//**林舟~>周策:曾经的导师**
 """,
             encoding="utf-8",
         )
@@ -606,6 +606,27 @@ note = "共同调查"
         ]
         assert incoming["incoming"][0]["target"] == "hero"
         assert incoming["incoming"][0]["origin"] == "canonical"
+
+    def test_manuscript_relation_overrides_outline_annotation(self, tmp_path):
+        novel = tmp_path / "data" / "novels" / "test"
+        world = novel / "src" / "world" / "entities"
+        manuscript = novel / "data" / "manuscript" / "arc_001"
+        world.mkdir(parents=True)
+        manuscript.mkdir(parents=True)
+        (world / "a.md").write_text("# A\n\n> 概念 | | active\n", encoding="utf-8")
+        (world / "b.md").write_text("# B\n\n> 概念 | | active\n", encoding="utf-8")
+        (novel / "src" / "outline.md").write_text(
+            "#### 第一章\n//**A~>B:计划合作**\n", encoding="utf-8"
+        )
+        (manuscript / "ch_001.md").write_text(
+            "# 第一章\n//**A~>B:实际敌对**\n", encoding="utf-8"
+        )
+
+        topology = get_relations_topology("test", project_root=tmp_path)
+
+        edge = topology["edges"][0]
+        assert edge["label"] == "实际敌对"
+        assert edge["source_label"].startswith("正文注册 · ")
 
     def test_legacy_string_related_entries_are_confirmed_edges(self, tmp_path):
         world = tmp_path / "data" / "novels" / "test" / "src" / "world" / "entities"

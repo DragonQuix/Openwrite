@@ -37,7 +37,7 @@ ANNOTATION_RE = re.compile(
 )
 RELATION_ANNOTATION_RE = re.compile(
     r"^\s*//\*\*\s*"
-    r"(?P<source>[^~～:：\r\n]+?)\s*[~～]\s*"
+    r"(?P<source>[^~～:：\r\n]+?)\s*[~～]\s*>?\s*"
     r"(?P<target>[^:：\r\n]+?)\s*"
     r"[：:]\s*(?P<description>.+?)\s*\*\*\s*$"
 )
@@ -84,7 +84,7 @@ def parse_relation_annotations(
     *,
     source_path: str,
 ) -> tuple[list[RelationAnnotationRecord], list[dict[str, Any]]]:
-    """Parse explicit ``//**A~B:关系**`` registrations outside code fences."""
+    """Parse directed ``//**A~>B:关系**`` registrations outside code fences."""
     records: list[RelationAnnotationRecord] = []
     diagnostics: list[dict[str, Any]] = []
     fence_marker = ""
@@ -107,7 +107,7 @@ def parse_relation_annotations(
                         "code": "invalid_relation_annotation",
                         "path": source_path,
                         "line": line_number,
-                        "message": "关系批注格式无效，应为 //**A~B:具体关系**",
+                        "message": "关系批注格式无效，应为 //**A~>B:具体关系**",
                     }
                 )
             continue
@@ -363,9 +363,10 @@ class CharacterStateIndex:
             and (not clean_field or _key(record.field) == _key(clean_field))
         ]
         eligible.sort(key=_record_sort_key)
+        effective = _effective_state_records(eligible)
         current_by_field: dict[str, CharacterStateRecord] = {}
         conflicts: list[dict[str, Any]] = []
-        for record in eligible:
+        for record in effective:
             field_key = _key(record.field)
             previous = current_by_field.get(field_key)
             if previous and not _states_match(previous.new_state, record.old_state):
@@ -581,13 +582,39 @@ def _chapter_token_number(value: str) -> int:
     return total + section + digit
 
 
-def _record_sort_key(record: CharacterStateRecord) -> tuple[int, int, str, int]:
+def _source_priority(source_kind: str) -> int:
     priority = {"planned": 0, "reference": 1, "actual": 2}
+    return priority.get(source_kind, 1)
+
+
+def _record_sort_key(record: CharacterStateRecord) -> tuple[int, int, str, int]:
     return (
         record.chapter_number,
-        priority.get(record.source_kind, 1),
+        _source_priority(record.source_kind),
         record.source_path,
         record.line,
+    )
+
+
+def _effective_state_records(
+    records: Iterable[CharacterStateRecord],
+) -> list[CharacterStateRecord]:
+    """Select the strongest source kind for each field in each chapter."""
+    selected: dict[tuple[str, str, str], list[CharacterStateRecord]] = {}
+    for record in records:
+        key = (_key(record.name), _key(record.field), record.chapter_id)
+        current = selected.get(key)
+        if not current or _source_priority(record.source_kind) > _source_priority(
+            current[0].source_kind
+        ):
+            selected[key] = [record]
+        elif _source_priority(record.source_kind) == _source_priority(
+            current[0].source_kind
+        ):
+            current.append(record)
+    return sorted(
+        (record for group in selected.values() for record in group),
+        key=_record_sort_key,
     )
 
 

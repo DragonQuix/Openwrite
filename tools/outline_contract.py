@@ -1,4 +1,29 @@
-"""Shared, parser-aligned instructions for agents that write outlines."""
+"""Shared, parser-aligned instructions for agents that write project Markdown."""
+
+
+INLINE_ANNOTATION_CONTRACT = """## OpenWrite 内联批注契约
+
+用独立一行、且仅在代码围栏之外写入以下机器可读批注：
+
+```text
+//**人物[维度]：旧状态 -> 新状态**
+//**关系源~>关系目标:具体关系**
+```
+
+规则：
+- 状态批注记录一次状态迁移；维度必须具体，例如位置、伤势、立场或“与某人关系”。
+- `A~>B` 是从 A 指向 B 的有向关系注册，用于当前关系图，不表示关系随时间的变化，
+  也不会自动创建 `B~>A`。
+- 关系发生演变时使用状态迁移，例如 `//**A[与B关系]：互相戒备 -> 暂时结盟**`。
+- 使用 `src/characters/` 与 `src/world/` 中的规范名称或 ID，不使用含糊代称。
+- 大纲中的批注必须放在对应章节标题下；无法放入章纲时显式添加 `@ch_070` 章节范围。
+- Goethe 在大纲中只登记计划变化；Dante 与 Writer 在正文中只登记本章实际写出的变化，
+  不能把未落地计划写成事实。
+- 同章同人物同维度同时存在大纲与正文批注时，正文事实优先用于当前状态和连续性判断；
+  大纲计划仍保留为历史来源。
+- 旧式 `//**A~B:具体关系**` 仅为已有项目读取兼容；不得继续生成，必须写成 `~>`。
+- 只有格式完整的有效批注会从字数统计与成书导出中隐藏；无效批注会保留在原文中并报告错误。
+"""
 
 OUTLINE_MARKDOWN_CONTRACT = """## OpenWrite 大纲写入契约
 
@@ -41,7 +66,7 @@ OUTLINE_MARKDOWN_CONTRACT = """## OpenWrite 大纲写入契约
   依据事实补字段，不凭空扩写。
 - 篇、节、章的结构职责不同：篇写长期弧线，节完成局部起承转合，章写具体戏剧位置与章内节拍。
 - 修改后自检标题层级和上述字段；精确保留用户未要求修改的内容，并继续遵守预览 diff 与确认边界。
-"""
+""" + "\n\n" + INLINE_ANNOTATION_CONTRACT
 
 
 OUTLINE_JSON_FIELDS = """每个章节 JSON 对象必须包含：

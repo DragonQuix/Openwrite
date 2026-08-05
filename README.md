@@ -11,6 +11,7 @@
 <p align="center">
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/version-5.8.0-2563eb" alt="Version 5.8.0"></a>
   <a href="pyproject.toml"><img src="https://img.shields.io/badge/Python-%E2%89%A53.10-22c55e?logo=python&logoColor=white" alt="Python >= 3.10"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-0f766e" alt="Apache-2.0 License"></a>
   <a href="https://github.com/LiPu-jpg/Openwrite/stargazers"><img src="https://img.shields.io/github/stars/LiPu-jpg/Openwrite?style=flat&color=f59e0b" alt="GitHub Stars"></a>
   <a href="https://github.com/LiPu-jpg/Openwrite/issues"><img src="https://img.shields.io/github/issues/LiPu-jpg/Openwrite?color=ef4444" alt="GitHub Issues"></a>
 </p>
@@ -24,6 +25,7 @@
   <a href="#studio-工作台">Studio</a> ·
   <a href="#快速开始">快速开始</a> ·
   <a href="#工作原理">工作原理</a> ·
+  <a href="#许可证">许可证</a> ·
   <a href="#致谢">致谢</a>
 </p>
 
@@ -82,7 +84,7 @@ Markdown / TXT / EPUB
 - macOS：`启动 OpenWrite.command`
 - Windows：`启动 OpenWrite.bat`
 
-启动器会检查 Python 3.10+，在 `.openwrite-runtime/` 中创建隔离环境，安装或更新依赖并打开 Studio。它不会静默安装 Python；首次安装依赖需要联网。
+启动器会检查 Python 3.10+，在 `.openwrite-runtime/` 中创建隔离环境，安装或更新依赖并打开 Studio。通过 Git 克隆运行时，它每天最多检查一次源码更新，并且只会在工作区干净、当前分支可安全快进时自动更新；本地修改、领先提交、分支分叉或网络故障都不会阻断启动。可传入 `--update` 立即检查，或用 `--no-update` 跳过本次检查。从 ZIP 或已安装包运行时不会自动覆盖源码。它不会静默安装 Python；首次安装依赖需要联网。
 
 ### 从源码打开 Studio
 
@@ -220,16 +222,19 @@ data/novels/{novel_id}/
 
 写章时，最近两章正文固定进入上下文。系统再按本章大纲和出场人物召回最多 4 段更早正文，以及 2 段拆书或参考资料。语义召回只补充远距离记忆，不会覆盖正典或精确人物状态。
 
-人物时态可以用轻量批注记录：
+人物状态与有向关系可以用轻量批注记录：
 
 ```text
 //**沈烬：仍在试探 -> 确认白续是敌人**
 //**沈烬[位置]：贫民区工坊 -> 归墟港**
 //**沈烬[伤势]：左臂轻伤 -> 已恢复**
-//**沈烬~白续:互相试探的敌对关系**
+//**沈烬~>白续:互相试探的敌对关系**
+//**沈烬[与白续关系]：互相试探 -> 暂时结盟**
 ```
 
-系统会从大纲和正文重建索引，区分计划状态与实际状态，并报告状态断裂及来源行号。有效批注不会计入正文字数，也不会进入 Markdown、TXT 或 EPUB 成书。`A~B:具体关系` 用于显式注册资料关系；普通正文提及和“关系网络”段落不会自动生成关系图连线。
+批注必须独占一行并位于代码围栏之外。大纲批注应放在对应章节标题下，或用 `@ch_070` 显式指定章节；正文批注会自动归入当前章节。系统会从大纲与正文重建索引，区分计划状态和实际状态。同章同人物同维度发生冲突时，正文事实优先用于当前状态与连续性判断，大纲计划仍保留在历史中。
+
+`A~>B:具体关系` 用于注册从 A 指向 B 的当前有向关系，不会自动创建 `B~>A`；关系随剧情演变时应使用 `A[与B关系]：旧关系 -> 新关系` 状态批注。普通正文提及和“关系网络”段落不会自动生成连线。旧式 `A~B` 仍可读取以兼容已有项目，但 Agent 只会生成 `~>`。有效批注不会计入正文字数，也不会进入 Markdown、TXT 或 EPUB 成书；格式无效的批注会保留在原文中并报告错误。
 
 ### 有界记忆与可靠提交
 
@@ -375,6 +380,10 @@ pytest
    <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=LiPu-jpg/Openwrite&type=date&legend=top-left&sealed_token=vZdhG7v61Eao3XAEYJgdiUHyXI-8yBimzmBl9bOkwlmrysCbV6EMlTGd1O4cGzDfONuyymBDIZ7l2-GcyoSY60O55NDQmiQf_23sZPTRgBfPLHzmu8JWSg" />
  </picture>
 </a>
+
+## 许可证
+
+OpenWrite 自有代码采用 [Apache License 2.0](LICENSE)。仓库中明确标注为第三方来源的代码、内置 Skill 与 vendored 资源继续遵循各自目录中的许可证和署名声明。
 
 ## 致谢
 

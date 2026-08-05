@@ -793,6 +793,41 @@ def test_outline_confirmation_promotes_outline_and_advances_to_chapter_preflight
     assert planning_store.outline_src_path.read_text(encoding="utf-8") == "# 大纲草案"
 
 
+def test_outline_confirmation_explains_that_edit_batches_are_incomplete(tmp_path: Path):
+    state_store = BookStateStore(tmp_path, "demo")
+    planning_store = StoryPlanningStore(tmp_path, "demo")
+    planning_store.outline_src_path.parent.mkdir(parents=True)
+    original = "# 原大纲\n\n第一幕\n\n第二幕\n"
+    planning_store.outline_src_path.write_text(original, encoding="utf-8")
+    staged = planning_store.stage_outline_edits(
+        base_revision=planning_store.outline_source_revision(),
+        edits=[{"old_text": "第一幕", "new_text": "第一幕已改"}],
+        batch_label="第一幕",
+        final_batch=False,
+    )
+    assert staged["ok"] is True
+    state = state_store.load_or_create()
+    state.stage = BookStage.ROLLING_OUTLINE
+    state.pending_confirmation = "outline_scope"
+    state_store.save(state)
+    orchestrator = OpenWriteOrchestrator.for_testing(
+        tmp_path,
+        "demo",
+        state_store=state_store,
+        planning_store=planning_store,
+    )
+
+    result = orchestrator.confirm_outline_draft()
+
+    state = state_store.load_or_create()
+    assert result.blocked is True
+    assert result.next_action == "continue_outline_edit_batches"
+    assert "final_batch=true" in result.message
+    assert state.blocking_reason == "incomplete_outline_edit_batches"
+    assert planning_store.outline_src_path.read_text(encoding="utf-8") == original
+    assert planning_store.outline_edit_state_path.exists() is True
+
+
 def test_outline_confirmation_requires_outline_stage(tmp_path: Path):
     state_store = BookStateStore(tmp_path, "demo")
     planning_store = StoryPlanningStore(tmp_path, "demo")

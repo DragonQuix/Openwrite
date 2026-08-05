@@ -6,19 +6,24 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 import webbrowser
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 MIN_PYTHON = (3, 10)
 DEFAULT_PORT = 4567
 PORT_SCAN_LIMIT = 20
 LAUNCHER_VERSION = 1
+UPDATE_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
+UPDATE_TIMEOUT_SECONDS = 12
 REQUIRED_IMPORTS = (
     "pydantic",
     "yaml",
@@ -31,6 +36,12 @@ REQUIRED_IMPORTS = (
 
 class LauncherError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class SourceUpdateResult:
+    status: str
+    message: str = ""
 
 
 def repository_root() -> Path:
@@ -90,6 +101,136 @@ def _run(
         text=True,
         env={**os.environ, "PYTHONUTF8": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1"},
     )
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        cwd=root,
+        check=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        timeout=UPDATE_TIMEOUT_SECONDS,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+
+
+def _source_update_stamp(root: Path) -> Path:
+    return root / ".openwrite-runtime" / ".source-update.json"
+
+
+def _record_source_update_check(root: Path, revision: str, checked_at: float) -> None:
+    stamp = _source_update_stamp(root)
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(
+            json.dumps(
+                {"checked_at": checked_at, "revision": revision},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        # A read-only source checkout should still be launchable.
+        pass
+
+
+def _source_update_check_is_recent(root: Path, revision: str, now: float) -> bool:
+    stamp = _read_stamp(_source_update_stamp(root))
+    raw_checked_at = stamp.get("checked_at")
+    if not isinstance(raw_checked_at, (int, float, str)):
+        return False
+    try:
+        checked_at = float(raw_checked_at)
+    except (TypeError, ValueError):
+        return False
+    return (
+        stamp.get("revision") == revision and 0 <= now - checked_at < UPDATE_CHECK_INTERVAL_SECONDS
+    )
+
+
+def check_for_source_update(
+    root: Path,
+    *,
+    force: bool = False,
+    now: float | None = None,
+) -> SourceUpdateResult:
+    """Fast-forward a clean Git checkout without making startup depend on the network."""
+    if not (root / ".git").exists() or shutil.which("git") is None:
+        message = "当前不是 Git 源码副本，无法自动更新。" if force else ""
+        return SourceUpdateResult("unavailable", message)
+
+    try:
+        inside_worktree = _git(root, "rev-parse", "--is-inside-work-tree").stdout.strip()
+        if inside_worktree != "true":
+            return SourceUpdateResult("unavailable")
+        revision = _git(root, "rev-parse", "HEAD").stdout.strip()
+        timestamp = time.time() if now is None else now
+        if not force and _source_update_check_is_recent(root, revision, timestamp):
+            return SourceUpdateResult("recent")
+
+        if _git(root, "status", "--porcelain", "--untracked-files=normal").stdout.strip():
+            return SourceUpdateResult(
+                "skipped",
+                "检测到源码目录有本地修改，已保留修改并跳过自动更新。",
+            )
+
+        try:
+            upstream = _git(
+                root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"
+            ).stdout.strip()
+        except subprocess.CalledProcessError:
+            return SourceUpdateResult(
+                "skipped",
+                "当前分支没有上游分支，已跳过自动更新。",
+            )
+        if not upstream:
+            return SourceUpdateResult("skipped", "当前分支没有上游分支，已跳过自动更新。")
+
+        print("[OpenWrite] 正在检查源码更新……")
+        _git(root, "fetch", "--quiet", "--no-tags")
+        local_revision = _git(root, "rev-parse", "HEAD").stdout.strip()
+        upstream_revision = _git(root, "rev-parse", "@{upstream}").stdout.strip()
+        if local_revision == upstream_revision:
+            _record_source_update_check(root, local_revision, timestamp)
+            return SourceUpdateResult("current", "当前已是最新版本。")
+
+        merge_base = _git(root, "merge-base", "HEAD", "@{upstream}").stdout.strip()
+        if merge_base != local_revision:
+            _record_source_update_check(root, local_revision, timestamp)
+            if merge_base == upstream_revision:
+                return SourceUpdateResult(
+                    "skipped",
+                    "当前分支包含尚未推送的提交，已跳过自动更新。",
+                )
+            return SourceUpdateResult(
+                "skipped",
+                "本地分支与上游已经分叉，已跳过自动更新。",
+            )
+
+        # Recheck immediately before changing the checkout to avoid overwriting a concurrent edit.
+        if _git(root, "status", "--porcelain", "--untracked-files=normal").stdout.strip():
+            return SourceUpdateResult(
+                "skipped",
+                "检查更新期间源码发生了变化，已跳过自动更新。",
+            )
+        _git(root, "merge", "--ff-only", "--quiet", "@{upstream}")
+        new_revision = _git(root, "rev-parse", "HEAD").stdout.strip()
+        _record_source_update_check(root, new_revision, timestamp)
+        return SourceUpdateResult(
+            "updated",
+            f"已更新源码：{local_revision[:7]} -> {new_revision[:7]}。",
+        )
+    except (
+        OSError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ):
+        return SourceUpdateResult("failed", "暂时无法检查更新，将继续启动当前版本。")
 
 
 def _installation_healthy(
@@ -177,7 +318,7 @@ def ensure_runtime(root: Path) -> Path:
     return python
 
 
-def _read_stamp(path: Path) -> dict[str, str]:
+def _read_stamp(path: Path) -> dict[str, object]:
     if not path.is_file():
         return {}
     try:
@@ -230,6 +371,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--debug", action="store_true", help="启用 Studio debug 日志")
     parser.add_argument("--project", help="直接打开指定作品目录")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="首选端口")
+    update_group = parser.add_mutually_exclusive_group()
+    update_group.add_argument(
+        "--update",
+        action="store_true",
+        help="忽略检查间隔，立即检查源码更新",
+    )
+    update_group.add_argument(
+        "--no-update",
+        action="store_true",
+        help="本次启动不检查源码更新",
+    )
     return parser
 
 
@@ -240,6 +392,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     root = repository_root()
     try:
+        if not args.no_update:
+            update = check_for_source_update(root, force=args.update)
+            if update.message:
+                print(f"[OpenWrite] {update.message}")
         python = ensure_runtime(root)
         if args.check_only:
             print(f"[OpenWrite] 环境检查通过：{python}")

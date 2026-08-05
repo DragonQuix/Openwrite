@@ -664,7 +664,10 @@ def _relation_catalog(
             "label": annotation.description,
             "kind": "registered",
             "origin": "annotation",
-            "source_label": f"正文注册 · {annotation.source_path}:{annotation.line}",
+            "source_label": (
+                f"{_relation_annotation_source_label(annotation.source_path)} · "
+                f"{annotation.source_path}:{annotation.line}"
+            ),
             "raw_target": annotation.target,
         }
         edge_key = (edge["source"].casefold(), edge["target"].casefold())
@@ -689,7 +692,12 @@ def _relation_annotation_records(
     ]
     records: List[Any] = []
     diagnostics: List[Dict[str, Any]] = []
-    for path in sorted({item.resolve() for item in candidates if item.is_file()}):
+    for path in sorted(
+        {item.resolve() for item in candidates if item.is_file()},
+        key=lambda item: _relation_annotation_sort_key(
+            item.relative_to(novel_root).as_posix()
+        ),
+    ):
         relative = path.relative_to(novel_root).as_posix()
         try:
             text = path.read_text(encoding="utf-8")
@@ -707,6 +715,24 @@ def _relation_annotation_records(
         records.extend(parsed)
         diagnostics.extend(issues)
     return records, diagnostics
+
+
+def _relation_annotation_sort_key(relative: str) -> tuple[int, int, str]:
+    if relative == "src/outline.md":
+        return (0, 0, relative)
+    if relative.startswith("src/"):
+        return (1, 0, relative)
+    match = re.search(r"(?:^|/)ch[_-]?(\d+)\.md$", relative, re.IGNORECASE)
+    chapter = int(match.group(1)) if match else 0
+    return (2, chapter, relative)
+
+
+def _relation_annotation_source_label(relative: str) -> str:
+    if relative == "src/outline.md":
+        return "大纲注册"
+    if relative.startswith("data/manuscript/"):
+        return "正文注册"
+    return "资料注册"
 
 
 def _relation_entries(value: Any, *, origin: str, source_label: str) -> List[Dict[str, str]]:

@@ -405,7 +405,12 @@ class StudioRequestHandler(SimpleHTTPRequestHandler):
         if STATIC_ROOT.resolve() not in path.parents and path != STATIC_ROOT.resolve():
             raise StudioError("资源不存在", HTTPStatus.NOT_FOUND, code="STATIC_ASSET_NOT_FOUND")
         if not path.is_file():
-            path = STATIC_ROOT / "index.html"
+            raise StudioError(
+                f"Studio 资源不存在: {relative}",
+                HTTPStatus.NOT_FOUND,
+                code="STATIC_ASSET_NOT_FOUND",
+                details={"path": relative},
+            )
         content = path.read_bytes()
         self.send_response(HTTPStatus.OK)
         self._security_headers()

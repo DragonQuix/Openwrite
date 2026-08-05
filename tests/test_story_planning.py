@@ -233,6 +233,77 @@ def test_stage_outline_edits_preserves_unmentioned_content_until_confirmation(
     assert store.outline_edit_state_path.exists() is False
 
 
+def test_stage_outline_edits_replaces_markdown_section_without_copying_old_text(
+    tmp_path: Path,
+):
+    store = StoryPlanningStore(tmp_path, "demo")
+    original = """# 测试小说
+
+### 第一节：开端
+
+旧节概要。
+
+#### 第一章：旧章
+
+旧章内容。
+
+### 第二节：追踪
+
+必须保留的相邻内容。
+"""
+    store.outline_src_path.parent.mkdir(parents=True)
+    store.outline_src_path.write_text(original, encoding="utf-8")
+
+    result = store.stage_outline_edits(
+        base_revision=store.outline_source_revision(),
+        edits=[
+            {
+                "section_heading": "第一节：开端",
+                "new_text": (
+                    "新节概要。\n\n#### 第一章：潮涌\n\n"
+                    "> 内容焦点: 主角遭遇潮涌。\n> 预估字数: 6000"
+                ),
+            }
+        ],
+        final_batch=False,
+    )
+
+    assert result["ok"] is True
+    assert result["applied"][0]["mode"] == "section"
+    assert result["applied"][0]["section_heading"] == "### 第一节：开端"
+    assert store.outline_src_path.read_text(encoding="utf-8") == original
+    draft = store.outline_draft_path.read_text(encoding="utf-8")
+    assert "### 第一节：开端\n\n新节概要。" in draft
+    assert "#### 第一章：潮涌" in draft
+    assert "旧节概要" not in draft
+    assert "旧章内容" not in draft
+    assert "### 第二节：追踪\n\n必须保留的相邻内容。" in draft
+
+
+def test_stage_outline_edits_reports_available_headings_for_unknown_section(
+    tmp_path: Path,
+):
+    store = StoryPlanningStore(tmp_path, "demo")
+    store.outline_src_path.parent.mkdir(parents=True)
+    store.outline_src_path.write_text(
+        "# 测试小说\n\n### 第一节：开端\n\n旧内容。\n",
+        encoding="utf-8",
+    )
+
+    result = store.stage_outline_edits(
+        base_revision=store.outline_source_revision(),
+        edits=[{"section_heading": "不存在的节", "new_text": "新内容。"}],
+        final_batch=False,
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "section_heading_not_found"
+    assert result["details"]["field_path"] == "$.edits[0].section_heading"
+    assert "### 第一节：开端" in result["details"]["available_headings"]
+    assert result["details"]["batch_applied"] is False
+    assert store.outline_draft_path.exists() is False
+
+
 def test_stage_outline_edits_rejects_ambiguous_old_text(tmp_path: Path):
     store = StoryPlanningStore(tmp_path, "demo")
     store.outline_src_path.parent.mkdir(parents=True)
@@ -246,6 +317,49 @@ def test_stage_outline_edits_rejects_ambiguous_old_text(tmp_path: Path):
     assert result["ok"] is False
     assert result["error"] == "ambiguous_old_text"
     assert store.outline_draft_path.exists() is False
+
+
+def test_stage_outline_edits_explains_exact_anchor_mismatch_on_pending_draft(
+    tmp_path: Path,
+):
+    store = StoryPlanningStore(tmp_path, "demo")
+    store.outline_src_path.parent.mkdir(parents=True)
+    store.outline_src_path.write_text(
+        "# 大纲\n\n#### 第五章：旧标题\n原始内容。\n\n#### 第六章：后续\n后续内容。\n",
+        encoding="utf-8",
+    )
+    first = store.stage_outline_edits(
+        base_revision=store.outline_source_revision(),
+        edits=[{"old_text": "# 大纲", "new_text": "# 新大纲"}],
+        final_batch=False,
+    )
+
+    result = store.stage_outline_edits(
+        base_revision=first["draft_revision"],
+        edits=[
+            {
+                "old_text": "#### 第五章：旧标题\n模型记错的内容。",
+                "new_text": "#### 第五章：新标题\n新内容。",
+            }
+        ],
+        final_batch=False,
+    )
+
+    assert result["error"] == "old_text_not_found"
+    assert result["revision"] == first["draft_revision"]
+    assert result["details"]["source_kind"] == "pending_draft"
+    assert result["details"]["field_path"] == "$.edits[0].old_text"
+    assert result["details"]["cause"] == "exact_text_mismatch"
+    assert result["details"]["retry_base_revision"] == first["draft_revision"]
+    assert result["details"]["anchor"] == "#### 第五章：旧标题"
+    assert result["details"]["anchor_line"] == 3
+    assert result["details"]["batch_applied"] is False
+    assert result["details"]["suggested_old_text"] == (
+        "#### 第五章：旧标题\n原始内容。\n\n"
+    )
+    assert result["details"]["first_difference"]["offset"] > 0
+    assert "不要凭记忆重写 old_text" in result["message"]
+    assert store.outline_draft_path.read_text(encoding="utf-8").startswith("# 新大纲")
 
 
 def test_outline_promotion_rejects_source_changed_after_staging(tmp_path: Path):
@@ -272,21 +386,77 @@ def test_multiple_outline_edits_accumulate_on_pending_draft(tmp_path: Path):
     first = store.stage_outline_edits(
         base_revision=store.outline_source_revision(),
         edits=[{"old_text": "第一处", "new_text": "第一处已改"}],
+        batch_label="第一幕",
+        final_batch=False,
     )
     snapshot = store.read_outline_for_edit(query="第二处")
     second = store.stage_outline_edits(
-        base_revision=snapshot["revision"],
+        base_revision=first["draft_revision"],
         edits=[{"old_text": "第二处", "new_text": "第二处已改"}],
+        batch_label="第二幕",
+        final_batch=True,
     )
 
     assert first["ok"] is True
+    assert first["next_action"] == "continue_outline_edit_batches"
+    assert first["batch_count"] == 1
+    assert first["final_batch"] is False
     assert snapshot["source_kind"] == "pending_draft"
+    assert snapshot["pending_batch_count"] == 1
     assert second["ok"] is True
+    assert second["next_action"] == "confirm_outline_edits"
     assert second["edit_count"] == 2
+    assert second["batch_count"] == 2
+    assert second["batch_label"] == "第二幕"
+    assert second["final_batch"] is True
     assert store.outline_src_path.read_text(encoding="utf-8") == "# 原标题\n\n第一处\n\n第二处\n"
     draft = store.outline_draft_path.read_text(encoding="utf-8")
     assert "第一处已改" in draft
     assert "第二处已改" in draft
+
+
+def test_outline_promotion_rejects_an_unfinished_edit_batch(tmp_path: Path):
+    store = StoryPlanningStore(tmp_path, "demo")
+    store.outline_src_path.parent.mkdir(parents=True)
+    original = "# 原大纲\n\n第一幕\n\n第二幕\n"
+    store.outline_src_path.write_text(original, encoding="utf-8")
+
+    staged = store.stage_outline_edits(
+        base_revision=store.outline_source_revision(),
+        edits=[{"old_text": "第一幕", "new_text": "第一幕已改"}],
+        batch_label="第一幕",
+        final_batch=False,
+    )
+
+    assert staged["ok"] is True
+    assert store.outline_edit_batches_complete() is False
+    assert store.promote_outline(confirmed=True) is False
+    assert store.outline_src_path.read_text(encoding="utf-8") == original
+    assert "第一幕已改" in store.outline_draft_path.read_text(encoding="utf-8")
+    assert store.outline_edit_state_path.exists() is True
+
+
+def test_outline_edit_batch_limits_ask_agent_to_split_large_changes(tmp_path: Path):
+    store = StoryPlanningStore(tmp_path, "demo")
+    store.outline_src_path.parent.mkdir(parents=True)
+    store.outline_src_path.write_text("# 原大纲\n\n第一幕\n", encoding="utf-8")
+
+    too_many = store.stage_outline_edits(
+        base_revision=store.outline_source_revision(),
+        edits=[{"old_text": "第一幕", "new_text": f"第{index}幕"} for index in range(9)],
+        final_batch=False,
+    )
+    too_large = store.stage_outline_edits(
+        base_revision=store.outline_source_revision(),
+        edits=[{"old_text": "第一幕", "new_text": "新" * 12_001}],
+        final_batch=False,
+    )
+
+    assert too_many["error"] == "too_many_edits"
+    assert "最多 4 节" in too_many["message"]
+    assert too_large["error"] == "outline_edit_batch_too_large"
+    assert "12000" in too_large["message"]
+    assert store.outline_draft_path.exists() is False
 
 
 def test_read_outline_for_edit_returns_query_window_and_full_revision(tmp_path: Path):

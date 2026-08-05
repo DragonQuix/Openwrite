@@ -57,18 +57,25 @@ function allOccurrences(text, query) {
 export class MarkdownEditor {
   constructor(host, options = {}) {
     if (!host) throw new Error("Markdown 编辑器挂载点不存在");
-    if (!window.Vditor) throw new Error("Vditor 本地资源未加载");
     this.host = host;
     this.options = options;
     this.value = String(options.value || "");
     this.lastSelection = { start: 0, end: 0, text: "" };
     this.suppressInput = false;
     this.destroyed = false;
+    this.enhanced = Boolean(window.Vditor);
+    this.fallback = null;
     this.ready = new Promise((resolve) => { this.resolveReady = resolve; });
     host.classList.add("markdown-editor-host");
     if (options.compact) host.classList.add("compact");
     editors.add(this);
     editorsByHost.set(host, this);
+    if (!this.enhanced) {
+      this.mountFallback();
+      this.resolveReady(this);
+      options.onReady?.(this);
+      return;
+    }
     this.instance = new window.Vditor(host, {
       value: this.value,
       cdn: VDITOR_CDN,
@@ -119,8 +126,33 @@ export class MarkdownEditor {
     });
   }
 
+  mountFallback() {
+    const textarea = document.createElement("textarea");
+    textarea.className = "markdown-editor-fallback";
+    textarea.value = this.value;
+    textarea.placeholder = this.options.placeholder || "开始写作…";
+    textarea.spellcheck = true;
+    textarea.setAttribute("aria-label", this.host.getAttribute("aria-label") || "Markdown 编辑器");
+    textarea.addEventListener("input", () => {
+      this.value = textarea.value;
+      if (!this.suppressInput) this.options.onInput?.(this.value, this);
+      this.syncSelection();
+    });
+    textarea.addEventListener("select", () => this.syncSelection());
+    textarea.addEventListener("click", () => this.syncSelection());
+    textarea.addEventListener("keyup", () => this.syncSelection());
+    textarea.addEventListener("keydown", (event) => this.options.onKeydown?.(event, this));
+    this.host.replaceChildren(textarea);
+    this.host.classList.add("fallback");
+    this.fallback = textarea;
+  }
+
   getValue() {
     if (this.destroyed) return this.value;
+    if (this.fallback) {
+      this.value = this.fallback.value;
+      return this.value;
+    }
     try {
       this.value = this.instance.getValue();
     } catch (error) {
@@ -133,6 +165,13 @@ export class MarkdownEditor {
     this.value = String(value || "");
     await this.ready;
     if (this.destroyed) return;
+    if (this.fallback) {
+      this.suppressInput = true;
+      this.fallback.value = this.value;
+      this.suppressInput = false;
+      this.lastSelection = { start: 0, end: 0, text: "" };
+      return;
+    }
     this.suppressInput = true;
     this.instance.setValue(this.value, clearHistory);
     this.suppressInput = false;
@@ -141,12 +180,18 @@ export class MarkdownEditor {
 
   async focus() {
     await this.ready;
-    if (!this.destroyed) this.instance.focus();
+    if (this.destroyed) return;
+    if (this.fallback) this.fallback.focus();
+    else this.instance.focus();
   }
 
   async setDisabled(disabled) {
     await this.ready;
     if (this.destroyed) return;
+    if (this.fallback) {
+      this.fallback.disabled = disabled;
+      return;
+    }
     if (disabled) this.instance.disabled();
     else this.instance.enable();
   }
@@ -159,6 +204,13 @@ export class MarkdownEditor {
   syncSelection(notify = true) {
     if (this.destroyed) return this.lastSelection;
     const value = this.getValue();
+    if (this.fallback) {
+      const start = this.fallback.selectionStart || 0;
+      const end = this.fallback.selectionEnd || start;
+      this.lastSelection = { start, end, text: value.slice(start, end) };
+      if (notify) this.options.onSelection?.({ ...this.lastSelection }, this);
+      return this.lastSelection;
+    }
     const selectedText = this.instance.getSelection?.() || "";
     if (selectedText) {
       const positions = allOccurrences(value, selectedText);
@@ -178,6 +230,7 @@ export class MarkdownEditor {
   }
 
   domCaretOffset() {
+    if (this.fallback) return this.fallback.selectionEnd || 0;
     const surface = editorSurface(this.host);
     const selection = window.getSelection();
     if (!surface || !selection?.rangeCount) return this.lastSelection.end || 0;
@@ -208,6 +261,13 @@ export class MarkdownEditor {
     const safeStart = Math.max(0, Math.min(value.length, Number(start) || 0));
     const safeEnd = Math.max(safeStart, Math.min(value.length, Number(end) || 0));
     const target = value.slice(safeStart, safeEnd);
+    if (this.fallback) {
+      await this.focus();
+      this.fallback.setSelectionRange(safeStart, safeEnd);
+      this.lastSelection = { start: safeStart, end: safeEnd, text: target };
+      this.options.onSelection?.({ ...this.lastSelection }, this);
+      return true;
+    }
     const surface = editorSurface(this.host);
     if (!surface) return false;
     await this.focus();
@@ -236,7 +296,7 @@ export class MarkdownEditor {
   }
 
   setTheme(theme) {
-    if (this.destroyed) return;
+    if (this.destroyed || this.fallback) return;
     this.instance.setTheme(theme === "dark" ? "dark" : "classic");
   }
 
@@ -245,7 +305,13 @@ export class MarkdownEditor {
     this.destroyed = true;
     editors.delete(this);
     editorsByHost.delete(this.host);
-    this.instance.destroy?.();
+    if (this.fallback) {
+      this.fallback.remove();
+      this.fallback = null;
+      this.host.classList.remove("fallback");
+    } else {
+      this.instance.destroy?.();
+    }
   }
 }
 

@@ -1,5 +1,9 @@
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from tools import desktop_launcher
 
@@ -15,9 +19,7 @@ def test_dependency_fingerprint_changes_with_project_metadata(tmp_path: Path):
 
 
 def test_runtime_directory_is_separate_for_macos_and_windows(tmp_path: Path):
-    mac = desktop_launcher.runtime_directory(
-        tmp_path, platform_name="darwin", version_info=(3, 12)
-    )
+    mac = desktop_launcher.runtime_directory(tmp_path, platform_name="darwin", version_info=(3, 12))
     windows = desktop_launcher.runtime_directory(
         tmp_path, platform_name="win32", version_info=(3, 12)
     )
@@ -106,9 +108,10 @@ def test_installed_launcher_reuses_the_active_environment(monkeypatch) -> None:
         lambda *args, **kwargs: health_checks.append((args, kwargs)) or True,
     )
 
-    assert desktop_launcher.ensure_runtime(Path(desktop_launcher.sys.prefix)) == Path(
-        desktop_launcher.sys.executable
-    ).absolute()
+    assert (
+        desktop_launcher.ensure_runtime(Path(desktop_launcher.sys.prefix))
+        == Path(desktop_launcher.sys.executable).absolute()
+    )
     assert health_checks[0][1] == {"check_dependencies": False}
 
 
@@ -122,8 +125,132 @@ def test_installation_health_can_skip_pip_check(tmp_path: Path, monkeypatch) -> 
         lambda command, **_: commands.append([str(item) for item in command]),
     )
 
-    assert desktop_launcher._installation_healthy(
-        python, tmp_path, check_dependencies=False
-    )
+    assert desktop_launcher._installation_healthy(python, tmp_path, check_dependencies=False)
     assert len(commands) == 1
     assert commands[0][1] == "-c"
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _source_repositories(tmp_path: Path) -> tuple[Path, Path]:
+    if shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    remote = tmp_path / "remote.git"
+    seed = tmp_path / "seed"
+    checkout = tmp_path / "checkout"
+    _git(tmp_path, "init", "--bare", str(remote))
+    _git(tmp_path, "init", str(seed))
+    _git(seed, "config", "user.name", "OpenWrite Test")
+    _git(seed, "config", "user.email", "test@openwrite.local")
+    (seed / ".gitignore").write_text(".openwrite-runtime/\n", encoding="utf-8")
+    (seed / "pyproject.toml").write_text("[project]\nname='openwrite-test'\n", encoding="utf-8")
+    (seed / "version.txt").write_text("one\n", encoding="utf-8")
+    _git(seed, "add", ".")
+    _git(seed, "commit", "-m", "initial")
+    _git(seed, "remote", "add", "origin", str(remote))
+    _git(seed, "push", "-u", "origin", "HEAD")
+    _git(tmp_path, "clone", str(remote), str(checkout))
+    return seed, checkout
+
+
+def test_source_update_fast_forwards_clean_checkout(tmp_path: Path) -> None:
+    seed, checkout = _source_repositories(tmp_path)
+    (seed / "version.txt").write_text("two\n", encoding="utf-8")
+    _git(seed, "add", "version.txt")
+    _git(seed, "commit", "-m", "update")
+    _git(seed, "push")
+
+    result = desktop_launcher.check_for_source_update(checkout, force=True, now=1000)
+
+    assert result.status == "updated"
+    assert (checkout / "version.txt").read_text(encoding="utf-8") == "two\n"
+    assert (_git(checkout, "status", "--porcelain")) == ""
+
+
+def test_source_update_preserves_local_changes(tmp_path: Path) -> None:
+    _, checkout = _source_repositories(tmp_path)
+    (checkout / "version.txt").write_text("local\n", encoding="utf-8")
+
+    result = desktop_launcher.check_for_source_update(checkout, force=True, now=1000)
+
+    assert result.status == "skipped"
+    assert "本地修改" in result.message
+    assert (checkout / "version.txt").read_text(encoding="utf-8") == "local\n"
+
+
+def test_source_update_preserves_unpushed_commit(tmp_path: Path) -> None:
+    _, checkout = _source_repositories(tmp_path)
+    _git(checkout, "config", "user.name", "OpenWrite Test")
+    _git(checkout, "config", "user.email", "test@openwrite.local")
+    (checkout / "version.txt").write_text("local commit\n", encoding="utf-8")
+    _git(checkout, "add", "version.txt")
+    _git(checkout, "commit", "-m", "local update")
+    local_revision = _git(checkout, "rev-parse", "HEAD")
+
+    result = desktop_launcher.check_for_source_update(checkout, force=True, now=1000)
+
+    assert result.status == "skipped"
+    assert "尚未推送" in result.message
+    assert _git(checkout, "rev-parse", "HEAD") == local_revision
+
+
+def test_source_update_ignores_non_git_directory(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='download'\n", encoding="utf-8")
+
+    result = desktop_launcher.check_for_source_update(tmp_path, force=True, now=1000)
+
+    assert result.status == "unavailable"
+    assert "Git 源码副本" in result.message
+    assert not (tmp_path / ".openwrite-runtime").exists()
+
+
+def test_source_update_uses_daily_check_stamp(tmp_path: Path, monkeypatch) -> None:
+    _, checkout = _source_repositories(tmp_path)
+    first = desktop_launcher.check_for_source_update(checkout, force=True, now=1000)
+    commands = []
+    real_git = desktop_launcher._git
+
+    def recording_git(root, *args):
+        commands.append(args)
+        return real_git(root, *args)
+
+    monkeypatch.setattr(desktop_launcher, "_git", recording_git)
+    second = desktop_launcher.check_for_source_update(checkout, now=1001)
+
+    assert first.status == "current"
+    assert second.status == "recent"
+    assert not any(args and args[0] == "fetch" for args in commands)
+
+
+def test_source_update_network_failure_does_not_raise(tmp_path: Path, monkeypatch) -> None:
+    _, checkout = _source_repositories(tmp_path)
+    real_git = desktop_launcher._git
+
+    def failing_fetch(root, *args):
+        if args and args[0] == "fetch":
+            raise subprocess.TimeoutExpired(["git", "fetch"], 1)
+        return real_git(root, *args)
+
+    monkeypatch.setattr(desktop_launcher, "_git", failing_fetch)
+
+    result = desktop_launcher.check_for_source_update(checkout, force=True, now=1000)
+
+    assert result.status == "failed"
+    assert "继续启动" in result.message
+
+
+def test_update_flags_are_mutually_exclusive() -> None:
+    parser = desktop_launcher.build_parser()
+
+    assert parser.parse_args(["--update"]).update is True
+    assert parser.parse_args(["--no-update"]).no_update is True
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--update", "--no-update"])

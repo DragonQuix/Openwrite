@@ -600,6 +600,20 @@ class OpenWriteOrchestrator:
                 "当前没有待确认的大纲范围，我先保持现状。",
                 next_action="ignore",
             )
+        if not self.story_planning_store.outline_edit_batches_complete():
+            self.state.blocking_reason = "incomplete_outline_edit_batches"
+            self.state.last_agent_action = "blocked_incomplete_outline_edit_batches"
+            self.state_store.save(self.state)
+            return OrchestratorResult(
+                message=(
+                    "大纲分批修改尚未完成，已保留待确认草稿且没有写入正式大纲。"
+                    "请先调用 read_outline 读取当前草稿和最新 draft_revision，继续暂存剩余批次；"
+                    "仅最后一批设置 final_batch=true 后再请求确认。"
+                ),
+                stage=self.state.stage,
+                blocked=True,
+                next_action="continue_outline_edit_batches",
+            )
         if not self.story_planning_store.promote_outline(confirmed=True):
             has_draft = self.story_planning_store.outline_draft_path.exists()
             self.state.blocking_reason = (

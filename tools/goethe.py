@@ -71,8 +71,9 @@ GOETHE_TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "read_outline": "读取已确认大纲的原文窗口和 revision；局部修改前必须先调用。",
     "stage_outline_edits": (
-        "用精确 old_text/new_text 补丁暂存局部修改并返回 diff；新增或补全章纲时必须遵守"
-        "系统提示中的大纲写入契约；不会写入 src。"
+        "分批暂存大纲修改并返回累计 diff。重写完整幕、节、章时使用简单的 "
+        "section_heading/new_text，系统自动定位原章节；改单句时才使用 old_text/new_text。"
+        "每批最多 8 个修改且载荷不超过 12000 字符；不会写入 src。"
     ),
     "confirm_outline_edits": "仅在用户明确确认后，将待确认大纲补丁写入 src/outline.md。",
     "discard_outline_edits": "用户拒绝修改时丢弃待确认大纲补丁，不改变 src。",
@@ -164,14 +165,25 @@ DEFAULT_GOETHE_SYSTEM_PROMPT = f"""你是 OpenWrite 的 Goethe，长期会话规
 2. 只有用户明确要求“生成大纲”且当前没有已确认大纲时，才能调用 generate_outline_draft。
    summarize_ideation 返回 next_action=confirm_ideation_summary 后，用户明确确认时必须先调用
    confirm_ideation_summary，并把用户完整确认原文传入 text；若同句还要求生成大纲，该动作会继续推进。
-3. 已有大纲时绝不整篇重写。先调用 read_outline 读取目标附近原文和 revision，再调用
-   stage_outline_edits，以精确 old_text/new_text 修改最小必要片段；未提及内容必须逐字保留。
-4. stage_outline_edits 只暂存草稿。调用后向用户展示 diff 摘要并等待确认，不得在同一轮自动调用
-   confirm_outline_edits，除非用户在原始请求中明确说“直接应用/无需确认”。
+3. 已有大纲时绝不整篇重写或覆盖。先调用 read_outline 取得当前 revision，再调用 stage_outline_edits。
+   重写完整幕、节、章时优先传 section_heading/new_text：section_heading 只需使用现有 Markdown 标题
+   （例如“### 第2节：准备期”），系统会自动替换该标题下直到下一个同级标题前的正文，不要复制旧正文。
+   只有修改单句或短段落时才使用精确 old_text/new_text；未提及内容必须逐字保留。
+   涉及整卷重排、超过 4 节或补齐大量章节时，必须按幕或最多 4 节分批：每批最多 8 个 edits，
+   标题/old_text 与 new_text 合计不超过 12000 字符。非最后一批设置 final_batch=false，
+   并使用工具返回的 draft_revision 作为下一批 base_revision；不要重复已完成批次。
+   存在 pending draft 后，大纲内容
+   只能用 read_outline 读取，禁止用 read_project_document 读取 src/outline.md，因为后者属于通用
+   canonical 文档接口。
+   最后一批才设 final_batch=true。
+4. stage_outline_edits 只累计暂存到同一份草稿。所有批次完成后，向用户展示累计 diff 摘要并等待确认；
+   不得在同一轮自动调用 confirm_outline_edits，除非用户原始请求明确说“直接应用/无需确认”。
 5. 只有用户明确说“确认应用、采用这版、写入大纲”等肯定表达时，才能调用
    confirm_outline_edits。否定、犹豫或继续讨论时不得调用。
 6. 用户说取消、不要这版或放弃修改时，调用 discard_outline_edits。
-7. 工具返回 revision 冲突或 old_text 不唯一时，重新 read_outline；不得退回整篇生成覆盖。
+7. 工具返回 revision 冲突或标题不存在时，重新 read_outline；短文本模式的 old_text_not_found 返回
+   details.suggested_old_text 且未截断时，优先逐字复用该字段，并使用错误结果中的 revision 重试。
+   不得凭记忆改写 old_text，也不得退回整篇生成覆盖。
 8. 判断卷/幕/节/章位置或下一章时使用 get_outline_structure；它只读，不替代 src/outline.md。
 9. 最终回复必须面向用户总结结果、diff 摘要和下一步，不要输出“old_text、扩大块、
    清理残留、重试补丁”等内部工具调试或补丁策略碎片。
@@ -333,30 +345,50 @@ def _build_goethe_tool_definitions(
                     },
                     "edits": {
                         "type": "array",
-                        "description": "按顺序执行的最小精确文本替换",
+                        "description": "本批按顺序执行的章节或短文本修改，最多 8 个",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "old_text": {
                                     "type": "string",
-                                    "description": "从 read_outline 原样复制的唯一原文",
+                                    "description": (
+                                        "仅改单句/短段时使用：从 read_outline 复制的原文"
+                                    ),
+                                },
+                                "section_heading": {
+                                    "type": "string",
+                                    "description": (
+                                        "重写完整幕/节/章时优先使用：现有 Markdown 标题，"
+                                        "如 ### 第2节：准备期；无需提交旧正文"
+                                    ),
                                 },
                                 "new_text": {
                                     "type": "string",
-                                    "description": "替换后的文本；空字符串表示删除",
+                                    "description": (
+                                        "section_heading 模式下为标题下的新正文；"
+                                        "old_text 模式下为替换文本；空字符串表示清空"
+                                    ),
                                 },
                                 "replace_all": {
                                     "type": "boolean",
                                     "description": "仅在明确需要替换所有匹配时设为 true",
                                 },
                             },
-                            "required": ["old_text", "new_text"],
+                            "required": ["new_text"],
                         },
                     },
+                    "batch_label": {
+                        "type": "string",
+                        "description": "本批范围，例如“第一幕”或“第5-8节”",
+                    },
+                    "final_batch": {
+                        "type": "boolean",
+                        "description": "全部批次完成时为 true；仍有后续批次时必须为 false",
+                    },
                 },
-                "required": ["base_revision", "edits"],
+                "required": ["base_revision", "edits", "final_batch"],
             },
-            required=["base_revision", "edits"],
+            required=["base_revision", "edits", "final_batch"],
         ),
         ToolDefinition(
             name="confirm_outline_edits",
