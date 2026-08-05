@@ -315,15 +315,19 @@ def test_long_old_text_mismatch_automatically_falls_back_to_range_anchors(
     tmp_path: Path,
 ):
     store = StoryPlanningStore(tmp_path, "demo")
+    start_anchor = "START-UNIQUE"
+    end_anchor = "END-UNIQUE12"
     original = (
-        "# 大纲\n\n【长范围开始】\n"
+        f"# 大纲\n\n{start_anchor}{'真' * 100}\n"
         + "当前真实内容。" * 80
-        + "\n【长范围结束】\n\n不应被修改\n"
+        + f"\n{'实' * 100}{end_anchor}\n\n不应被修改\n"
     )
     store.outline_src_path.parent.mkdir(parents=True)
     store.outline_src_path.write_text(original, encoding="utf-8")
     inaccurate_old_text = (
-        "【长范围开始】\n" + "模型记错的中间内容。" * 60 + "\n【长范围结束】"
+        f"{start_anchor}{'错' * 100}\n"
+        + "模型记错的中间内容。" * 60
+        + f"\n{'误' * 100}{end_anchor}"
     )
 
     result = store.stage_outline_edits(
@@ -335,6 +339,7 @@ def test_long_old_text_mismatch_automatically_falls_back_to_range_anchors(
     assert result["ok"] is True
     assert result["applied"][0]["mode"] == "range"
     assert result["applied"][0]["automatic"] is True
+    assert result["applied"][0]["anchor_chars"] == 12
     draft = store.outline_draft_path.read_text(encoding="utf-8")
     assert "自动收敛后的内容" in draft
     assert "当前真实内容" not in draft
@@ -365,6 +370,38 @@ def test_stage_outline_edits_only_blocks_ambiguous_range_anchors(tmp_path: Path)
     assert result["error"] == "ambiguous_text_range"
     assert result["details"]["range_count"] == 2
     assert "各增加几个字" in result["message"]
+    assert store.outline_draft_path.exists() is False
+
+
+def test_long_old_text_fallback_stops_when_folded_anchor_is_ambiguous(
+    tmp_path: Path,
+):
+    store = StoryPlanningStore(tmp_path, "demo")
+    repeated_start = "S" * 48
+    unique_end = "E" * 48
+    store.outline_src_path.parent.mkdir(parents=True)
+    store.outline_src_path.write_text(
+        f"{repeated_start}{'甲' * 60}\n"
+        f"{repeated_start}{'乙' * 60}\n"
+        f"{'丙' * 60}{unique_end}\n",
+        encoding="utf-8",
+    )
+    inaccurate_old_text = (
+        f"{repeated_start}{'错' * 60}\n"
+        f"{'模型错误内容' * 20}\n"
+        f"{'丙' * 60}{unique_end}"
+    )
+
+    result = store.stage_outline_edits(
+        base_revision=store.outline_source_revision(),
+        edits=[{"old_text": inaccurate_old_text, "new_text": "不应自动写入"}],
+        final_batch=False,
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "ambiguous_text_range"
+    assert result["details"]["anchor_chars"] == 48
+    assert result["details"]["start_occurrences"] == 2
     assert store.outline_draft_path.exists() is False
 
 

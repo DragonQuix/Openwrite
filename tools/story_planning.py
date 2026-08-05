@@ -21,11 +21,11 @@ from typing import Any
 import yaml
 
 from .frontmatter import compose_toml_document, parse_toml_front_matter, strip_front_matter_padding
+from .text_range import select_folded_range_anchors
 
 MAX_OUTLINE_EDIT_BATCH_EDITS = 8
 MAX_OUTLINE_EDIT_BATCH_CHARS = 12_000
 LONG_OLD_TEXT_CHARS = 240
-AUTO_RANGE_ANCHOR_CHARS = 96
 
 
 class StoryPlanningStore:
@@ -639,13 +639,18 @@ class StoryPlanningStore:
                 )
             occurrences = revised.count(old_text)
             if occurrences == 0:
+                anchor_selection: dict[str, Any] | None = None
                 if len(old_text) >= LONG_OLD_TEXT_CHARS:
-                    auto_anchors = self._range_anchors_from_long_text(old_text)
-                    if auto_anchors:
+                    anchor_selection = select_folded_range_anchors(
+                        revised,
+                        old_text,
+                        min_text_chars=LONG_OLD_TEXT_CHARS,
+                    )
+                    if anchor_selection["ok"]:
                         replacement = self._replace_text_range(
                             revised,
-                            auto_anchors[0],
-                            auto_anchors[1],
+                            str(anchor_selection["start_text"]),
+                            str(anchor_selection["end_text"]),
                             new_text,
                         )
                         if replacement["ok"]:
@@ -655,6 +660,9 @@ class StoryPlanningStore:
                                     "index": index + 1,
                                     "mode": "range",
                                     "automatic": True,
+                                    "anchor_chars": anchor_selection["details"][
+                                        "anchor_chars"
+                                    ],
                                     "start_line": replacement["start_line"],
                                     "end_line": replacement["end_line"],
                                     "replacements": 1,
@@ -662,6 +670,28 @@ class StoryPlanningStore:
                                 }
                             )
                             continue
+                    if anchor_selection["error"] == "ambiguous_text_range" or (
+                        anchor_selection.get("details", {}).get("start_occurrences")
+                        == 1
+                        and anchor_selection.get("details", {}).get("end_occurrences")
+                        == 1
+                    ):
+                        return self._outline_edit_error(
+                            str(anchor_selection["error"]),
+                            (
+                                f"第 {index + 1} 个长 old_text 自动定位失败："
+                                f"{anchor_selection['message']}本批未写入。"
+                            ),
+                            revision=expected_revision,
+                            details={
+                                "edit_index": index + 1,
+                                "field_path": f"$.edits[{index}].old_text",
+                                "source_kind": source_kind,
+                                "batch_applied": False,
+                                "retry_base_revision": expected_revision,
+                                **dict(anchor_selection.get("details") or {}),
+                            },
+                        )
                 diagnostics = self._outline_anchor_diagnostics(revised, old_text)
                 anchor = str(diagnostics.get("anchor") or "")
                 mismatch = diagnostics.get("first_difference")
@@ -673,11 +703,13 @@ class StoryPlanningStore:
                 source_label = "待确认草稿" if source_kind == "pending_draft" else "正式大纲"
                 long_text = len(old_text) >= LONG_OLD_TEXT_CHARS
                 if long_text:
-                    auto_anchors = self._range_anchors_from_long_text(old_text)
                     diagnostics["suggested_old_text"] = ""
                     diagnostics["suggested_old_text_truncated"] = False
-                    diagnostics["suggested_start_text"] = auto_anchors[0] if auto_anchors else ""
-                    diagnostics["suggested_end_text"] = auto_anchors[1] if auto_anchors else ""
+                    diagnostics.update(
+                        dict(anchor_selection.get("details") or {})
+                        if anchor_selection
+                        else {}
+                    )
                 guidance = (
                     "这是长范围修改，不要再复制整段 old_text；"
                     "请改用当前内容中唯一的 start_text 和 end_text 定位首尾。"
@@ -1097,24 +1129,6 @@ class StoryPlanningStore:
             "start_line": source.count("\n", 0, start) + 1,
             "end_line": source.count("\n", 0, end) + 1,
         }
-
-    @staticmethod
-    def _range_anchors_from_long_text(old_text: str) -> tuple[str, str] | None:
-        text = str(old_text or "").strip()
-        if len(text) < LONG_OLD_TEXT_CHARS:
-            return None
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        if len(lines) >= 2:
-            start = lines[0][:AUTO_RANGE_ANCHOR_CHARS]
-            end = lines[-1][-AUTO_RANGE_ANCHOR_CHARS:]
-        elif len(text) >= AUTO_RANGE_ANCHOR_CHARS * 2:
-            start = text[:AUTO_RANGE_ANCHOR_CHARS]
-            end = text[-AUTO_RANGE_ANCHOR_CHARS:]
-        else:
-            return None
-        if not start or not end or start == end:
-            return None
-        return start, end
 
     @staticmethod
     def _outline_anchor_diagnostics(

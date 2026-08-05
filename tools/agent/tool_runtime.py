@@ -15,11 +15,11 @@ from typing import Any, cast
 import yaml
 
 from tools.novel_service import NovelApplicationService, NovelServiceError
+from tools.text_range import select_folded_range_anchors
 
 ToolExecutor = Callable[[dict[str, Any]], dict[str, Any]]
 
 DOCUMENT_LONG_OLD_TEXT_CHARS = 240
-DOCUMENT_RANGE_ANCHOR_CHARS = 96
 
 
 def _service_error(exc: NovelServiceError) -> dict[str, Any]:
@@ -765,14 +765,20 @@ def _edit_project_document(
         occurrences = revised.count(old_text)
         if occurrences == 0:
             long_text = len(old_text) >= DOCUMENT_LONG_OLD_TEXT_CHARS
-            automatic_anchors = (
-                _range_anchors_from_long_document_text(old_text) if long_text else None
+            anchor_selection = (
+                select_folded_range_anchors(
+                    revised,
+                    old_text,
+                    min_text_chars=DOCUMENT_LONG_OLD_TEXT_CHARS,
+                )
+                if long_text
+                else None
             )
-            if automatic_anchors:
+            if anchor_selection and anchor_selection["ok"]:
                 replacement = _replace_document_text_range(
                     revised,
-                    automatic_anchors[0],
-                    automatic_anchors[1],
+                    str(anchor_selection["start_text"]),
+                    str(anchor_selection["end_text"]),
                     new_text,
                 )
                 if replacement["ok"]:
@@ -782,6 +788,7 @@ def _edit_project_document(
                             "index": index + 1,
                             "mode": "range",
                             "automatic": True,
+                            "anchor_chars": anchor_selection["details"]["anchor_chars"],
                             "start_line": replacement["start_line"],
                             "end_line": replacement["end_line"],
                             "replacements": 1,
@@ -789,15 +796,35 @@ def _edit_project_document(
                         }
                     )
                     continue
+            if anchor_selection and (
+                anchor_selection["error"] == "ambiguous_text_range"
+                or (
+                    anchor_selection.get("details", {}).get("start_occurrences") == 1
+                    and anchor_selection.get("details", {}).get("end_occurrences") == 1
+                )
+            ):
+                return {
+                    "ok": False,
+                    "error": anchor_selection["error"],
+                    "message": (
+                        f"第 {index + 1} 个长 old_text 自动定位失败："
+                        f"{anchor_selection['message']}"
+                    ),
+                    "revision": revision,
+                    "details": {
+                        "field_path": f"$.edits[{index}].old_text",
+                        "retry_revision": revision,
+                        **dict(anchor_selection.get("details") or {}),
+                    },
+                }
             diagnostics = _document_edit_diagnostics(revised, old_text)
             if long_text:
                 diagnostics["suggested_old_text"] = ""
                 diagnostics["suggested_old_text_truncated"] = False
-                diagnostics["suggested_start_text"] = (
-                    automatic_anchors[0] if automatic_anchors else ""
-                )
-                diagnostics["suggested_end_text"] = (
-                    automatic_anchors[1] if automatic_anchors else ""
+                diagnostics.update(
+                    dict(anchor_selection.get("details") or {})
+                    if anchor_selection
+                    else {}
                 )
             if long_text:
                 failure_message = (
@@ -977,24 +1004,6 @@ def _replace_document_text_range(
         "start_line": source.count("\n", 0, start) + 1,
         "end_line": source.count("\n", 0, end) + 1,
     }
-
-
-def _range_anchors_from_long_document_text(old_text: str) -> tuple[str, str] | None:
-    text = str(old_text or "").strip()
-    if len(text) < DOCUMENT_LONG_OLD_TEXT_CHARS:
-        return None
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if len(lines) >= 2:
-        start = lines[0][:DOCUMENT_RANGE_ANCHOR_CHARS]
-        end = lines[-1][-DOCUMENT_RANGE_ANCHOR_CHARS:]
-    elif len(text) >= DOCUMENT_RANGE_ANCHOR_CHARS * 2:
-        start = text[:DOCUMENT_RANGE_ANCHOR_CHARS]
-        end = text[-DOCUMENT_RANGE_ANCHOR_CHARS:]
-    else:
-        return None
-    if not start or not end or start == end:
-        return None
-    return start, end
 
 
 def _document_edit_diagnostics(

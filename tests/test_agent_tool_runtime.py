@@ -736,15 +736,18 @@ summary = "沈烛在回响中逐渐掌握的感知能力。"
     assert "不得被范围替换" in range_content
 
     automatic_document = novel_root / "src" / "world" / "automatic_range.md"
-    start_line = "自动起点：" + "甲" * 110
-    end_line = "自动终点：" + "乙" * 110
+    start_anchor = "START-UNIQUE"
+    end_anchor = "END-UNIQUE12"
+    start_line = start_anchor + "真" * 110
+    end_line = "实" * 110 + end_anchor
     automatic_document.write_text(
         f"{start_line}\n文件中的真实中间内容。\n{end_line}\n",
         encoding="utf-8",
     )
     inaccurate_long_text = (
-        f"{start_line}\n模型记错的中间内容，并且这一段足够长。"
-        f"{'错' * 80}\n{end_line}"
+        f"{start_anchor}{'错' * 110}\n"
+        f"模型记错的中间内容，并且这一段足够长。{'错' * 80}\n"
+        f"{'误' * 110}{end_anchor}"
     )
     automatic_preview = executors["edit_project_document"](
         {
@@ -760,6 +763,37 @@ summary = "沈烛在回响中逐渐掌握的感知能力。"
     assert automatic_preview["ok"] is True
     assert automatic_preview["edits"][0]["mode"] == "range"
     assert automatic_preview["edits"][0]["automatic"] is True
+    assert automatic_preview["edits"][0]["anchor_chars"] == 12
+
+    folded_ambiguous_document = (
+        novel_root / "src" / "world" / "folded_ambiguous_range.md"
+    )
+    repeated_start = "S" * 48
+    unique_end = "E" * 48
+    folded_ambiguous_document.write_text(
+        f"{repeated_start}{'甲' * 60}\n"
+        f"{repeated_start}{'乙' * 60}\n"
+        f"{'丙' * 60}{unique_end}\n",
+        encoding="utf-8",
+    )
+    folded_ambiguous = executors["edit_project_document"](
+        {
+            "path": "src/world/folded_ambiguous_range.md",
+            "edits": [
+                {
+                    "old_text": (
+                        f"{repeated_start}{'错' * 60}\n"
+                        f"{'模型错误内容' * 20}\n"
+                        f"{'丙' * 60}{unique_end}"
+                    ),
+                    "new_text": "不应自动写入",
+                }
+            ],
+        }
+    )
+    assert folded_ambiguous["error"] == "ambiguous_text_range"
+    assert folded_ambiguous["details"]["anchor_chars"] == 48
+    assert "不应自动写入" not in folded_ambiguous_document.read_text(encoding="utf-8")
 
     ambiguous_document = novel_root / "src" / "world" / "ambiguous_range.md"
     ambiguous_document.write_text(
