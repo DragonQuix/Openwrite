@@ -134,6 +134,56 @@ def test_standard_skill_is_explicit_only_and_references_are_bounded(tmp_path: Pa
     assert "unsafe.sh" not in rendered
 
 
+def test_builtin_oh_story_suite_is_explicit_bounded_and_attributed(
+    tmp_path: Path,
+) -> None:
+    resolver = RuntimeSkillResolver(tmp_path, global_root=tmp_path / "global")
+    listed = resolver.list_skills()
+    expected_ids = {
+        "oh-story-long-write",
+        "oh-story-short-write",
+        "oh-story-long-analyze",
+        "oh-story-short-analyze",
+        "oh-story-long-scan",
+        "oh-story-short-scan",
+        "oh-story-review",
+        "oh-story-deslop",
+    }
+    oh_story_skills = {
+        item["id"]: item
+        for item in listed["skills"]
+        if item["id"].startswith("oh-story-")
+    }
+    assert set(oh_story_skills) == expected_ids
+    for item in oh_story_skills.values():
+        assert item["layer"] == "builtin"
+        assert item["source_format"] == "standard-skill-md"
+        assert item["activation"] == "explicit"
+        assert item["allow_tools"] == ["*"]
+
+    baseline = {"get_status", "write_chapter"}
+    automatic = resolver.resolve(agent="dante", base_tools=baseline)
+    assert not expected_ids.intersection(item.id for item in automatic.skills)
+
+    builtin_root = Path(__file__).parents[1] / "tools" / "runtime_skills"
+    for skill_id in expected_ids:
+        explicit = resolver.resolve(
+            agent="dante",
+            base_tools=baseline,
+            explicit_skills=[skill_id],
+        )
+        assert set(explicit.allowed_tools) == baseline
+        assert [skill.id for skill in explicit.skills] == [skill_id]
+        skill = explicit.skills[0]
+        assert skill.layer == "builtin"
+        assert len(skill.references) == 1
+        assert sum(len(item) for item in skill.references) <= skill.budget.max_reference_chars
+        assert "oh-story-claudecode" in skill.instructions
+
+        license_text = (builtin_root / skill_id / "LICENSE").read_text(encoding="utf-8")
+        assert "Copyright (c) 2025-2026 oh-story-claudecode" in license_text
+
+
 def test_skill_mentions_are_stable_and_do_not_match_email_addresses() -> None:
     assert extract_explicit_skill_mentions(
         "请用@scene-diagnosis 和 @dialogue，再用一次 @scene-diagnosis"

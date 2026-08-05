@@ -303,8 +303,10 @@ OpenWrite 可以发现标准 `SKILL.md`，并继续兼容 `.openwrite/skills/*/m
 Skill 默认不会进入所有写作上下文。在 Goethe 或 Dante 的本轮消息中用 `@skill-id` 明确启用：
 
 ```text
-@scene-causality 检查 ch_007 的场景因果链，只给诊断和优先建议。
+@oh-story-review 检查 ch_007 的场景因果链，只给诊断和优先建议。
 ```
+
+Studio 已内置一组 [oh-story-claudecode](https://github.com/worldwonderer/oh-story-claudecode) 的 OpenWrite 原生适配 Skill：`@oh-story-long-write`、`@oh-story-short-write`、`@oh-story-long-analyze`、`@oh-story-short-analyze`、`@oh-story-long-scan`、`@oh-story-short-scan`、`@oh-story-review` 和 `@oh-story-deslop`。它们按任务独立加载，不安装上游 hooks、不运行 CDP 抓榜脚本，也不改变 OpenWrite 的项目目录和写入确认协议。
 
 下一轮未再次指定时会恢复默认上下文。Skill 中的脚本不会自动执行，工具权限只能被收窄，不能借 Skill 扩权或绕过写入确认。Studio 的 **Skills** 工作区可以查看发现结果、解析后的规则、适用 Agent 和诊断信息。
 
@@ -382,6 +384,7 @@ OpenWrite 建立在许多可靠的开源项目之上，特别感谢：
 - **LLM 接入**：[LiteLLM](https://github.com/BerriAI/litellm) 提供统一模型网关与模型元数据；[OpenAI Python SDK](https://github.com/openai/openai-python) 和 [Anthropic Python SDK](https://github.com/anthropics/anthropic-sdk-python) 支撑官方协议接入。
 - **编辑与渲染**：[Vditor](https://github.com/Vanessa219/vditor) 提供 Studio 的 Markdown 编辑与即时渲染，[markdown-it-py](https://github.com/executablebooks/markdown-it-py) 用于安全渲染对话和 EPUB 内容。
 - **Python 基础设施**：[Pydantic](https://github.com/pydantic/pydantic) 负责结构化数据校验，[PyYAML](https://github.com/yaml/pyyaml) 承载项目配置与运行态，[prompt_toolkit](https://github.com/prompt-toolkit/python-prompt-toolkit) 提供 Goethe / Dante 的交互式终端体验。
+- **创作方法论**：[oh-story-claudecode](https://github.com/worldwonderer/oh-story-claudecode) 为内置 Oh Story Skill 套件提供了长短篇写作、拆文、审稿与市场研究方法；OpenWrite 在 MIT 许可下完成了项目协议与权限边界适配。
 
 也感谢所有推动 AI 写作、长上下文、知识检索和创作工作流发展的开源项目与贡献者。
 

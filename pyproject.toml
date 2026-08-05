@@ -36,6 +36,8 @@ tools = [
     "studio_assets/vendor/vditor/dist/js/lute/*",
     "runtime_skills/*/manifest.yaml",
     "runtime_skills/*/*.md",
+    "runtime_skills/*/agents/*",
+    "runtime_skills/*/LICENSE",
     "runtime_skills/*/references/*",
 ]
 craft = ["*.md", "*.yaml", "*.yml"]

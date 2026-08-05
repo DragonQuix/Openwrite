@@ -201,28 +201,42 @@ class RuntimeSkillResolver:
         source = str(skill_path)
         try:
             raw, body = _split_skill_markdown(skill_path.read_text(encoding="utf-8"))
-            skill_id = str(raw.get("id") or _slugify_skill_id(skill_dir.name)).lower()
+            metadata = raw.get("metadata") if isinstance(raw.get("metadata"), dict) else {}
+            openwrite = (
+                metadata.get("openwrite")
+                if isinstance(metadata.get("openwrite"), dict)
+                else {}
+            )
+
+            def setting(key: str, default: Any = None) -> Any:
+                return raw[key] if key in raw else openwrite.get(key, default)
+
+            skill_id = str(setting("id") or _slugify_skill_id(skill_dir.name)).lower()
             if not _SKILL_ID_RE.fullmatch(skill_id):
                 raise ValueError(f"无效 Skill id: {skill_id}")
-            budget_raw = raw.get("budget") if isinstance(raw.get("budget"), dict) else {}
+            budget_value = setting("budget")
+            budget_raw = budget_value if isinstance(budget_value, dict) else {}
+            allow_tools = setting("allow_tools")
+            if allow_tools is None:
+                allow_tools = raw.get("allowed-tools")
             manifest = SkillManifestV1.model_validate(
                 {
                     "schema_version": 1,
                     "id": skill_id,
-                    "version": str(raw.get("version") or "1.0.0"),
+                    "version": str(setting("version") or "1.0.0"),
                     "name": str(raw.get("name") or skill_dir.name)[:120],
                     "description": str(raw.get("description") or "")[:500],
-                    "enabled": bool(raw.get("enabled", True)),
-                    "agents": _as_str_tuple(raw.get("agents")),
-                    "tasks": _as_str_tuple(raw.get("tasks")),
-                    "intents": _as_str_tuple(raw.get("intents")),
-                    "document_types": _as_str_tuple(raw.get("document_types")),
-                    "allow_tools": _as_str_tuple(raw.get("allow_tools") or "*"),
-                    "requires": _as_str_tuple(raw.get("requires")),
-                    "conflicts_with": _as_str_tuple(raw.get("conflicts_with")),
+                    "enabled": bool(setting("enabled", True)),
+                    "agents": _as_str_tuple(setting("agents")),
+                    "tasks": _as_str_tuple(setting("tasks")),
+                    "intents": _as_str_tuple(setting("intents")),
+                    "document_types": _as_str_tuple(setting("document_types")),
+                    "allow_tools": _as_str_tuple(allow_tools or "*"),
+                    "requires": _as_str_tuple(setting("requires")),
+                    "conflicts_with": _as_str_tuple(setting("conflicts_with")),
                     "instructions_file": _STANDARD_SKILL_FILE,
-                    "references": _as_str_tuple(raw.get("references")),
-                    "output_contract": str(raw.get("output_contract") or "text"),
+                    "references": _as_str_tuple(setting("references")),
+                    "output_contract": str(setting("output_contract") or "text"),
                     "budget": budget_raw,
                 }
             )
