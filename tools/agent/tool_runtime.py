@@ -523,6 +523,10 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
                 from tools.rolling_planning import rolling_plan_action
 
                 return rolling_plan_action(project_root, novel_id, args)
+            if operation == "manage_narrative_forecast":
+                from tools.narrative_forecast import narrative_forecast_action
+
+                return narrative_forecast_action(project_root, novel_id, args)
             if operation in {"manage_manuscript_versions", "manage_annotations"}:
                 from tools.manuscript_editing import manuscript_editing_action
 
@@ -564,6 +568,7 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
         except Exception as exc:
             from tools.chapter_run_v2 import ChapterRunV2Error
             from tools.manuscript_editing import ManuscriptEditingError
+            from tools.narrative_forecast import NarrativeForecastError
             from tools.rolling_planning import RollingPlanningError
 
             if isinstance(exc, ChapterRunV2Error):
@@ -575,6 +580,13 @@ def _application_executor(project_root: Path, operation: str) -> ToolExecutor:
                     "error": str(exc),
                 }
             if isinstance(exc, RollingPlanningError):
+                return {
+                    "ok": False,
+                    "blocked": exc.code.startswith("STALE_"),
+                    "code": exc.code,
+                    "error": str(exc),
+                }
+            if isinstance(exc, NarrativeForecastError):
                 return {
                     "ok": False,
                     "blocked": exc.code.startswith("STALE_"),
@@ -1041,6 +1053,7 @@ def build_tool_executors(project_root: Path) -> dict[str, ToolExecutor]:
         "cancel_chapter_run_v2",
         "diagnose_runtime",
         "manage_rolling_plan",
+        "manage_narrative_forecast",
         "manage_manuscript_versions",
         "manage_annotations",
         "get_runtime_state",

@@ -154,19 +154,51 @@ class WriterAgent(BaseAgent):
             target_words=target_words,
         )
 
+        messages = [
+            Message("system", system_prompt),
+            Message("user", user_prompt),
+        ]
         response = self.chat(
-            messages=[
-                Message("system", system_prompt),
-                Message("user", user_prompt),
-            ],
+            messages=messages,
             temperature=temperature,
             max_tokens=max(16384, target_words * 2),
         )
+        first_usage = response.usage if response.usage else {}
+        try:
+            return self._parse_creative_output(
+                response.content,
+                chapter_number,
+                first_usage,
+                target_words=target_words,
+            )
+        except Exception as exc:
+            from ..llm.response import ProviderResponseError
 
+            if not isinstance(exc, ProviderResponseError) or exc.code != (
+                "CHAPTER_LENGTH_OUT_OF_RANGE"
+            ):
+                raise
+
+        minimum_words = max(1, int(target_words * 0.8))
+        maximum_words = max(minimum_words, int(target_words * 1.2))
+        retry = self.chat(
+            messages=[
+                *messages,
+                Message("assistant", response.content),
+                Message(
+                    "user",
+                    "上一版正文长度不合格。请完整重写本章，保留既定情节、人物状态与章末悬念，"
+                    f"正文必须控制在 {minimum_words}-{maximum_words} 个中文字符内；"
+                    "不要解释修改过程，只输出章节标题和完整正文。",
+                ),
+            ],
+            temperature=max(0.2, temperature - 0.2),
+            max_tokens=max(16384, target_words * 2),
+        )
         return self._parse_creative_output(
-            response.content,
+            retry.content,
             chapter_number,
-            response.usage if response.usage else {},
+            self._merge_usage(first_usage, retry.usage if retry.usage else {}),
             target_words=target_words,
         )
 
@@ -510,19 +542,58 @@ chapter_summary: |
 
 请输出更新后的真相文件："""
 
-        response = self.chat(
-            messages=[
-                Message("system", system_prompt),
-                Message("user", user_prompt),
-            ],
-            temperature=0.3,
-            max_tokens=8192,
-        )
+        try:
+            response = self.chat(
+                messages=[
+                    Message("system", system_prompt),
+                    Message("user", user_prompt),
+                ],
+                temperature=0.3,
+                max_tokens=8192,
+            )
+            return self._parse_settlement(
+                response.content,
+                {**context, "chapter_number": chapter_number},
+                usage=response.usage or {},
+                observations=observations,
+            )
+        except Exception as exc:
+            from ..llm.response import ProviderResponseError
 
+            if not isinstance(exc, ProviderResponseError) or exc.code not in {
+                "MALFORMED_STRUCTURED_OUTPUT",
+                "MODEL_OUTPUT_TRUNCATED",
+            }:
+                raise
+
+        compact_prompt = f"""章节编号：ch_{chapter_number:03d}
+章节标题：{title}
+客观观察：
+{observations}
+
+只提取本章新增事实。不要复述正文，不要重写现有真相文件。"""
+        retry = self.chat(
+            messages=[
+                Message(
+                    "system",
+                    """你负责生成极简小说状态增量。只输出合法 YAML，不要代码围栏或解释。
+严格使用以下结构，省略没有变化的字段；每个字段不超过 120 个汉字：
+state_updates:
+  current_state: "本章新增客观事实"
+  ledger: "本章新增资源变化"
+  relationships: "本章新增关系变化"
+chapter_summary: "80-150字章节摘要"
+不得输出 state_delta、完整正文、旧状态、推理过程或其他字段。""",
+                ),
+                Message("user", compact_prompt),
+            ],
+            temperature=0.1,
+            max_tokens=4096,
+        )
         return self._parse_settlement(
-            response.content,
+            retry.content,
             {**context, "chapter_number": chapter_number},
-            usage=response.usage or {},
+            usage=retry.usage or {},
             observations=observations,
         )
 

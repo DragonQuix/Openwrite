@@ -19,6 +19,7 @@ def redact_sensitive_text(value: Any) -> str:
     text = str(value or "")
     patterns = (
         r"\bsk-[A-Za-z0-9_-]{8,}\b",
+        r"(?i)\bauthorization\s*[:=]\s*(?:bearer\s+)?[^\s,;\"']+",
         r"(?i)(api[_-]?key|authorization|bearer)(\s*[:=]\s*|\s+)[^\s,;]+",
         r"(?i)([?&](?:api[_-]?key|access_token|key)=)[^&\s]+",
     )

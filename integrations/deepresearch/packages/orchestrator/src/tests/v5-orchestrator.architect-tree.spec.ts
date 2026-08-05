@@ -302,6 +302,106 @@ describe("v5 Orchestrator", () => {
     expect(result.tasks.some((item) => /关键阶段与时间线|核心概念与理论表述/.test(item.title))).toBe(false);
   });
 
+  it("caps a narrow single-requirement task at three initial evidence leaves", async () => {
+    let architectPrompt = "";
+    const llm: LlmChat = {
+      name: "scripted-narrow-architect",
+      async chat(req) {
+        if (!req.user.includes("Output schema:") || !req.user.includes('"aspects"')) return { content: "{}" };
+        architectPrompt = req.user;
+        return { content: JSON.stringify({
+          aspects: [{
+            label: "悬疑剧情设计",
+            scopeNote: "整理可操作的悬疑剧情设计方法。",
+            requirementIds: ["R1"],
+            hypotheses: Array.from({ length: 7 }, (_, index) => ({
+              statement: `剧情设计角度 ${index + 1}`,
+              researchBrief: `研究剧情设计角度 ${index + 1}。`,
+              evidenceGuidance: "查找可靠的写作资料。",
+              requirementIds: ["R1"],
+            })),
+            tasks: Array.from({ length: 7 }, (_, index) => ({
+              title: `研究角度 ${index + 1}`,
+              objective: `核验并总结剧情设计角度 ${index + 1}。`,
+              acceptanceCriteria: ["提供有来源的可操作建议。"],
+            })),
+          }],
+        }) };
+      },
+    };
+    const ctx = createPhaseContext({
+      sessionId: "S_narrow_architect",
+      userInput: "帮我查查悬疑小说的写作剧情设计思路",
+      uiOptions: { outputLanguage: "zh-CN", citationRequired: true },
+    }, { now: fixedNow, llm });
+    ctx.state.episodeId = "EP_narrow_architect";
+    ctx.state.globalRubric = {
+      rubricId: "RB_narrow_architect",
+      episodeId: ctx.state.episodeId,
+      rubricText: "总结有依据、可操作的悬疑小说剧情设计方法。",
+      outputHints: { language: "zh-CN", citationRequired: true, format: "markdown" },
+      requirements: [requirement("R1", "总结悬疑小说剧情设计的可操作方法。", "question")],
+    };
+    await ctx.stack.kg.upsertReportNode(node({ nodeId: "R_root", nodeKind: "root", parentNodeId: null, label: "Root" }));
+
+    const result = await architectTreePhase(ctx);
+
+    expect(architectPrompt).toContain("at most 3 initial leaf sub-branches");
+    expect(result.reportNodes.filter((item) => item.nodeKind === "hypothesis")).toHaveLength(3);
+    expect(result.tasks).toHaveLength(3);
+  });
+
+  it("caps a short general question even when rubric generation expands it to four requirements", async () => {
+    let architectPrompt = "";
+    const requirementIds = ["OVERVIEW", "STRUCTURES", "TECHNIQUES", "EXPERT-ADVICE"];
+    const llm: LlmChat = {
+      name: "scripted-short-general-architect",
+      async chat(req) {
+        if (!req.user.includes("Output schema:") || !req.user.includes('"aspects"')) return { content: "{}" };
+        architectPrompt = req.user;
+        return { content: JSON.stringify({
+          aspects: requirementIds.map((requirementId, index) => ({
+            label: `角度 ${index + 1}`,
+            scopeNote: `研究角度 ${index + 1}。`,
+            requirementIds: [requirementId],
+            hypotheses: [{
+              statement: `剧情设计角度 ${index + 1}`,
+              researchBrief: `研究剧情设计角度 ${index + 1}。`,
+              evidenceGuidance: "查找可靠的写作资料。",
+              requirementIds: [requirementId],
+            }],
+            tasks: [{
+              title: `研究角度 ${index + 1}`,
+              objective: `核验并总结剧情设计角度 ${index + 1}。`,
+              acceptanceCriteria: ["提供有来源的可操作建议。"],
+            }],
+          })),
+        }) };
+      },
+    };
+    const ctx = createPhaseContext({
+      sessionId: "S_short_general_architect",
+      userInput: "帮我查查悬疑小说的写作剧情设计思路",
+      uiOptions: { outputLanguage: "zh-CN", citationRequired: true },
+    }, { now: fixedNow, llm });
+    ctx.state.episodeId = "EP_short_general_architect";
+    ctx.state.globalRubric = {
+      rubricId: "RB_short_general_architect",
+      episodeId: ctx.state.episodeId,
+      rubricText: "覆盖核心要素、叙事结构、悬念技巧和专家建议。",
+      outputHints: { language: "zh-CN", citationRequired: true, format: "markdown" },
+      requirements: requirementIds.map((id) => requirement(id, `${id} 对应的悬疑写作方法。`, "question")),
+    };
+    await ctx.stack.kg.upsertReportNode(node({ nodeId: "R_root", nodeKind: "root", parentNodeId: null, label: "Root" }));
+
+    const result = await architectTreePhase(ctx);
+
+    expect(architectPrompt).toContain("at most 3 initial leaf sub-branches");
+    expect(result.reportNodes.filter((item) => item.nodeKind === "hypothesis")).toHaveLength(3);
+    expect(result.tasks).toHaveLength(3);
+    expect(new Set(result.tasks.flatMap((task) => task.requirementIds ?? []))).toEqual(new Set(requirementIds));
+  });
+
   it("splits one requirement-dense leaf into focused research leaves", async () => {
     const runtimeProfile = loadDefaultRuntimeProfile();
     const llm: LlmChat = {

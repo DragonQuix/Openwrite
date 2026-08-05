@@ -128,8 +128,7 @@ export async function publishGatePhase(ctx: PhaseContext, draftPath: string, opt
     const blockingIssues = issues.filter((issue) => issue.severity === "error");
     const autoRevisionAttempts = opts.autoRevisionAttempts ?? 0;
     if (
-      opts.finalize
-      && autoRevisionAttempts < 2
+      autoRevisionAttempts < 2
       && blockingIssues.some(isWriterFixablePublishIssue)
       && blockingIssues.every((issue) => isWriterFixablePublishIssue(issue) || isAutomaticallySkippablePublishIssue(issue))
     ) {

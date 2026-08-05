@@ -9,7 +9,6 @@ from tools.agent.book_state import BookStage, BookStateStore
 from tools.agent.dante_actions import DanteActionAdapter
 from tools.agent.goethe_actions import GoethePlanningRuntime
 from tools.agent.orchestrator import OpenWriteOrchestrator, OrchestratorResult
-from tools.architect import FoundationResult
 from tools.story_planning import StoryPlanningStore
 
 
@@ -45,7 +44,10 @@ def _bootstrap_planning_project(tmp_path: Path) -> tuple[BookStateStore, StoryPl
         encoding="utf-8",
     )
     (novel_root / "src" / "world" / "terminology.md").write_text(
-        "# 术语表\n\n| 术语 | 定义 | 分类 |\n|------|------|------|\n| 测试术语 | 定义 | concept |\n",
+        "# 术语表\n\n"
+        "| 术语 | 定义 | 分类 |\n"
+        "|------|------|------|\n"
+        "| 测试术语 | 定义 | concept |\n",
         encoding="utf-8",
     )
     (novel_root / "src" / "story").mkdir(parents=True, exist_ok=True)
@@ -93,29 +95,20 @@ def test_foundation_draft_uses_canonical_context_without_regressing_stage(
     state.stage = BookStage.CHAPTER_PREFLIGHT
     state.pending_confirmation = "foundation"
     state_store.save(state)
-    captured: dict[str, str] = {}
-
     class FakeArchitect:
-        def generate_foundation(self, *, title: str, genre: str, brief: str):
-            captured.update(title=title, genre=genre, brief=brief)
-            return FoundationResult(
-                story_bible="# 背景草案\n\n保留归墟港。",
-                volume_outline="# 卷纲草案\n",
-                book_rules="# 规则草案\n",
-                current_state="# 当前状态\n",
-                foreshadowing_seed="",
-            )
+        def generate_foundation(self, **kwargs):
+            raise AssertionError("mature projects must not regenerate canonical foundations")
 
     runtime = GoethePlanningRuntime(tmp_path, "demo")
     runtime._architect = FakeArchitect()  # type: ignore[assignment]
 
     result = runtime.generate_foundation_draft("仅补全现有设定")
 
-    assert captured["genre"] == "unspecified"
-    assert "已经确认的正典资产" in captured["brief"]
-    assert "归墟港是前文明失败后的回收港" in captured["brief"]
-    assert "沈烬通过回响校勘改变历史变量" in captured["brief"]
     assert result["next_action"] == "review_foundation_draft"
+    assert result["warnings"] == ["mature_project_reused_canonical_foundation"]
+    assert "归墟港是前文明失败后的回收港" in result["story_bible"]
+    assert "沈烬通过回响校勘改变历史变量" in result["book_rules"]
+    assert "#### 第一章" in result["outline_seed"]
     assert result["foreshadowing_generated"] is False
     assert result["foreshadowing_path"] == ""
     persisted = state_store.load_or_create()
@@ -134,6 +127,41 @@ def test_character_request_parser_treats_chinese_semicolon_as_field_boundary(
 
     assert name == "链路审校员"
     assert role == "归墟档案室临时审校员"
+
+
+def test_source_extraction_accepts_inline_text_and_removes_temporary_file():
+    captured: dict[str, object] = {}
+
+    class FakeNovelService:
+        def extract_source(self, *, source_id: str, source_file: Path, focus: str):
+            captured.update(
+                source_id=source_id,
+                source_file=source_file,
+                focus=focus,
+                content=source_file.read_text(encoding="utf-8"),
+            )
+            return {"ok": True, "source_id": source_id}
+
+    runtime = object.__new__(GoethePlanningRuntime)
+    runtime.novel_service = FakeNovelService()  # type: ignore[assignment]
+
+    result = runtime.extract_style_source("inline_demo", "雨声敲在旧港的铜门上。")
+
+    assert result["ok"] is True
+    assert captured["source_id"] == "inline_demo"
+    assert captured["focus"] == "style"
+    assert captured["content"] == "雨声敲在旧港的铜门上。"
+    assert not Path(captured["source_file"]).exists()
+
+
+def test_source_extraction_reports_missing_explicit_file_path():
+    runtime = object.__new__(GoethePlanningRuntime)
+
+    result = runtime.extract_setting_source("missing_demo", "./missing-source.txt")
+
+    assert result["ok"] is False
+    assert result["error"] == "missing_source_file"
+    assert result["next_action"] == "provide_source_file"
 
 
 def test_dante_action_adapter_delegates_public_orchestrator_actions(tmp_path: Path):

@@ -224,6 +224,13 @@ def _init_project_impl(
 {title_line}style_id: {novel_id}
 current_arc: arc_001
 current_chapter: ch_001
+writing_targets:
+  book_words: 100000
+  chapter_words: 3000
+  outline_volume_words: 800
+  outline_act_words: 500
+  outline_section_words: 300
+  outline_chapter_words: 180
 """
         config_path.write_text(config_content, encoding="utf-8")
         print("✓ 创建配置: novel_config.yaml")

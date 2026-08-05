@@ -10,6 +10,7 @@
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -158,7 +159,13 @@ class ReActAgent:
         final_content = ""
         saw_tool_calls = False
         failed_tool_counts: dict[str, int] = {}
-        self._emit_activity("run_started", instruction_chars=len(instruction))
+        successful_tool_results: list[tuple[str, str]] = []
+        active_tools, requested_tool = self._tools_for_instruction(instruction)
+        self._emit_activity(
+            "run_started",
+            instruction_chars=len(instruction),
+            requested_tool=requested_tool,
+        )
 
         for turn in range(self.max_turns):
             logger.debug(f"Turn {turn + 1}/{self.max_turns}")
@@ -168,12 +175,13 @@ class ReActAgent:
                 max_turns=self.max_turns,
             )
 
-            response = self._chat_with_tools(messages)
+            response = self._chat_with_tools(messages, active_tools)
             self._emit_activity(
                 "model_completed",
                 turn=turn + 1,
                 tool_count=len(response.tool_calls or []),
                 has_content=bool(response.content),
+                message=(response.content or "") if response.tool_calls else "",
             )
 
             if response.tool_calls:
@@ -209,6 +217,7 @@ class ReActAgent:
                     turn=turn + 1,
                     tool=tc_name,
                     tool_call_id=tc_id,
+                    arguments=tc_args,
                 )
                 logger.debug(
                     "react.tool_call %s %s",
@@ -227,6 +236,7 @@ class ReActAgent:
                         self._execute_tool,
                         tc_name,
                         tc_args,
+                        active_tools,
                     )
                     on_tool_result and on_tool_result(tc_name, result)
                     logger.debug(
@@ -249,12 +259,26 @@ class ReActAgent:
                         tool_call_id=tc_id,
                         ok=not bool(failure_reason),
                         reason=failure_reason,
+                        result=result,
                     )
                     if failure_reason:
                         failed_tool_counts[tc_name] = (
                             failed_tool_counts.get(tc_name, 0) + 1
                         )
                         if failed_tool_counts[tc_name] >= self.max_tool_failures:
+                            partial_response = self._partial_success_response(
+                                successful_tool_results,
+                                failed_tool=tc_name,
+                                failure_reason=failure_reason,
+                                failure_count=failed_tool_counts[tc_name],
+                            )
+                            if partial_response:
+                                self._emit_activity(
+                                    "run_completed",
+                                    partial=True,
+                                    secondary_failure=tc_name,
+                                )
+                                return partial_response
                             logger.warning(
                                 "react.tool_failure_limit %s %s",
                                 tc_name,
@@ -282,6 +306,7 @@ class ReActAgent:
                             )
                     else:
                         failed_tool_counts.pop(tc_name, None)
+                        successful_tool_results.append((tc_name, result))
                     messages.append(
                         Message(
                             role="tool",
@@ -326,9 +351,23 @@ class ReActAgent:
                         tool_call_id=tc_id,
                         ok=False,
                         reason=failure_reason,
+                        result=error_result,
                     )
                     failed_tool_counts[tc_name] = failed_tool_counts.get(tc_name, 0) + 1
                     if failed_tool_counts[tc_name] >= self.max_tool_failures:
+                        partial_response = self._partial_success_response(
+                            successful_tool_results,
+                            failed_tool=tc_name,
+                            failure_reason=failure_reason,
+                            failure_count=failed_tool_counts[tc_name],
+                        )
+                        if partial_response:
+                            self._emit_activity(
+                                "run_completed",
+                                partial=True,
+                                secondary_failure=tc_name,
+                            )
+                            return partial_response
                         logger.warning(
                             "react.tool_failure_limit %s %s",
                             tc_name,
@@ -451,7 +490,11 @@ class ReActAgent:
                 normalized.append(Message("assistant", str(message)))
         return normalized
 
-    def _chat_with_tools(self, messages: list) -> Any:
+    def _chat_with_tools(
+        self,
+        messages: list,
+        tools: Sequence[ToolDefinition] | None = None,
+    ) -> Any:
         """调用 LLM（带工具）"""
 
         llm_tools = [
@@ -463,15 +506,23 @@ class ReActAgent:
                     "parameters": t.parameters,
                 },
             }
-            for t in self.tools
+            for t in (self.tools if tools is None else tools)
         ]
 
         return self.client.chat_with_tools(messages, llm_tools)
 
-    def _execute_tool(self, name: str, args: dict) -> str:
+    def _execute_tool(
+        self,
+        name: str,
+        args: dict,
+        tools: Sequence[ToolDefinition] | None = None,
+    ) -> str:
         """执行工具"""
         # 查找工具
-        tool = next((t for t in self.tools if t.name == name), None)
+        tool = next(
+            (t for t in (self.tools if tools is None else tools) if t.name == name),
+            None,
+        )
         if not tool:
             return json.dumps({"error": f"Unknown tool: {name}"})
 
@@ -486,6 +537,51 @@ class ReActAgent:
             return json.dumps(result) if isinstance(result, dict) else str(result)
 
         return json.dumps({"error": f"Tool '{name}' not implemented"})
+
+    def _tools_for_instruction(
+        self, instruction: str
+    ) -> tuple[list[ToolDefinition], str]:
+        patterns = (
+            r"(?:只|仅)(?:需|要|能)?(?:调用|使用)\s*(?:工具\s*)?[`\"']?"
+            r"([A-Za-z][A-Za-z0-9_]*)",
+            r"\b(?:only\s+call|call\s+only|only\s+use)\s+[`\"']?"
+            r"([A-Za-z][A-Za-z0-9_]*)",
+        )
+        requested = ""
+        for pattern in patterns:
+            match = re.search(pattern, str(instruction or ""), re.IGNORECASE)
+            if match:
+                requested = match.group(1)
+                break
+        if not requested:
+            return list(self.tools), ""
+        return [tool for tool in self.tools if tool.name == requested], requested
+
+    @staticmethod
+    def _partial_success_response(
+        successful_results: list[tuple[str, str]],
+        *,
+        failed_tool: str,
+        failure_reason: str,
+        failure_count: int,
+    ) -> str:
+        if not successful_results:
+            return ""
+        names = list(dict.fromkeys(name for name, _ in successful_results))
+        details: list[str] = []
+        remaining = 8000
+        for name, result in successful_results:
+            if remaining <= 0:
+                break
+            excerpt = str(result)[:remaining]
+            details.append(f"{name}: {excerpt}")
+            remaining -= len(excerpt)
+        return (
+            f"主操作 {'、'.join(names)} 已成功。之后的 {failed_tool} 连续失败 "
+            f"{failure_count} 次，我已停止后续调用；主操作结果不会回滚。"
+            f"最后原因：{failure_reason}\n\n已成功的工具结果：\n"
+            + "\n".join(details)
+        )
 
     def _register_tool_executors(self, executors: dict):
         """注册工具执行器
@@ -721,6 +817,150 @@ OPENWRITE_TOOLS = [
                 "window_size": {"type": "integer"},
                 "proposal": {"type": "string"},
                 "limit": {"type": "integer"},
+            },
+            "required": ["action"],
+        },
+        required=["action"],
+    ),
+    ToolDefinition(
+        name="manage_narrative_forecast",
+        description=(
+            "Goethe 专属的非正史剧情多线推演。list 返回可选大纲章节；create 必须传入"
+            "anchor_chapter_id，并固化围绕该章的正典上下文与推演 brief；"
+            "同一轮根据 brief 生成 2–5 个相互隔离的分支，再用 stage 写入结构化结果；"
+            "get/list 用于读取，select 只记录用户明确选择的分支，不修改大纲、正文或权威状态。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "create", "get", "stage", "select"],
+                },
+                "forecast_id": {"type": "string"},
+                "revision": {"type": "string"},
+                "divergence": {
+                    "type": "string",
+                    "description": "需要比较的开放剧情决策或分歧点",
+                },
+                "anchor_chapter_id": {
+                    "type": "string",
+                    "description": "分歧发生的大纲章节 ID；create 时必填，未明确时先让用户选择",
+                },
+                "branch_count": {"type": "integer", "minimum": 2, "maximum": 5},
+                "horizon": {"type": "integer", "minimum": 1, "maximum": 10},
+                "branch_id": {"type": "string", "description": "用户明确选择的分支 ID"},
+                "limit": {"type": "integer"},
+                "branches": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 5,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "premise": {"type": "string"},
+                            "beats": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "offset": {
+                                            "type": "integer",
+                                            "minimum": 1,
+                                            "maximum": 10,
+                                        },
+                                        "chapter_id": {"type": "string"},
+                                        "summary": {"type": "string"},
+                                    },
+                                    "required": ["offset", "summary"],
+                                },
+                            },
+                            "character_decisions": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "character": {"type": "string"},
+                                        "decision": {"type": "string"},
+                                    },
+                                    "required": ["character", "decision"],
+                                },
+                            },
+                            "projected_changes": {
+                                "type": "object",
+                                "properties": {
+                                    "characters": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "relationships": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "world": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "foreshadowing": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                },
+                                "required": [
+                                    "characters",
+                                    "relationships",
+                                    "world",
+                                    "foreshadowing",
+                                ],
+                            },
+                            "risks": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "kind": {
+                                            "type": "string",
+                                            "enum": [
+                                                "continuity",
+                                                "causality",
+                                                "character",
+                                            ],
+                                        },
+                                        "description": {"type": "string"},
+                                    },
+                                    "required": ["kind", "description"],
+                                },
+                            },
+                            "uncertainties": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "intent_alignment": {
+                                "type": "object",
+                                "properties": {
+                                    "score": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 100,
+                                    },
+                                    "rationale": {"type": "string"},
+                                },
+                                "required": ["score", "rationale"],
+                            },
+                        },
+                        "required": [
+                            "title",
+                            "premise",
+                            "beats",
+                            "character_decisions",
+                            "projected_changes",
+                            "risks",
+                            "uncertainties",
+                            "intent_alignment",
+                        ],
+                    },
+                },
             },
             "required": ["action"],
         },

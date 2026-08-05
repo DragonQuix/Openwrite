@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_FIXTURE_ROOT = REPO_ROOT / "reference" / "my_novel"
+DEFAULT_FIXTURE_ROOT = Path.home() / "my_novel"
 TIER_RANK = {"smoke": 1, "agent": 2, "full": 3}
 
 

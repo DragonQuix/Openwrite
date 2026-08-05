@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>OpenWrite Studio</title>
   <link rel="stylesheet" href="/vendor/vditor/dist/index.css">
-  <link rel="stylesheet" href="/styles.css?v=outline-7">
+  <link rel="stylesheet" href="/styles.css?v=agent-activity-1">
 </head>
 <body>
   <svg class="icon-sprite" aria-hidden="true">
@@ -49,6 +49,7 @@
         <span id="save-state" class="save-state" aria-live="polite">已保存</span>
         <button id="inspector-toggle" class="quiet-button mobile-only" type="button" aria-expanded="false" aria-label="打开创作助手"><svg class="mobile-compact-icon" aria-hidden="true"><use href="#icon-assistant"/></svg><span class="mobile-compact-label">助手</span></button>
         <button id="project-settings-open" class="quiet-button" type="button" aria-haspopup="dialog" aria-label="打开作品设置"><svg class="mobile-compact-icon" aria-hidden="true"><use href="#icon-settings"/></svg><span class="mobile-compact-label">作品</span></button>
+        <button id="writing-targets-open" class="quiet-button writing-targets-button" type="button" aria-haspopup="dialog" aria-label="打开字数规划" title="字数规划"><svg class="mobile-compact-icon" aria-hidden="true"><use href="#icon-outline"/></svg><span class="mobile-compact-label">字数规划</span></button>
         <button id="task-center-open" class="task-center-button" type="button" aria-haspopup="dialog" aria-label="任务中心">
           <span aria-hidden="true">↻</span><span id="task-active-count">0</span>
         </button>
@@ -470,6 +471,24 @@
               <div id="chat-log" class="chat-log" aria-live="polite">
                 <article class="chat-message assistant"><strong>OpenWrite</strong><p>选择 Agent 后直接描述目标。规划阶段先找 Goethe，已有可写大纲时切换到 Dante。</p></article>
               </div>
+              <template id="agent-activity-template">
+                <article class="agent-activity" aria-live="polite">
+                  <details class="agent-activity-disclosure" open>
+                    <summary class="agent-activity-head">
+                      <span class="agent-activity-pulse" aria-hidden="true"></span>
+                      <span class="agent-activity-summary-copy">
+                        <strong class="agent-activity-title">Agent 正在工作</strong>
+                        <span class="agent-activity-meta"><span class="agent-activity-count">正在连接</span><span aria-hidden="true">·</span><time class="agent-activity-elapsed">00:00</time></span>
+                      </span>
+                      <svg class="agent-activity-chevron" aria-hidden="true"><use href="#icon-chevron-right"/></svg>
+                    </summary>
+                    <div class="agent-activity-body">
+                      <p class="agent-activity-note"></p>
+                      <ol class="agent-activity-events"></ol>
+                    </div>
+                  </details>
+                </article>
+              </template>
               <form id="chat-form" class="chat-composer">
                 <label for="chat-input">本轮目标</label>
                 <textarea id="chat-input" rows="4" maxlength="12000" placeholder="例如：检查现有资产，帮我把第一篇推进到可写状态。" required></textarea>
@@ -489,12 +508,7 @@
               <h1 id="continuity-title">连续性控制台</h1>
               <p class="section-description">查看真相文件、伏笔与章节 workflow。这里展示运行态，不替代 `src/` 中的人工确认真源。</p>
             </div>
-            <button id="continuity-refresh" class="quiet-button" type="button">刷新</button>
-          </div>
-          <div class="truth-grid">
-            <article class="tool-card"><h2>当前状态</h2><pre id="truth-current">载入中…</pre></article>
-            <article class="tool-card"><h2>资源账本</h2><pre id="truth-ledger">载入中…</pre></article>
-            <article class="tool-card"><h2>人物关系</h2><pre id="truth-relationships">载入中…</pre></article>
+            <button id="continuity-refresh" class="icon-button" type="button" aria-label="刷新连续性" title="刷新连续性"><svg><use href="#icon-refresh"/></svg></button>
           </div>
           <section class="tool-card relationship-card" aria-labelledby="relationship-title">
             <div class="relationship-heading">
@@ -560,6 +574,11 @@
               </aside>
             </div>
           </section>
+          <div class="truth-grid">
+            <article class="tool-card"><h2>当前状态</h2><pre id="truth-current">载入中…</pre></article>
+            <article class="tool-card"><h2>资源账本</h2><pre id="truth-ledger">载入中…</pre></article>
+            <article class="tool-card"><h2>人物关系</h2><pre id="truth-relationships">载入中…</pre></article>
+          </div>
           <div class="continuity-grid">
             <section class="tool-card">
               <div class="subsection-heading"><h2>待处理伏笔</h2><span id="foreshadow-count">0</span></div>
@@ -775,80 +794,239 @@
         </section>
 
         <section id="tools-view" class="workspace-view" hidden aria-labelledby="tools-title">
-          <div class="section-title-row workspace-view-header">
+          <div class="section-title-row workspace-view-header tools-view-header">
             <div>
               <p class="eyebrow">OPERATIONS</p>
               <h1 id="tools-title">高级工具</h1>
+              <p class="workspace-view-summary">集中处理项目维护、上下文核对和规划干预。每项工具都会标明读写影响。</p>
             </div>
           </div>
           <div class="tool-grid">
-            <section class="tool-card">
-              <h2>项目检查与同步</h2>
-              <div id="diagnostic-list" class="operation-list"></div>
-              <button id="sync-project" class="primary-button" type="button">同步 src → data</button>
-              <p id="sync-status" class="form-status" role="status"></p>
-            </section>
-            <section class="tool-card">
-              <h2>检查章节上下文</h2>
-              <form id="context-form" class="compact-form">
-                <label for="context-chapter">章节 ID</label>
-                <input id="context-chapter" value="next" placeholder="next 或 ch_001">
-                <button class="quiet-button" type="submit">组装 canonical packet</button>
-              </form>
-              <p id="context-meta" class="form-status"></p>
-              <pre id="context-preview" class="context-preview">尚未组装</pre>
-            </section>
-            <section class="tool-card">
-              <h2>新建小说资产</h2>
-              <form id="create-document-form" class="compact-form">
-                <label for="create-kind">文档类型</label>
-                <select id="create-kind"><option value="character">人物档案</option><option value="world">世界设定</option></select>
-                <label for="create-name">名称</label>
-                <input id="create-name" maxlength="80" required>
-                <label for="create-description">一句话说明</label>
-                <textarea id="create-description" rows="3"></textarea>
-                <button class="primary-button" type="submit">创建并打开</button>
-              </form>
-              <p id="create-status" class="form-status" role="status"></p>
-            </section>
-            <section class="tool-card tool-card-wide">
-              <div class="subsection-heading"><h2>章节运行与干预</h2><span id="chapter-run-count">0</span></div>
-              <div class="form-grid two">
-                <label>最近运行<select id="chapter-run-select"><option value="">暂无运行</option></select></label>
-                <label>风险<select id="chapter-run-risk"><option value="low">低</option><option value="medium" selected>中</option><option value="high">高</option><option value="blocker">阻塞</option></select></label>
-              </div>
-              <pre id="chapter-run-report" class="context-preview">写作或审稿后可在这里查看八阶段状态</pre>
-              <form id="chapter-intervention-form" class="compact-form">
-                <div class="form-grid two">
-                  <label>作用域<select id="chapter-intervention-scope"><option value="chapter">当前章</option><option value="arc">当前弧</option><option value="project">全书</option><option value="asset">资产</option></select></label>
-                  <label class="check-row"><input id="chapter-intervention-rewrite" type="checkbox">需要重写</label>
+            <section class="tool-card tool-card-compact" aria-labelledby="tool-sync-title">
+              <div class="tool-card-header">
+                <div class="tool-card-heading">
+                  <span class="tool-card-icon" aria-hidden="true"><svg><use href="#icon-refresh"/></svg></span>
+                  <div>
+                    <p class="tool-card-kicker">项目维护 · 会写入同步结果</p>
+                    <h2 id="tool-sync-title">项目检查与同步</h2>
+                    <p class="tool-card-summary">核对项目状态，把源资料更新到运行数据。</p>
+                  </div>
                 </div>
-                <label>方向调整<textarea id="chapter-intervention-request" rows="3" maxlength="10000" required></textarea></label>
-                <button class="quiet-button" type="submit">记录干预</button>
-              </form>
-              <div class="form-grid two">
-                <label>待处理干预<select id="chapter-intervention-select"><option value="">暂无干预</option></select></label>
-                <label>下一状态<select id="chapter-intervention-state"><option value="facts_read">已读取事实</option><option value="classified">已分类影响</option><option value="proposed">已生成提案</option><option value="awaiting_confirmation">等待确认</option><option value="confirmed">确认提案</option><option value="applied">确认应用</option><option value="rejected">拒绝</option></select></label>
+                <button class="tool-help-button" type="button" data-tool-help aria-expanded="false" aria-controls="tool-sync-help" aria-label="说明：项目检查与同步" title="查看工具说明"><span aria-hidden="true">!</span></button>
               </div>
-              <label>提案或影响说明<textarea id="chapter-intervention-proposal" rows="3"></textarea></label>
-              <div class="row-actions">
-                <button id="chapter-intervention-advance" class="primary-button" type="button">推进干预</button>
-                <button id="chapter-run-refresh" class="quiet-button" type="button">刷新运行</button>
+              <div id="tool-sync-help" class="tool-help-panel" hidden>
+                <strong>什么时候使用</strong>
+                <p>直接修改过 src 中的大纲或人物资料后，用它检查差异并同步到 data。</p>
+                <p class="tool-help-note"><span>影响</span>执行同步会更新项目运行数据，请先确认诊断结果。</p>
               </div>
-              <p id="chapter-run-status" class="form-status" role="status"></p>
+              <div class="tool-card-body">
+                <div id="diagnostic-list" class="operation-list"></div>
+                <button id="sync-project" class="primary-button" type="button">同步 src → data</button>
+                <p id="sync-status" class="form-status" role="status"></p>
+              </div>
             </section>
-            <section class="tool-card tool-card-wide">
-              <div class="subsection-heading"><h2>滚动规划</h2><span id="rolling-plan-count">0</span></div>
-              <div class="form-grid two">
-                <label>规划候选<select id="rolling-plan-select"><option value="">暂无候选</option></select></label>
-                <label>近期窗口<input id="rolling-plan-window" type="number" min="1" max="20" value="5"></label>
+            <section class="tool-card tool-card-compact" aria-labelledby="tool-context-title">
+              <div class="tool-card-header">
+                <div class="tool-card-heading">
+                  <span class="tool-card-icon" aria-hidden="true"><svg><use href="#icon-eye"/></svg></span>
+                  <div>
+                    <p class="tool-card-kicker">上下文核对 · 只读</p>
+                    <h2 id="tool-context-title">检查章节上下文</h2>
+                    <p class="tool-card-summary">查看某章实际会交给模型的 canonical packet。</p>
+                  </div>
+                </div>
+                <button class="tool-help-button" type="button" data-tool-help aria-expanded="false" aria-controls="tool-context-help" aria-label="说明：检查章节上下文" title="查看工具说明"><span aria-hidden="true">!</span></button>
               </div>
-              <pre id="rolling-plan-report" class="context-preview">生成候选后可交给 Goethe 形成待确认大纲草案</pre>
-              <div class="row-actions">
-                <button id="rolling-plan-create" class="quiet-button" type="button">生成候选</button>
-                <button id="rolling-plan-goethe" class="primary-button" type="button" disabled>交给 Goethe</button>
+              <div id="tool-context-help" class="tool-help-panel" hidden>
+                <strong>什么时候使用</strong>
+                <p>写作前核对模型能看到的大纲、人物、设定和近期正文，排查上下文缺失。</p>
+                <p class="tool-help-note"><span>输入</span>使用 next 检查下一章，或填写 ch_001 这类章节 ID。</p>
               </div>
-              <p id="rolling-plan-status" class="form-status" role="status"></p>
+              <div class="tool-card-body">
+                <form id="context-form" class="compact-form">
+                  <label for="context-chapter">章节 ID</label>
+                  <input id="context-chapter" value="next" placeholder="next 或 ch_001">
+                  <button class="quiet-button" type="submit">组装 canonical packet</button>
+                </form>
+                <p id="context-meta" class="form-status"></p>
+                <pre id="context-preview" class="context-preview">尚未组装</pre>
+              </div>
+            </section>
+            <section class="tool-card tool-card-compact" aria-labelledby="tool-asset-title">
+              <div class="tool-card-header">
+                <div class="tool-card-heading">
+                  <span class="tool-card-icon" aria-hidden="true"><svg><use href="#icon-file"/></svg></span>
+                  <div>
+                    <p class="tool-card-kicker">资料创建 · 会新建文件</p>
+                    <h2 id="tool-asset-title">新建小说资产</h2>
+                    <p class="tool-card-summary">快速建立人物档案或世界设定并进入编辑。</p>
+                  </div>
+                </div>
+                <button class="tool-help-button" type="button" data-tool-help aria-expanded="false" aria-controls="tool-asset-help" aria-label="说明：新建小说资产" title="查看工具说明"><span aria-hidden="true">!</span></button>
+              </div>
+              <div id="tool-asset-help" class="tool-help-panel" hidden>
+                <strong>什么时候使用</strong>
+                <p>故事里出现需要长期维护的新人物或设定时，先创建结构化资料再补充细节。</p>
+                <p class="tool-help-note"><span>影响</span>提交后会在当前项目中新建资产并立即打开。</p>
+              </div>
+              <div class="tool-card-body">
+                <form id="create-document-form" class="compact-form">
+                  <label for="create-kind">文档类型</label>
+                  <select id="create-kind"><option value="character">人物档案</option><option value="world">世界设定</option></select>
+                  <label for="create-name">名称</label>
+                  <input id="create-name" maxlength="80" required>
+                  <label for="create-description">一句话说明</label>
+                  <textarea id="create-description" rows="3"></textarea>
+                  <button class="primary-button" type="submit">创建并打开</button>
+                </form>
+                <p id="create-status" class="form-status" role="status"></p>
+              </div>
+            </section>
+            <section class="tool-card tool-card-wide" aria-labelledby="tool-run-title">
+              <div class="tool-card-header">
+                <div class="tool-card-heading">
+                  <span class="tool-card-icon" aria-hidden="true"><svg><use href="#icon-tasks"/></svg></span>
+                  <div>
+                    <p class="tool-card-kicker">流程控制 · 会写入干预记录</p>
+                    <h2 id="tool-run-title">章节运行与干预</h2>
+                    <p class="tool-card-summary">查看写作流水线，在事实核对后记录并推进方向调整。</p>
+                  </div>
+                </div>
+                <div class="tool-card-header-actions">
+                  <span class="tool-card-metric"><span>运行</span><strong id="chapter-run-count">0</strong></span>
+                  <button class="tool-help-button" type="button" data-tool-help aria-expanded="false" aria-controls="tool-run-help" aria-label="说明：章节运行与干预" title="查看工具说明"><span aria-hidden="true">!</span></button>
+                </div>
+              </div>
+              <div id="tool-run-help" class="tool-help-panel" hidden>
+                <strong>什么时候使用</strong>
+                <p>章节写作或审稿后，先查看八阶段运行状态；需要改变方向时再登记干预并逐步确认。</p>
+                <p class="tool-help-note"><span>注意</span>“推进干预”会改变干预状态，应用前应核对作用域、风险和提案。</p>
+              </div>
+              <div class="tool-card-body tool-workflow">
+                <section class="tool-workflow-section" aria-labelledby="tool-run-step-1">
+                  <div class="tool-workflow-heading"><span>1</span><strong id="tool-run-step-1">查看最近运行</strong></div>
+                  <div class="form-grid two">
+                    <label>最近运行<select id="chapter-run-select"><option value="">暂无运行</option></select></label>
+                    <label>风险<select id="chapter-run-risk"><option value="low">低</option><option value="medium" selected>中</option><option value="high">高</option><option value="blocker">阻塞</option></select></label>
+                  </div>
+                  <pre id="chapter-run-report" class="context-preview">写作或审稿后可在这里查看八阶段状态</pre>
+                </section>
+                <section class="tool-workflow-section" aria-labelledby="tool-run-step-2">
+                  <div class="tool-workflow-heading"><span>2</span><strong id="tool-run-step-2">记录方向调整</strong></div>
+                  <form id="chapter-intervention-form" class="compact-form">
+                    <div class="form-grid two">
+                      <label>作用域<select id="chapter-intervention-scope"><option value="chapter">当前章</option><option value="arc">当前弧</option><option value="project">全书</option><option value="asset">资产</option></select></label>
+                      <label class="check-row"><input id="chapter-intervention-rewrite" type="checkbox">需要重写</label>
+                    </div>
+                    <label>方向调整<textarea id="chapter-intervention-request" rows="3" maxlength="10000" required></textarea></label>
+                    <button class="quiet-button" type="submit">记录干预</button>
+                  </form>
+                </section>
+                <section class="tool-workflow-section" aria-labelledby="tool-run-step-3">
+                  <div class="tool-workflow-heading"><span>3</span><strong id="tool-run-step-3">核对提案并推进</strong></div>
+                  <div class="form-grid two">
+                    <label>待处理干预<select id="chapter-intervention-select"><option value="">暂无干预</option></select></label>
+                    <label>下一状态<select id="chapter-intervention-state"><option value="facts_read">已读取事实</option><option value="classified">已分类影响</option><option value="proposed">已生成提案</option><option value="awaiting_confirmation">等待确认</option><option value="confirmed">确认提案</option><option value="applied">确认应用</option><option value="rejected">拒绝</option></select></label>
+                  </div>
+                  <label>提案或影响说明<textarea id="chapter-intervention-proposal" rows="3"></textarea></label>
+                  <div class="row-actions">
+                    <button id="chapter-intervention-advance" class="primary-button" type="button">推进干预</button>
+                    <button id="chapter-run-refresh" class="quiet-button" type="button">刷新运行</button>
+                  </div>
+                </section>
+                <p id="chapter-run-status" class="form-status" role="status"></p>
+              </div>
+            </section>
+            <section class="tool-card tool-card-wide" aria-labelledby="tool-plan-title">
+              <div class="tool-card-header">
+                <div class="tool-card-heading">
+                  <span class="tool-card-icon" aria-hidden="true"><svg><use href="#icon-outline"/></svg></span>
+                  <div>
+                    <p class="tool-card-kicker">规划辅助 · 候选不直接改大纲</p>
+                    <h2 id="tool-plan-title">滚动规划</h2>
+                    <p class="tool-card-summary">根据近期章节生成规划候选，再交给 Goethe 形成待确认草案。</p>
+                  </div>
+                </div>
+                <div class="tool-card-header-actions">
+                  <span class="tool-card-metric"><span>候选</span><strong id="rolling-plan-count">0</strong></span>
+                  <button class="tool-help-button" type="button" data-tool-help aria-expanded="false" aria-controls="tool-plan-help" aria-label="说明：滚动规划" title="查看工具说明"><span aria-hidden="true">!</span></button>
+                </div>
+              </div>
+              <div id="tool-plan-help" class="tool-help-panel" hidden>
+                <strong>什么时候使用</strong>
+                <p>正文推进后需要重新评估接下来几章时，先生成候选，再选择是否交给 Goethe 细化。</p>
+                <p class="tool-help-note"><span>安全边界</span>生成候选不会修改 canonical 大纲，后续仍需明确确认。</p>
+              </div>
+              <div class="tool-card-body">
+                <div class="form-grid two">
+                  <label>规划候选<select id="rolling-plan-select"><option value="">暂无候选</option></select></label>
+                  <label>近期窗口<input id="rolling-plan-window" type="number" min="1" max="20" value="5"></label>
+                </div>
+                <pre id="rolling-plan-report" class="context-preview">生成候选后可交给 Goethe 形成待确认大纲草案</pre>
+                <div class="row-actions">
+                  <button id="rolling-plan-create" class="quiet-button" type="button">生成候选</button>
+                  <button id="rolling-plan-goethe" class="primary-button" type="button" disabled>交给 Goethe</button>
+                </div>
+                <p id="rolling-plan-status" class="form-status" role="status"></p>
+              </div>
+            </section>
+            <section class="tool-card tool-card-wide narrative-forecast-tool" aria-labelledby="narrative-forecast-title">
+              <div class="tool-card-header">
+                <div class="tool-card-heading">
+                  <span class="tool-card-icon" aria-hidden="true"><svg><use href="#icon-sparkles"/></svg></span>
+                  <div>
+                    <p class="tool-card-kicker">Goethe 推演 · 候选不直接改大纲</p>
+                    <h2 id="narrative-forecast-title">剧情多线推演</h2>
+                    <p class="tool-card-summary">围绕一个分歧点比较多条剧情路径，选择后再进入规划。</p>
+                  </div>
+                </div>
+                <div class="tool-card-header-actions">
+                  <span class="tool-card-metric"><span>推演</span><strong id="narrative-forecast-count">0</strong></span>
+                  <button class="tool-help-button" type="button" data-tool-help aria-expanded="false" aria-controls="tool-forecast-help" aria-label="说明：剧情多线推演" title="查看工具说明"><span aria-hidden="true">!</span></button>
+                </div>
+              </div>
+              <div id="tool-forecast-help" class="tool-help-panel" hidden>
+                <strong>什么时候使用</strong>
+                <p>面对关键选择且难以判断长期影响时，用 2–5 个分支比较节奏、角色弧和设定代价。</p>
+                <p class="tool-help-note"><span>安全边界</span>选中分支只记录规划偏好，不会直接改写 canonical 大纲或正文。</p>
+              </div>
+              <div class="tool-card-body">
+                <div class="narrative-forecast-controls">
+                  <label class="narrative-forecast-divergence" for="narrative-forecast-divergence">分歧点<textarea id="narrative-forecast-divergence" rows="3" maxlength="4000" placeholder="例如：主角接受合作，还是公开拒绝并独自调查？"></textarea></label>
+                  <div class="narrative-forecast-settings">
+                    <label for="narrative-forecast-anchor">大纲锚点<select id="narrative-forecast-anchor" required><option value="">请先选择章节</option></select></label>
+                    <div class="form-grid two narrative-forecast-options">
+                      <label for="narrative-forecast-branch-count">分支数<input id="narrative-forecast-branch-count" type="number" min="2" max="5" step="1" value="3"></label>
+                      <label for="narrative-forecast-horizon">推演跨度<input id="narrative-forecast-horizon" type="number" min="1" max="10" step="1" value="5"></label>
+                    </div>
+                  </div>
+                </div>
+                <div class="row-actions narrative-forecast-actions">
+                  <button id="narrative-forecast-create" class="primary-button" type="button">交给 Goethe 推演</button>
+                  <button id="narrative-forecast-refresh" class="quiet-button" type="button"><svg aria-hidden="true"><use href="#icon-refresh"/></svg><span>刷新结果</span></button>
+                </div>
+                <p id="narrative-forecast-status" class="form-status" role="status" aria-live="polite"></p>
+                <div class="narrative-forecast-history">
+                  <label for="narrative-forecast-select">历史推演</label>
+                  <select id="narrative-forecast-select"><option value="">暂无推演</option></select>
+                </div>
+                <div id="narrative-forecast-result" class="narrative-forecast-result" hidden>
+                  <div class="narrative-forecast-summary">
+                    <div>
+                      <span id="narrative-forecast-state" class="status-badge">候选</span>
+                      <strong id="narrative-forecast-question"></strong>
+                    </div>
+                    <span id="narrative-forecast-meta"></span>
+                  </div>
+                  <div id="narrative-forecast-comparison" class="narrative-forecast-comparison"></div>
+                  <div id="narrative-forecast-tabs" class="segmented narrative-forecast-tabs" role="tablist" aria-label="推演分支"></div>
+                  <section id="narrative-forecast-detail" class="narrative-forecast-detail" aria-live="polite"></section>
+                  <div class="row-actions narrative-forecast-selection-actions">
+                    <button id="narrative-forecast-select-branch" class="primary-button" type="button" disabled>选为规划分支</button>
+                    <button id="narrative-forecast-continue" class="quiet-button" type="button" disabled>交给 Goethe 继续规划</button>
+                  </div>
+                </div>
+              </div>
             </section>
           </div>
         </section>
@@ -872,23 +1050,6 @@
           <button class="segment" type="button" role="tab" aria-selected="false" data-inspector-tab="review">审稿</button>
           <button class="segment" type="button" role="tab" aria-selected="false" data-inspector-tab="revisions">修订</button>
         </div>
-        <section id="agent-activity" class="agent-activity" aria-live="polite" hidden>
-          <div class="agent-activity-head">
-            <span class="agent-activity-pulse" aria-hidden="true"></span>
-            <div>
-              <p class="eyebrow">AI WORKING</p>
-              <h3 id="agent-activity-title">Goethe 正在工作</h3>
-            </div>
-            <strong id="agent-activity-elapsed">00:00</strong>
-          </div>
-          <ol id="agent-activity-steps" class="agent-activity-steps">
-            <li data-agent-step="0">读取项目上下文</li>
-            <li data-agent-step="1">分析本轮目标</li>
-            <li data-agent-step="2">调用工具或校验资产</li>
-            <li data-agent-step="3">整理回复与历史</li>
-          </ol>
-          <p id="agent-activity-note">保持此页打开，完成后会自动写入当前会话。</p>
-        </section>
         <div class="inspector-pane" data-inspector-pane="assistant">
           <div class="assistant-quick-actions" aria-label="Dante 快捷操作">
             <button type="button" data-assistant-prompt="分析当前选区的叙事作用、节奏和潜在问题，先给建议，不直接修改。">分析选区</button>
@@ -1204,6 +1365,58 @@
     </form>
   </dialog>
 
+  <dialog id="writing-targets-dialog" class="write-dialog writing-targets-dialog">
+    <form id="writing-targets-form">
+      <div class="dialog-header">
+        <div>
+          <p class="eyebrow">LENGTH PLAN</p>
+          <h2>字数规划</h2>
+        </div>
+        <button id="writing-targets-close" class="icon-button" type="button" aria-label="关闭">×</button>
+      </div>
+      <section class="writing-target-section" aria-labelledby="writing-target-body-title">
+        <div class="writing-target-section-heading">
+          <h3 id="writing-target-body-title">正文规模</h3>
+          <span>用于进度与章节写作</span>
+        </div>
+        <div class="writing-target-grid">
+          <label for="writing-target-book">全书目标字数
+            <span class="number-unit-field"><input id="writing-target-book" type="number" min="10000" max="5000000" step="10000" required inputmode="numeric"><span>字</span></span>
+          </label>
+          <label for="writing-target-chapter">每章正文默认
+            <span class="number-unit-field"><input id="writing-target-chapter" type="number" min="200" max="12000" step="100" required inputmode="numeric"><span>字</span></span>
+          </label>
+        </div>
+      </section>
+      <section class="writing-target-section" aria-labelledby="writing-target-outline-title">
+        <div class="writing-target-section-heading">
+          <h3 id="writing-target-outline-title">大纲详略</h3>
+          <span>各层节点的说明目标</span>
+        </div>
+        <div class="writing-target-grid outline-target-grid">
+          <label for="writing-target-volume">每卷
+            <span class="number-unit-field"><input id="writing-target-volume" type="number" min="100" max="5000" step="10" required inputmode="numeric"><span>字</span></span>
+          </label>
+          <label for="writing-target-act">每幕
+            <span class="number-unit-field"><input id="writing-target-act" type="number" min="80" max="3000" step="10" required inputmode="numeric"><span>字</span></span>
+          </label>
+          <label for="writing-target-section">每节
+            <span class="number-unit-field"><input id="writing-target-section" type="number" min="50" max="2000" step="10" required inputmode="numeric"><span>字</span></span>
+          </label>
+          <label for="writing-target-outline-chapter">每个章纲
+            <span class="number-unit-field"><input id="writing-target-outline-chapter" type="number" min="30" max="1000" step="10" required inputmode="numeric"><span>字</span></span>
+          </label>
+        </div>
+      </section>
+      <p class="writing-target-priority"><strong>正文目标优先级</strong><span>章纲内明确的“预估字数”优先于每章默认值。</span></p>
+      <div class="dialog-actions">
+        <button id="writing-targets-cancel" class="quiet-button" type="button">取消</button>
+        <button id="writing-targets-submit" class="primary-button" type="submit">保存规划</button>
+      </div>
+      <p id="writing-targets-status" class="write-progress" role="status" aria-live="polite"></p>
+    </form>
+  </dialog>
+
   <dialog id="review-dialog" class="write-dialog review-dialog">
     <div class="review-dialog-content">
       <div class="dialog-header">
@@ -1422,6 +1635,6 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script id="openwrite-vditor-icons" src="/vendor/vditor/dist/js/icons/ant.js"></script>
   <script src="/vendor/vditor/dist/index.min.js"></script>
-  <script type="module" src="/app.js?v=chapter-delete-1"></script>
+  <script type="module" src="/app.js?v=agent-activity-1"></script>
 </body>
 </html>

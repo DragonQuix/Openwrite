@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { LlmChat, SearchProvider } from "@deepresearch/contracts";
 import { EchoJsonLlm } from "../infra/mock-llm.js";
 import { buildResearchRuntimeProfile, createResearchFetchFromEnv, createResearchLlmFromEnv, createResearchReviewLlmFromEnv, createResearchSearchFromEnv, runResearch, streamResearch, type ResearchStreamFrame, type ResearchStreamMessage } from "../index.js";
+import { acceptBingResearchResults } from "../research-api.js";
 
 describe("runResearch backend API", () => {
   const dirs: string[] = [];
@@ -232,6 +233,29 @@ describe("runResearch backend API", () => {
     expect(profile.phases.completionGate?.maxCycles).toBe(0);
   });
 
+  it("loads bounded scout and evidence defaults from the shipped runtime config", () => {
+    const profile = buildResearchRuntimeProfile({});
+
+    expect(profile.phases.scout).toMatchObject({
+      maxReactSteps: 24,
+      maxSearchCalls: 8,
+      maxFetchCalls: 8,
+      contextTokenLimit: 24_000,
+      maxOutputItems: 6,
+    });
+    expect(profile.agents.evidence).toMatchObject({
+      targetReactSteps: 12,
+      maxReactSteps: 24,
+      targetToolCalls: 11,
+      maxToolCalls: 23,
+      targetSearchCalls: 4,
+      maxSearchCalls: 8,
+      targetFetchCalls: 4,
+      maxFetchCalls: 8,
+    });
+    expect(profile.phases.completionGate?.maxCycles).toBe(1);
+  });
+
   it("bounds evidence tool and search calls when a small step target overrides the default profile", () => {
     const profile = buildResearchRuntimeProfile({
       evidenceTargetSteps: 8,
@@ -344,6 +368,33 @@ describe("runResearch backend API", () => {
     const artifactDir = await mkdtemp(join(tmpdir(), "dr-api-env-bing-"));
     dirs.push(artifactDir);
     expect(createResearchSearchFromEnv({ BING_MARKET: "en-US" }, "bing", artifactDir)?.name).toBe("bing-html");
+  });
+
+  it("keeps Bing first and uses configured Jina only as a weak-result fallback", async () => {
+    const artifactDir = await mkdtemp(join(tmpdir(), "dr-api-env-bing-jina-"));
+    dirs.push(artifactDir);
+    expect(createResearchSearchFromEnv({
+      BING_MARKET: "zh-CN",
+      JINA_API_KEY: "test-jina-key",
+    }, "bing", artifactDir)?.name).toBe("fallback(bing-html->jina-search)");
+  });
+
+  it("rejects Bing results that ignore a site constraint or only return dictionaries", () => {
+    expect(acceptBingResearchResults({
+      query: "site:reedsy.com mystery novel clues",
+      providerName: "bing-html",
+      results: [{ url: "https://dictionary.cambridge.org/dictionary/english/mystery" }],
+    })).toBe(false);
+    expect(acceptBingResearchResults({
+      query: "悬疑小说 剧情设计 核心要素",
+      providerName: "bing-html",
+      results: [{ url: "https://baike.baidu.com/item/mystery" }],
+    })).toBe(false);
+    expect(acceptBingResearchResults({
+      query: "site:reedsy.com mystery novel clues",
+      providerName: "bing-html",
+      results: [{ url: "https://reedsy.com/blog/how-to-write-a-mystery" }],
+    })).toBe(true);
   });
 
   it("uses direct fetch-page by default instead of Jina Reader", async () => {

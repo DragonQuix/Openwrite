@@ -15,6 +15,7 @@ from pathlib import Path
 import yaml
 
 from tools.character_state_index import strip_character_state_annotations
+from tools.writing_targets import normalize_writing_targets
 
 CHAPTER_FILE_RE = re.compile(r"^ch_(\d+)\.md$")
 CHAPTER_HEADING_RE = re.compile(
@@ -338,7 +339,12 @@ def build_workspace_snapshot(project_root: Path, config: dict[str, object]) -> W
     )
     usage = ChapterMemoryStore(project_root, novel_id).usage_totals()
     review_analytics = ReviewStore(project_root, novel_id).analytics()
-    target_units = _target_units(outline)
+    stored_targets = config.get("writing_targets")
+    target_units = (
+        normalize_writing_targets(stored_targets)["book_words"]
+        if isinstance(stored_targets, dict) and "book_words" in stored_targets
+        else _target_units(outline)
+    )
     readiness = {
         "author_intent": _is_substantive(intent),
         "background": _is_substantive(background),

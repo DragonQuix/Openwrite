@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tools.agent.book_state import BookStage, BookStateStore
 from tools.agent.dante_actions import DanteActionAdapter
+from tools.agent.goethe_actions import GoethePlanningRuntime
 from tools.agent.orchestrator import OpenWriteOrchestrator
 from tools.agent.toolkits import WRITING_TOOLKIT
 from tools.chapter_pipeline import build_writer_payload
@@ -97,7 +98,10 @@ def _bootstrap_novel(tmp_path: Path, novel_id: str = "demo") -> tuple[Path, Path
         encoding="utf-8",
     )
     (novel_root / "src" / "world" / "terminology.md").write_text(
-        "# 术语表\n\n| 术语 | 定义 | 分类 |\n|------|------|------|\n| 测试术语 | 定义 | concept |\n",
+        "# 术语表\n\n"
+        "| 术语 | 定义 | 分类 |\n"
+        "|------|------|------|\n"
+        "| 测试术语 | 定义 | concept |\n",
         encoding="utf-8",
     )
     (novel_root / "src" / "world" / "entities").mkdir(parents=True, exist_ok=True)
@@ -107,6 +111,38 @@ def _bootstrap_novel(tmp_path: Path, novel_id: str = "demo") -> tuple[Path, Path
         encoding="utf-8",
     )
     return tmp_path, novel_root
+
+
+def test_outline_agent_prompt_uses_project_writing_targets(tmp_path: Path):
+    root, _ = _bootstrap_novel(tmp_path)
+    config_path = root / "novel_config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["writing_targets"] = {
+        "book_words": 360000,
+        "chapter_words": 4200,
+        "outline_volume_words": 1100,
+        "outline_act_words": 700,
+        "outline_section_words": 420,
+        "outline_chapter_words": 260,
+    }
+    config_path.write_text(
+        yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    orchestrator = OpenWriteOrchestrator.for_testing(root, "demo")
+    captured: dict[str, str] = {}
+
+    def fake_chat(system: str, user: str, **_kwargs) -> str:
+        captured["system"] = system
+        captured["user"] = user
+        return "# 第一卷"
+
+    orchestrator._chat_text = fake_chat  # type: ignore[method-assign]
+
+    assert orchestrator._generate_outline_draft("生成详细大纲") == "# 第一卷"
+    assert "每章正文默认目标 4200 字" in captured["system"]
+    assert "每幕节点说明约 700 字" in captured["system"]
+    assert "每个章纲说明约 260 字" in captured["system"]
 
 
 def test_discovery_appends_ideation_and_stays_in_discovery(tmp_path: Path):
@@ -453,7 +489,7 @@ def test_dante_actions_require_outline_scope_confirmation_before_preflight(
     assert payload["missing_items"] == ["outline_scope"]
 
 
-def test_dante_actions_do_not_allow_preflight_when_outline_scope_still_pending_even_if_stage_was_mutated(
+def test_dante_preflight_stays_blocked_when_outline_scope_is_pending(
     tmp_path: Path,
 ):
     _bootstrap_novel(tmp_path)
@@ -968,6 +1004,27 @@ def test_dante_can_confirm_current_outline_scope_before_preflight(tmp_path: Path
     assert preflight["ok"] is True
     assert preflight["chapter_id"] == "ch_001"
     assert preflight["reason"] == ""
+
+
+def test_goethe_handoff_accepts_legacy_canonical_assets_after_writing_started(
+    tmp_path: Path,
+):
+    _, novel_root = _bootstrap_novel(tmp_path)
+    planning_store = StoryPlanningStore(tmp_path, "demo")
+    planning_store.append_ideation("已有正文项目继续维护")
+    planning_store.save_ideation_summary("# 当前想法汇总\n\n- 沿用现有正典资产")
+    manuscript = novel_root / "data" / "manuscript" / "arc_001" / "ch_001.md"
+    manuscript.parent.mkdir(parents=True, exist_ok=True)
+    manuscript.write_text("# 第一章\n\n已有正文。\n", encoding="utf-8")
+
+    result = GoethePlanningRuntime(tmp_path, "demo").prepare_dante_handoff()
+
+    assert result["ok"] is True
+    assert result["missing_items"] == []
+    assert result["next_action"] == "chapter_preflight"
+    assert len(result["compatibility_warnings"]) == 2
+    assert Path(result["handoff_markdown_path"]).is_file()
+    assert Path(result["handoff_yaml_path"]).is_file()
 
 
 def test_outline_generation_request_writes_draft_and_requests_confirmation(

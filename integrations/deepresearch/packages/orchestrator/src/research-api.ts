@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createLlmChatFromEnv } from "@deepresearch/embedding-providers";
-import { BingSearchProvider, BochaSearchProvider, FetchPageProvider, JinaSearchProvider } from "@deepresearch/tool-providers";
+import { BingSearchProvider, BochaSearchProvider, FallbackSearchProvider, FetchPageProvider, JinaSearchProvider } from "@deepresearch/tool-providers";
 import type { EpisodeResult, EpisodeStack, EvidenceQualityMode, FetchProvider, HumanReviewResponse, LlmChat, MemoryEvent, RuntimeProfile, SearchProvider, TaskSubmission } from "@deepresearch/contracts";
 import { createInMemoryOrchestrator } from "./orchestrator.js";
 import { resolveEvidenceQualityPolicy } from "./evidence-quality.js";
@@ -156,10 +156,10 @@ export function buildResearchRuntimeProfile(input: Pick<ResearchRunInput, "runti
       const maxToolCalls = Math.max(1, evidenceAgent.maxReactSteps - 1);
       const targetSearchCalls = Math.max(1, Math.ceil(evidenceAgent.targetReactSteps / 6));
       const maxSearchCalls = Math.max(1, Math.ceil(evidenceAgent.maxReactSteps / 6));
-      evidenceAgent.targetToolCalls = Math.min(evidenceAgent.targetToolCalls ?? targetToolCalls, targetToolCalls);
-      evidenceAgent.maxToolCalls = Math.min(evidenceAgent.maxToolCalls ?? maxToolCalls, maxToolCalls);
-      evidenceAgent.targetSearchCalls = Math.min(evidenceAgent.targetSearchCalls ?? targetSearchCalls, targetSearchCalls);
-      evidenceAgent.maxSearchCalls = Math.min(evidenceAgent.maxSearchCalls ?? maxSearchCalls, maxSearchCalls);
+      evidenceAgent.targetToolCalls = targetToolCalls;
+      evidenceAgent.maxToolCalls = maxToolCalls;
+      evidenceAgent.targetSearchCalls = targetSearchCalls;
+      evidenceAgent.maxSearchCalls = maxSearchCalls;
     }
     if (typeof input.evidenceTargetFetchCalls === "number") {
       const targetFetchCalls = Math.max(0, Math.floor(input.evidenceTargetFetchCalls));
@@ -231,9 +231,22 @@ export function createResearchSearchFromEnv(env: NodeJS.ProcessEnv = process.env
   const merged = mergeResearchEnv(env, cwd);
   if (provider === "none") return undefined;
   if (provider === "bing") {
-    return new BingSearchProvider({
+    const bing = new BingSearchProvider({
       timeoutMs: Number(merged.BING_TIMEOUT_MS ?? 30000),
       market: merged.BING_MARKET ?? "zh-CN",
+    });
+    const jinaApiKey = merged.JINA_API_KEY?.trim();
+    if (!jinaApiKey) return bing;
+    const jina = new JinaSearchProvider({
+      apiKey: jinaApiKey,
+      timeoutMs: Number(merged.JINA_TIMEOUT_MS ?? 90000),
+      retry: Number(merged.JINA_RETRY ?? 3),
+      maxNum: Number(merged.JINA_MAX_NUM ?? 20),
+      proxy: merged.HTTPS_PROXY ?? merged.https_proxy ?? merged.HTTP_PROXY ?? merged.http_proxy,
+    });
+    return new FallbackSearchProvider({
+      providers: [bing, jina],
+      acceptResults: acceptBingResearchResults,
     });
   }
   if (provider === "bocha") {
@@ -265,6 +278,28 @@ export function createResearchSearchFromEnv(env: NodeJS.ProcessEnv = process.env
     });
   }
   return undefined;
+}
+
+const LOW_VALUE_RESEARCH_HOST = /(?:^|\.)(?:baike\.baidu\.com|wenku\.baidu\.com|zhidao\.baidu\.com|dictionary\.cambridge\.org|oxfordlearnersdictionaries\.com|kmcha\.com)$/iu;
+
+export function acceptBingResearchResults(input: {
+  query: string;
+  providerName: string;
+  results: Array<{ url: string }>;
+}): boolean {
+  if (input.providerName !== "bing-html") return true;
+  const requestedHosts = Array.from(input.query.matchAll(/\bsite:\s*([a-z0-9.-]+)\b/giu), (match) => match[1]!.toLowerCase());
+  const resultHosts = input.results.flatMap((result) => {
+    try {
+      return [new URL(result.url).hostname.toLowerCase().replace(/^www\./u, "")];
+    } catch {
+      return [];
+    }
+  });
+  if (requestedHosts.length > 0 && !resultHosts.some((host) => requestedHosts.some((requested) => host === requested || host.endsWith(`.${requested}`)))) {
+    return false;
+  }
+  return resultHosts.some((host) => !LOW_VALUE_RESEARCH_HOST.test(host));
 }
 
 export function createResearchFetchFromEnv(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): FetchProvider {
@@ -508,4 +543,3 @@ function parseEnvText(text: string): NodeJS.ProcessEnv {
   }
   return out;
 }
-

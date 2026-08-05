@@ -49,6 +49,7 @@ POST_ROUTES = {
     "/api/project/init": StudioPostRoute("initialize_project", requires_project=False),
     "/api/project/open": StudioPostRoute("open_project", requires_project=False),
     "/api/project/delete": StudioPostRoute("delete_project", requires_project=False),
+    "/api/project/writing-targets": StudioPostRoute("update_writing_targets"),
     "/api/write": StudioPostRoute("write_next_chapter"),
     "/api/chapter/delete": StudioPostRoute("delete_chapter"),
     "/api/outline/edit": StudioPostRoute("edit_outline_structure"),
@@ -83,6 +84,7 @@ POST_ROUTES = {
     "/api/chapter-runs-v2": StudioPostRoute("chapter_run_v2_action"),
     "/api/diagnostics": StudioPostRoute("runtime_diagnostics"),
     "/api/rolling-plans": StudioPostRoute("rolling_plan_action"),
+    "/api/narrative-forecasts": StudioPostRoute("narrative_forecast_action"),
     "/api/manuscript-editing": StudioPostRoute("manuscript_editing_action"),
 }
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from tools.frontmatter import parse_toml_front_matter
+from tools.writing_targets import normalize_writing_targets
 
 HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$")
 NUMBER_TOKEN = r"[零〇一二三四五六七八九十百千万两\d]+"
@@ -42,6 +43,7 @@ def build_outline_structure(
     novel_root: Path,
     *,
     chapter_id: str = "",
+    writing_targets: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a bounded, human-readable volume/act/section/chapter tree."""
     root = Path(novel_root).resolve()
@@ -52,7 +54,8 @@ def build_outline_structure(
     text = outline_path.read_text(encoding="utf-8")
     _, body = parse_toml_front_matter(text)
     drafted = {path.stem for path in (root / "data" / "manuscript").rglob("ch_*.md")}
-    roots, flat = _parse_tree(body, drafted)
+    targets = normalize_writing_targets(writing_targets) if writing_targets else None
+    roots, flat = _parse_tree(body, drafted, writing_targets=targets)
     line_offset = text[: len(text) - len(body)].count("\n")
     for node in flat:
         node["line"] += line_offset
@@ -64,7 +67,11 @@ def build_outline_structure(
         flat,
         drafted,
         requested=chapter_id,
-        target_words=_smart_target_words(root),
+        target_words=(
+            int(targets["chapter_words"])
+            if targets
+            else _smart_target_words(root)
+        ),
     )
     counts = {kind: 0 for kind in ("volume", "act", "section", "chapter", "appendix")}
     for node in flat:
@@ -219,7 +226,12 @@ def mutate_outline_structure(
     }
 
 
-def _parse_tree(body: str, drafted: set[str]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _parse_tree(
+    body: str,
+    drafted: set[str],
+    *,
+    writing_targets: dict[str, int] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     lines = body.splitlines()
     headings: list[dict[str, Any]] = []
     counters = {1: 0, 2: 0, 3: 0, 4: 0}
@@ -260,6 +272,15 @@ def _parse_tree(body: str, drafted: set[str]) -> tuple[list[dict[str, Any]], lis
         body_lines = lines[node["line"] : next_line]
         node["content"] = _body_block(body_lines)
         node["summary"] = _summarize_block(body_lines)
+        node["content_units"] = _writing_units(node["content"])
+        detail_key = f"outline_{node['kind']}_words"
+        node["detail_target_words"] = int((writing_targets or {}).get(detail_key, 0))
+        if node["kind"] == "chapter":
+            node["chapter_target_words"] = _explicit_chapter_target(
+                node["content"]
+            ) or int((writing_targets or {}).get("chapter_words", 0))
+        else:
+            node["chapter_target_words"] = 0
         subtree_end = len(lines)
         for candidate in headings[position + 1 :]:
             if candidate["level"] <= node["level"]:
@@ -550,6 +571,7 @@ def _recommend_chapter(
     act = next((node for node in reversed(ancestors) if node["kind"] == "act"), None)
     volume = next((node for node in reversed(ancestors) if node["kind"] == "volume"), None)
     focus = candidate["summary"] or (section or {}).get("summary", "")
+    explicit_target = _explicit_chapter_target(str(candidate.get("content") or ""))
     guidance_parts = [f"按章纲推进「{_clean_planned(candidate['title'])}」。"]
     if section:
         guidance_parts.append(f"所属节：{section['title']}。")
@@ -564,7 +586,8 @@ def _recommend_chapter(
         "breadcrumb": [
             node["title"] for node in (volume, act, section, candidate) if node
         ],
-        "target_words": target_words,
+        "target_words": explicit_target or target_words,
+        "target_source": "outline" if explicit_target else "project_or_recent",
         "guidance": "\n".join(guidance_parts),
         "reason": "大纲中最早尚未生成正文的章纲" if not requested_id else "用户选择的章纲",
     }
@@ -601,6 +624,14 @@ def _writing_units(text: str) -> int:
         re.sub(r"[\u3400-\u4dbf\u4e00-\u9fff]", " ", without_headings),
     )
     return len(cjk) + len(latin)
+
+
+def _explicit_chapter_target(content: str) -> int:
+    match = re.search(r"(?:预估字数|目标字数)\s*[:：]\s*([\d,]+)", content)
+    if not match:
+        return 0
+    value = int(match.group(1).replace(",", ""))
+    return value if 200 <= value <= 12_000 else 0
 
 
 def _canonical_chapter_id(value: str) -> str:

@@ -8,6 +8,7 @@ import { EchoJsonLlm } from "../infra/mock-llm.js";
 import { createPhaseContext } from "../phase-runner.js";
 import { consolidateCountedRowRepairRequests, shouldCreateReflectionTask } from "../phases/cycle-reflection.js";
 import { agentNodePartPlans, dispatchEvidencePhase, evidenceRuntimeHistoryMaxChars, evidenceTaskRuntimeBudget } from "../phases/dispatch-evidence.js";
+import { maxAgentNodeParts } from "../phases/evidence-budget.js";
 import { normalizeRequirements } from "../phases/rubric.js";
 import { fixedNow, submission, node, task, completeStudyRowMarkdown, requirement } from "./helpers/v5-orchestrator-fixtures.js";
 
@@ -102,9 +103,24 @@ describe("v5 Orchestrator", () => {
   });
 
   it("caps repeated evidence-agent history while respecting smaller context limits", () => {
-    expect(evidenceRuntimeHistoryMaxChars()).toBe(24_000);
-    expect(evidenceRuntimeHistoryMaxChars(8_000)).toBe(24_000);
-    expect(evidenceRuntimeHistoryMaxChars(1_000)).toBe(4_096);
+    expect(evidenceRuntimeHistoryMaxChars()).toBe(8_000);
+    expect(evidenceRuntimeHistoryMaxChars(8_000)).toBe(8_000);
+    expect(evidenceRuntimeHistoryMaxChars(1_000)).toBe(4_000);
+    expect(evidenceRuntimeHistoryMaxChars(256)).toBe(2_048);
+  });
+
+  it("keeps one coherent reportlet for a simple requirement while preserving structured partitions", () => {
+    const ctx = createPhaseContext(submission(), { now: fixedNow, runtimeProfile: loadDefaultRuntimeProfile(), llm: new EchoJsonLlm() });
+    const simple = requirement("R_simple", "总结悬疑小说剧情设计的可操作方法。", "question");
+    const structured: ResearchRequirement = {
+      ...requirement("R_table", "比较多个对象并填写结构化字段。", "deliverable"),
+      entityScope: ["对象甲", "对象乙", "对象丙"],
+      metricScope: ["结构", "技巧"],
+    };
+
+    expect(maxAgentNodeParts(ctx, [simple])).toBe(1);
+    expect(maxAgentNodeParts(ctx, [structured])).toBe(3);
+    expect(maxAgentNodeParts(ctx, [simple, structured])).toBe(3);
   });
 
   it("splits multi-year evidence into bounded temporal reportlets", () => {

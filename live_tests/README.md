@@ -3,12 +3,12 @@
 This directory is intentionally outside the default `pytest` collection configured in
 `pyproject.toml`. The normal test suite remains offline and free.
 
-The diagnostics use the realistic `reference/my_novel` fixture, copy only its OpenWrite project
-data to a temporary directory, and allow all model-driven writes to happen in that copy. The
-canonical fixture is never mutated by a live run.
+Pytest diagnostics use `~/my_novel` as their source fixture, copy only its OpenWrite project data
+to an isolated temporary directory, and allow model-driven writes to happen in that copy. The
+manual QA project is never mutated by pytest runs.
 
-To use a dedicated external test-novel checkout instead, point the diagnostics at it explicitly.
-The same copy-on-run protection applies, so existing chapters and runtime state are not modified:
+To override the source fixture for an automated run, point the diagnostics at an isolated project
+explicitly. Manual Studio, live-server, and browser QA must still use `~/my_novel`:
 
 ```bash
 export OPENWRITE_LIVE_FIXTURE="~/my_novel"
@@ -51,3 +51,16 @@ export OPENWRITE_LIVE_TARGET_WORDS=1200
 Sanitized reports are written to `live_test_artifacts/<run-id>/`, which is ignored by Git. The
 reports contain model output and workflow state but redact the active API key if it appears in an
 exception or provider response.
+
+## Full Studio Agent tool matrix
+
+With Studio already running on `~/my_novel`, exercise every currently exposed Goethe/Dante tool
+through a separate real-model Agent turn:
+
+```bash
+.venv/bin/python live_tests/run_agent_tool_matrix.py --allow-writes
+```
+
+The runner discovers the live tool catalogs, rejects any project other than `~/my_novel`, and
+writes an incrementally updated audit artifact under `live_test_artifacts/`. Use `--tools` with a
+comma-separated list of tool names or case keys to rerun only failures.

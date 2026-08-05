@@ -7,6 +7,7 @@ import { createInMemoryOrchestrator, loadDefaultRuntimeProfile } from "../index.
 import { restoreResearchCheckpoint, saveResearchCheckpoint } from "../checkpoint.js";
 import { createPhaseContext } from "../phase-runner.js";
 import { reportPhase } from "../phases/report.js";
+import { runWriterDraftAgent } from "../phases/report-writer.js";
 import { fixedNow, submission, node, task, scriptedEvidenceReact, bundle } from "./helpers/v5-orchestrator-fixtures.js";
 
 describe("v5 Orchestrator", () => {
@@ -20,6 +21,43 @@ describe("v5 Orchestrator", () => {
     dirs.push(dir);
     return dir;
   }
+  it("repairs a malformed writer finish envelope instead of rendering protocol JSON", async () => {
+    const dir = await artifactDir();
+    let calls = 0;
+    const llm: LlmChat = {
+      name: "scripted-malformed-writer-envelope",
+      async chat() {
+        calls += 1;
+        if (calls === 1) {
+          return { content: '{"thoughtSummary":"Drafted.","action":"finish","finish":{"markdown":"### 结构方法\\n\\n本节不把"三幕式"写成已证实结论。"}}' };
+        }
+        return { content: JSON.stringify({
+          thoughtSummary: "Repaired malformed JSON.",
+          action: "finish",
+          finish: { markdown: "### 结构方法\n\n本节不把‘三幕式’写成已证实结论。" },
+        }) };
+      },
+    };
+    const runtimeProfile = loadDefaultRuntimeProfile();
+    runtimeProfile.artifactDir = dir;
+    const ctx = createPhaseContext(submission(), { now: fixedNow, runtimeProfile, artifactDir: dir, llm });
+    ctx.state.episodeId = "EP_malformed_writer_envelope";
+
+    const markdown = await runWriterDraftAgent(ctx, {
+      phase: "report.leaf",
+      reportNodeId: "R_hyp_structure",
+      title: "LeafWriterAgent 结构方法",
+      objective: "Write a bounded structure section.",
+      language: "zh-CN",
+      prompt: "Draft one focused subsection and return Markdown only.",
+    });
+
+    expect(calls).toBe(2);
+    expect(markdown).toBe("### 结构方法\n\n本节不把‘三幕式’写成已证实结论。");
+    expect(markdown).not.toContain("thoughtSummary");
+    expect(markdown).not.toContain('"action"');
+  });
+
   it("drafts final reports by aspect sections before synthesis", async () => {
     const dir = await artifactDir();
     let leafCalls = 0;

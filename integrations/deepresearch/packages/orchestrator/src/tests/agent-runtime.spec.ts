@@ -229,6 +229,36 @@ describe("runAgentRuntime", () => {
     expect(serialized).toContain("E_saved_8");
     expect(serialized).toContain("https://example.test/8");
   });
+
+  it("repairs malformed decisions with a compact structured prompt", async () => {
+    const requests: Array<{ system?: string; user: string; maxTokens?: number }> = [];
+    const result = await runAgentRuntime({
+      agent: agentMeta(),
+      llm: {
+        name: "repair-malformed-output",
+        async chat(req) {
+          requests.push({ system: req.system, user: req.user, maxTokens: req.maxTokens });
+          if (requests.length === 1) return { content: '{"thoughtSummary":"done","action":"finish", MALFORMED_FRAGMENT' };
+          return { content: JSON.stringify({ thoughtSummary: "repaired", action: "finish", finish: { answer: "ok" } }) };
+        },
+      },
+      system: "system",
+      context: { payload: `FULL_CONTEXT_SECRET_${"x".repeat(20_000)}` },
+      outputSchema: { answer: "string" },
+      outputRepairAttempts: 1,
+      tools: emptyTools(),
+      budget: { maxReactSteps: 2, maxToolCalls: 1 },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.finish).toEqual({ answer: "ok" });
+    expect(requests).toHaveLength(2);
+    expect(requests[1]?.system).toContain("Repair one malformed");
+    expect(requests[1]?.user).toContain("MALFORMED_FRAGMENT");
+    expect(requests[1]?.user).toContain('"answer": "string"');
+    expect(requests[1]?.user).not.toContain("FULL_CONTEXT_SECRET");
+    expect(requests[1]?.maxTokens).toBe(8_192);
+  });
 });
 
 function agentMeta() {

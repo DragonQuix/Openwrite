@@ -74,12 +74,15 @@ async function planQueuedAgentNodeTasks(ctx: PhaseContext, tasks: TaskItem[], cy
     const reportNode = await ctx.stack.kg.getReportNode(task.reportNodeId);
     if (!reportNode) continue;
     const rowTarget = countedRowEvidenceTarget(task);
+    const requirements = (ctx.state.globalRubric?.requirements ?? []).filter(
+      (requirement) => reportNode.requirementIds?.includes(requirement.requirementId),
+    );
     const parts = agentNodePartPlans(
       task,
       reportNode,
-      Math.max(maxAgentNodeParts(ctx), rowTarget ?? 0),
+      Math.max(maxAgentNodeParts(ctx, requirements), rowTarget ?? 0),
       ctx.state.globalRubric?.outputHints.language ?? ctx.state.submission.uiOptions?.outputLanguage ?? "zh-CN",
-      (ctx.state.globalRubric?.requirements ?? []).filter((requirement) => reportNode.requirementIds?.includes(requirement.requirementId)),
+      requirements,
     );
     if (parts.length < 2) continue;
     await attachAgentNodePartPlan(ctx, task, reportNode, parts, cycleId);
@@ -285,6 +288,7 @@ If contextPacket.currentTask.plannedReportlet is present, strictly follow its re
     },
     ...llmCfg,
     historyMaxChars: evidenceRuntimeHistoryMaxChars(ctx.state.runtimeProfile.phases.dispatchEvidence?.contextTokenLimit),
+    outputRepairAttempts: evidenceCfg?.outputRepairAttempts ?? 1,
     signal: ctx.signal,
     legacyEvidencePromptHints: true,
     chat: (request) => tracedLlmChat(ctx, "dispatch-evidence.react", request, meta),

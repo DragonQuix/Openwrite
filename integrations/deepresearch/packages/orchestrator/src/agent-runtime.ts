@@ -30,6 +30,8 @@ export interface RunAgentRuntimeInput {
   signal?: AbortSignal;
   /** Maximum serialized characters retained from prior ReAct steps. */
   historyMaxChars?: number;
+  /** Retry malformed structured decisions with a compact repair prompt. */
+  outputRepairAttempts?: number;
   legacyEvidencePromptHints?: boolean;
   chat?: (request: LlmChatRequest) => Promise<LlmChatResponse>;
   onVisualEvent?: (event: VisualResearchEvent) => void | Promise<void>;
@@ -65,8 +67,19 @@ export async function runAgentRuntime(input: RunAgentRuntimeInput): Promise<Agen
     await emitRuntimeVisual(input, "agent_thinking", "thinking", `Step ${step}`, "Choosing next action.");
     let decision: AgentRuntimeDecision;
     try {
-      const response = await (input.chat ?? ((request) => input.llm.chat(request)))(buildChatRequest(input, tools, steps));
-      decision = normalizeDecision(parseLlmJson<unknown>("agent-runtime", input.llm.name, response));
+      const chat = input.chat ?? ((request: LlmChatRequest) => input.llm.chat(request));
+      let response = await chat(buildChatRequest(input, tools, steps));
+      let parseError: unknown;
+      for (let repair = 0; ; repair += 1) {
+        try {
+          decision = normalizeDecision(parseLlmJson<unknown>("agent-runtime", input.llm.name, response));
+          break;
+        } catch (err) {
+          parseError = err;
+          if (repair >= Math.max(0, Math.floor(input.outputRepairAttempts ?? 0))) throw parseError;
+          response = await chat(buildDecisionRepairRequest(input, tools, steps, response, repair + 1));
+        }
+      }
     } catch (err) {
       if (err instanceof ProviderBudgetExceededError) throw err;
       await emitRuntimeVisual(input, "error", "failed", "Agent runtime failed", errorMessage(err));
@@ -156,6 +169,47 @@ export async function runAgentRuntime(input: RunAgentRuntimeInput): Promise<Agen
     status: "budget_exceeded",
     steps,
     error,
+  };
+}
+
+function buildDecisionRepairRequest(
+  input: RunAgentRuntimeInput,
+  tools: ToolDefinition[],
+  steps: AgentRuntimeStep[],
+  invalidResponse: LlmChatResponse,
+  attempt: number,
+): LlmChatRequest {
+  const invalid = truncateRuntimeString(invalidResponse.content || invalidResponse.reasoning || "", 6_000) ?? "";
+  return {
+    system: "Repair one malformed DeepResearch AgentRuntime decision. Return strict JSON only. Do not add facts or prose outside the JSON object.",
+    user: `Repair attempt ${attempt}.
+
+Agent objective:
+${input.agent.objective}
+
+Available tools:
+${JSON.stringify(tools.map((tool) => ({ toolName: tool.toolName, description: tool.description })), null, 2)}
+
+Recent runtime history:
+${serializeRuntimeHistory(steps, 2_000)}
+
+Runtime budget status:
+${JSON.stringify(buildBudgetStatus(input.budget, steps), null, 2)}
+
+Final output schema:
+${JSON.stringify(input.outputSchema ?? {}, null, 2)}
+
+Previous malformed response:
+${invalid || "[empty response]"}
+
+Return exactly one complete JSON object:
+{"thoughtSummary":string,"action":"tool"|"finish","toolName":string,"args":object,"finish":object}`,
+    json: true,
+    model: input.model,
+    temperature: 0,
+    maxTokens: Math.min(input.maxTokens ?? 8_192, 8_192),
+    timeoutMs: input.timeoutMs,
+    signal: input.signal,
   };
 }
 

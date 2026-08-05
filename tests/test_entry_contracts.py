@@ -96,6 +96,23 @@ def test_source_review_is_identical_in_service_studio_and_goethe(tmp_path: Path)
     assert goethe["next_action"] == "extract_style_source"
 
 
+def test_goethe_reference_library_exposes_profile_navigation(
+    tmp_path: Path, monkeypatch
+):
+    project = tmp_path / "project"
+    library = tmp_path / "private-reference-library"
+    init_project(project, "demo", "参考画像导航")
+    monkeypatch.setenv("OPENWRITE_REFERENCE_LIBRARY_ROOT", str(library))
+
+    result = build_goethe_tool_layers(project, "demo")["action_tool_executors"][
+        "list_reference_library"
+    ]({})
+
+    assert result["ok"] is True
+    assert result["references"] == []
+    assert result["profiles"] == []
+
+
 def test_goethe_outline_tools_stage_diff_before_confirming_src(tmp_path: Path):
     init_project(tmp_path, "demo", "增量大纲")
     layers = build_goethe_tool_layers(tmp_path, "demo")

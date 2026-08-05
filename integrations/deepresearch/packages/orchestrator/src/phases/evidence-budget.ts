@@ -4,9 +4,9 @@ import { explicitTablePartitionLabels } from "../rendered-contracts.js";
 import type { PhaseContext } from "../types.js";
 import { positiveOptional } from "./evidence-utils.js";
 
-const MAX_EVIDENCE_RUNTIME_HISTORY_CHARS = 24_000;
+const MAX_EVIDENCE_RUNTIME_HISTORY_CHARS = 8_000;
 
-const MAX_AGENT_NODE_PARTS = 8;
+const MAX_AGENT_NODE_PARTS = 3;
 
 export function evidenceTaskRuntimeBudget(
   task: Pick<TaskItem, "acceptanceCriteria" | "plannedReportlets">,
@@ -146,14 +146,26 @@ export function evidenceRuntimeHistoryMaxChars(contextTokenLimit = 64_000): numb
   // ReAct resends its complete history on every turn. Keep enough detail for the
   // latest fetched source while compacting older pages to stable IDs and URLs,
   // otherwise a few PDF fetches multiply into hundreds of thousands of tokens.
-  return Math.max(4_096, Math.min(MAX_EVIDENCE_RUNTIME_HISTORY_CHARS, Math.floor(contextTokenLimit) * 4));
+  return Math.max(2_048, Math.min(MAX_EVIDENCE_RUNTIME_HISTORY_CHARS, Math.floor(contextTokenLimit) * 4));
 }
 
-function maxAgentNodeParts(ctx: PhaseContext): number {
+function maxAgentNodeParts(ctx: PhaseContext, requirements: ResearchRequirement[] = []): number {
   const configured = ctx.state.runtimeProfile.debug?.maxAgentNodeParts;
-  return typeof configured === "number" && Number.isFinite(configured)
-    ? Math.max(1, Math.floor(configured))
-    : MAX_AGENT_NODE_PARTS;
+  if (typeof configured === "number" && Number.isFinite(configured)) {
+    return Math.max(1, Math.floor(configured));
+  }
+  const substantive = requirements.filter((requirement) => (
+    requirement.evidenceRequired !== false && requirement.visibility !== "internal"
+  ));
+  if (substantive.length !== 1) return MAX_AGENT_NODE_PARTS;
+  const requirement = substantive[0]!;
+  const text = [requirement.description, ...requirement.successCriteria].join(" ");
+  const structured = countedRowEvidenceTarget({ acceptanceCriteria: requirement.successCriteria })
+    || (requirement.entityScope?.filter((item) => item.trim()).length ?? 0) >= 2
+    || (requirement.exampleScope?.filter((item) => item.trim()).length ?? 0) >= 2
+    || (requirement.metricScope?.filter((item) => item.trim()).length ?? 0) >= 2
+    || /(?:每年|逐年|年度|year[- ]by[- ]year|each\s+year)/iu.test(text);
+  return structured ? MAX_AGENT_NODE_PARTS : 1;
 }
 
 export function agentNodePartPlans(

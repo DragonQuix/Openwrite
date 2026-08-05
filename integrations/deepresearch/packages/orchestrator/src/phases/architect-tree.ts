@@ -23,11 +23,17 @@ export async function architectTreePhase(ctx: PhaseContext): Promise<{ reportNod
   if (!rubric) throw new Error("rubric required before architect-tree");
   const knowledge = await ctx.stack.kg.listKnowledgeNodes();
   const llmCfg = ctx.state.runtimeProfile.llm.architect;
+  const schedulableNodes = schedulableInitialNodeCount(ctx);
+  const recommendedNodes = recommendedInitialNodeCount(rubric.requirements ?? [], ctx.state.submission.userInput);
+  const debugTreeLimit = positiveInteger(ctx.state.runtimeProfile.debug?.maxInitialAgentNodes);
   const debugLimits: DebugTreeLimits = {
     maxAspects: positiveInteger(ctx.state.runtimeProfile.debug?.maxAspects),
     maxBranchesPerAspect: positiveInteger(ctx.state.runtimeProfile.debug?.maxBranchesPerAspect),
     maxInitialAgentNodes: positiveInteger(ctx.state.runtimeProfile.debug?.maxInitialAgentNodes),
-    maxSchedulableInitialNodes: schedulableInitialNodeCount(ctx),
+    maxSchedulableInitialNodes: Math.min(
+      schedulableNodes ?? Number.POSITIVE_INFINITY,
+      debugTreeLimit ?? recommendedNodes,
+    ),
   };
   const response = await tracedLlmChat(ctx, "architect-tree", {
     system: ARCHITECT_SYSTEM_PROMPT,
@@ -44,7 +50,7 @@ Initial source map:
 ${knowledge.map((node) => `- ${node.nodeId} | ${node.sourceTier} | ${node.title} | ${node.summary.slice(0, 100)}`).join("\n")}
 
 Planning constraints:
-- ${debugLimits.maxInitialAgentNodes ? `Debug limit: create up to ${debugLimits.maxAspects ?? DEFAULT_DEBUG_MAX_ASPECTS} report aspect(s), up to ${debugLimits.maxBranchesPerAspect ?? DEFAULT_DEBUG_MAX_BRANCHES_PER_ASPECT} concrete leaf report sub-branch(es) per aspect, and no more than ${debugLimits.maxInitialAgentNodes} leaf sub-branches total.` : "Create one concrete leaf report sub-branch for each distinct user deliverable or evidence-bearing analysis requirement, usually 4-10 leaves for a broad report. Do not pad the tree with generic timelines, definitions, or case-study branches unless the task actually requests them."}
+- ${debugLimits.maxInitialAgentNodes ? `Debug limit: create up to ${debugLimits.maxAspects ?? DEFAULT_DEBUG_MAX_ASPECTS} report aspect(s), up to ${debugLimits.maxBranchesPerAspect ?? DEFAULT_DEBUG_MAX_BRANCHES_PER_ASPECT} concrete leaf report sub-branch(es) per aspect, and no more than ${debugLimits.maxInitialAgentNodes} leaf sub-branches total.` : `Create one concrete leaf report sub-branch for each distinct user deliverable or evidence-bearing analysis requirement. This task has an execution budget of at most ${recommendedNodes} initial leaf sub-branches; do not pad the tree with generic timelines, definitions, or case-study branches unless the task actually requests them.`}
 - For narrow factual tasks, create only 1-4 leaf report sub-branches and Agent node/task pairs.
 - Prefer non-overlapping research tasks, but do not collapse distinct historical stages, mechanisms, evidence types, or counterarguments into one broad task.
 - Preserve explicitly paired analytical perspectives (for example, "on the one hand ... on the other hand") as sibling evidence leaves under one parent section so each side receives direct research before bottom-up comparison.
@@ -1025,6 +1031,71 @@ function schedulableInitialNodeCount(ctx: PhaseContext): number | undefined {
   const cycles = positiveInteger(dispatch?.maxCycles);
   const parallel = positiveInteger(dispatch?.maxParallelAgents ?? dispatch?.maxConcurrentAgents);
   return cycles && parallel ? cycles * parallel : undefined;
+}
+
+function recommendedInitialNodeCount(requirements: ResearchRequirement[], userInput: string): number {
+  const evidenceRequirements = requirements.filter((requirement) => (
+    requirement.evidenceRequired !== false
+    && requirement.visibility !== "internal"
+    && !isReportMetaRequirement(requirement)
+  ));
+  const explicitSections = explicitSectionContract(requirements, userInput)?.length ?? 0;
+  const structuredFloor = evidenceRequirements.reduce((largest, requirement) => {
+    const countedRows = countedStudyTableMinimum(requirement);
+    const entityCount = (requirement.entityScope ?? []).filter((item) => item.trim()).length;
+    const exampleCount = (requirement.exampleScope ?? []).filter((item) => item.trim()).length;
+    const ownedSlices = requirement.entityScopeRole === "groups"
+      ? entityCount
+      : Math.max(entityCount, exampleCount);
+    return Math.max(largest, countedRows ? Math.min(6, Math.ceil(countedRows / 3)) : 0, ownedSlices);
+  }, explicitSections);
+  // Keep one spare aggregate leaf while entity alignment runs. It carries
+  // cross-entity table requirements that are then distributed into each
+  // entity leaf before the redundant aggregate leaf is removed.
+  const distributedEntityCount = enumeratedEntityGroups(evidenceRequirements)[0]?.length ?? 0;
+  const distributedEntityFloor = distributedEntityCount > 0 ? distributedEntityCount + 1 : 0;
+  const countedTableFloor = requirements.reduce((largest, requirement) => {
+    const countedRows = countedStudyTableMinimum(requirement);
+    return Math.max(largest, countedRows ? Math.min(6, Math.ceil(countedRows / 3)) : 0);
+  }, 0);
+  const enumeratedDeliverableFloor = evidenceRequirements.reduce((total, requirement) => {
+    if (!["comparison", "deliverable"].includes(requirement.kind)) return total;
+    const entities = enumeratedSubjects(requirement.description);
+    return total + (entities.length >= 5 ? Math.ceil(entities.length / 3) : 0);
+  }, 0);
+  const factorFloor = evidenceRequirements.reduce((largest, requirement) => {
+    if (!isInfluencingFactorRequirement(requirement)) return largest;
+    return Math.max(largest, splitEntityEnumeration(requirement.description).length);
+  }, 0);
+  const complexFloor = Math.max(
+    structuredFloor,
+    distributedEntityFloor,
+    countedTableFloor,
+    enumeratedDeliverableFloor,
+    factorFloor,
+  );
+  if (complexFloor > 0) return Math.min(18, Math.max(complexFloor, evidenceRequirements.length));
+
+  // Rubric generation can expand a short exploratory question into many
+  // requirements. That richer checklist should improve coverage inside each
+  // agent, not multiply agents when the user did not request a structured
+  // table, comparison, chronology, or named set of deliverables.
+  if (shortGeneralResearchRequest(userInput)) return 3;
+
+  const criteriaCount = evidenceRequirements.reduce(
+    (total, requirement) => total + requirement.successCriteria.filter((item) => item.trim()).length,
+    0,
+  );
+  if (evidenceRequirements.length <= 1 && criteriaCount <= 4) return 3;
+  if (evidenceRequirements.length <= 2 && criteriaCount <= 8) return 4;
+  return Math.min(10, Math.max(4, evidenceRequirements.length * 2));
+}
+
+function shortGeneralResearchRequest(userInput: string): boolean {
+  const text = userInput.normalize("NFKC").replace(/\s+/gu, " ").trim();
+  if (!text || text.length > 80) return false;
+  if (/\n|(?:^|\s)[-*]\s|(?:^|\s)\d+[.)、]\s/u.test(userInput)) return false;
+  return !/(?:表格|列表|清单|逐年|每年|按年|时间线|章节|小节|分别|逐一|对比|比较|排行|前\s*\d+|至少\s*\d+|不少于\s*\d+|\btables?\b|\blists?\b|\bcompare\b|\bcomparison\b|\bsections?\b|\bchapters?\b|\btop\s*\d+\b|\b(?:19|20)\d{2}\b)/iu.test(text);
 }
 
 interface PairedCategoryFocus {

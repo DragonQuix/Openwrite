@@ -59,7 +59,9 @@ export async function buildContextPacket(input: BuildContextPacketInput): Promis
       branchId: input.task.branchId,
       reportNodeId: input.task.reportNodeId,
       objective: input.task.objective,
-      acceptanceCriteria: [...input.task.acceptanceCriteria],
+      acceptanceCriteria: input.task.acceptanceCriteria.filter(
+        (criterion) => !criterion.startsWith("Internal reportlet plan "),
+      ),
       plannedReportlet: input.task.plannedReportlet ? structuredClone(input.task.plannedReportlet) : undefined,
       plannedReportlets: input.task.plannedReportlets ? structuredClone(input.task.plannedReportlets) : undefined,
     },

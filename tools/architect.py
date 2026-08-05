@@ -7,9 +7,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+import yaml
+
 from .outline_contract import OUTLINE_JSON_FIELDS
+from .writing_targets import normalize_writing_targets
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,7 @@ class FoundationResult:
     book_rules: str
     current_state: str
     foreshadowing_seed: str
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def pending_hooks(self) -> str:
@@ -67,7 +72,10 @@ class ArchitectAgent:
     """
 
     GENRE_GUIDES = {
-        "unspecified": "题材未指定：必须以作者简述和现有已确认资产为准，不得擅自套用仙侠、都市等类型模板",
+        "unspecified": (
+            "题材未指定：必须以作者简述和现有已确认资产为准，"
+            "不得擅自套用仙侠、都市等类型模板"
+        ),
         "xuanhuan": "玄幻：东方仙侠世界，修炼境界（金丹、元婴等），门派纷争，奇遇流",
         "xianxia": "仙侠：修真文明，飞剑法宝，炼丹炼器，人与天地争斗",
         "urban": "都市：现代都市背景，异能/风水/相术等都市传说",
@@ -99,6 +107,8 @@ class ArchitectAgent:
         genre: str = "xuanhuan",
         brief: str = "",
         platform: str = "番茄",
+        *,
+        include_foreshadowing: bool = True,
     ) -> FoundationResult:
         """生成基础设定
 
@@ -128,8 +138,16 @@ class ArchitectAgent:
         # 生成初始状态
         current_state = self._generate_current_state(title, genre, story_bible, brief)
 
-        # 生成伏笔
-        foreshadowing_seed = self._generate_foreshadowing_seed(title, volume_outline)
+        warnings: list[str] = []
+        foreshadowing_seed = ""
+        if include_foreshadowing:
+            try:
+                foreshadowing_seed = self._generate_foreshadowing_seed(
+                    title, volume_outline
+                )
+            except Exception as exc:  # noqa: BLE001 - auxiliary draft degrades safely
+                self.log.warning("Foreshadowing draft skipped: %s", exc)
+                warnings.append("foreshadowing_generation_failed")
 
         return FoundationResult(
             story_bible=story_bible,
@@ -137,6 +155,7 @@ class ArchitectAgent:
             book_rules=book_rules,
             current_state=current_state,
             foreshadowing_seed=foreshadowing_seed,
+            warnings=warnings,
         )
 
     async def generate_outline(
@@ -159,32 +178,35 @@ class ArchitectAgent:
         """
         from tools.llm import Message
 
+        targets = self._writing_targets()
+
         system_prompt = (
             "你是一个专业的小说大纲师。根据世界观设定，设计章节大纲。\n\n"
             + OUTLINE_JSON_FIELDS
-            + """
+            + f"""
 
 输出 JSON 格式：
 ```json
 [
-  {
+  {{
     "number": 1,
     "title": "章节标题",
-    "summary": "章节内容概要（100字内）",
+    "summary": "章节内容概要（约{targets['outline_chapter_words']}字）",
     "dramatic_position": "起/承/转/合/过渡",
     "content_focus": "本章核心内容",
     "goals": ["目标1", "目标2"],
-    "estimated_words": 3000,
+    "estimated_words": {targets['chapter_words']},
     "involved_characters": ["规范角色名"],
     "involved_settings": ["规范设定名"],
     "emotional_arc": "戒备 -> 动摇 -> 决意",
     "beats": ["场景切入", "冲突升级", "关键选择", "章末钩子"],
     "hooks": ["下一章承接的问题"]
-  }
+  }}
 ]
 ```
 
-每5章为一个"节"，节内有起承转合。确保剧情有起伏。
+每5章为一个"节"，节内有起承转合。每章正文目标为 {targets['chapter_words']} 字，
+每个章纲说明约 {targets['outline_chapter_words']} 字。确保剧情有起伏。
 只返回 JSON。"""
         )
 
@@ -233,7 +255,8 @@ class ArchitectAgent:
         """
         from tools.llm import Message
 
-        system_prompt = """你是 OpenWrite 的专业小说角色设计师。根据给定信息，设计可直接进入角色资产库的完整角色正文。
+        system_prompt = """你是 OpenWrite 的专业小说角色设计师。
+根据给定信息，设计可直接进入角色资产库的完整角色正文。
 
 只输出 Markdown 正文，不要代码围栏或 TOML front matter。必须使用以下结构：
 # 角色名
@@ -322,7 +345,9 @@ class ArchitectAgent:
         """生成卷纲"""
         from tools.llm import Message
 
-        system_prompt = """你是一个专业的小说大纲师。
+        targets = self._writing_targets()
+
+        system_prompt = f"""你是一个专业的小说大纲师。
 
 根据世界观设定，生成**卷纲（总大纲）**。
 
@@ -331,6 +356,10 @@ class ArchitectAgent:
 - 每篇包含：篇名、核心冲突、转折点、结局
 - 每篇内分为若干"节"（Section），每节 5 章左右
 - 每节标注：起承转合位置
+- 每卷说明约 {targets['outline_volume_words']} 字，每幕说明约 {targets['outline_act_words']} 字
+- 每节说明约 {targets['outline_section_words']} 字
+- 每个章纲说明约 {targets['outline_chapter_words']} 字
+- 每章必须标注 `> 预估字数: {targets['chapter_words']}`
 
 示例结构：
 ```
@@ -368,6 +397,18 @@ class ArchitectAgent:
         )
 
         return content
+
+    def _writing_targets(self) -> dict[str, int]:
+        project_root = str(getattr(self.ctx, "project_root", "") or "").strip()
+        if not project_root:
+            return normalize_writing_targets({})
+        config_path = Path(project_root).expanduser() / "novel_config.yaml"
+        try:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            config = {}
+        stored = config.get("writing_targets") if isinstance(config, dict) else {}
+        return normalize_writing_targets(stored)
 
     def _generate_book_rules(self, title: str, genre: str, brief: str) -> str:
         """生成写作规则"""

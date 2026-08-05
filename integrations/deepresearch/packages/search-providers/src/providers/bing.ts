@@ -125,12 +125,20 @@ function relevantBingHits(hits: SearchHit[], query: string): SearchHit[] {
 }
 
 function queryTerms(query: string): string[] {
-  const ignored = new Set(["and", "the", "for", "from", "with", "site", "http", "https", "www", "com", "org"]);
+  const ignored = new Set([
+    "and", "the", "for", "from", "with", "site", "http", "https", "www", "com", "org",
+    "article", "filetype", "find", "guide", "guidance", "official", "paper", "pdf", "primary", "report", "research", "source",
+    "探究", "究并", "并解", "解释", "识别", "别并", "并描", "描述", "调研", "研究", "汇集", "集并", "并综", "综合", "总结",
+    "包括", "括如", "如何", "何围", "围绕", "基本", "原则", "核心", "要素", "官方", "权威", "资料", "来源", "报告", "文章", "指南", "分析",
+  ]);
   const terms: string[] = [];
   for (const raw of query.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? []) {
     if (ignored.has(raw)) continue;
     if (/^\p{Script=Han}+$/u.test(raw) && raw.length > 2) {
-      for (let index = 0; index < raw.length - 1; index += 1) terms.push(raw.slice(index, index + 2));
+      for (let index = 0; index < raw.length - 1; index += 1) {
+        const term = raw.slice(index, index + 2);
+        if (!ignored.has(term)) terms.push(term);
+      }
     } else {
       terms.push(raw);
     }

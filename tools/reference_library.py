@@ -212,6 +212,60 @@ class ReferenceLibraryService:
             reverse=True,
         )
 
+    def list_profiles(self) -> list[dict[str, Any]]:
+        """List synthesized profiles without exposing their full evidence payloads."""
+        profiles_root = self.sources_root / "_profiles"
+        if not profiles_root.is_dir():
+            return []
+
+        adoption_ids: dict[str, list[str]] = {}
+        if self.project_root is not None and self.novel_id:
+            novel_root = self.project_root / "data" / "novels" / self.novel_id
+            for path in sorted(
+                (novel_root / "data" / "reference_adoptions").glob("adoption_*.yaml")
+            ):
+                payload = self._read_yaml(path)
+                profile_id = str(payload.get("profile_id") or "").strip()
+                if profile_id:
+                    adoption_ids.setdefault(profile_id, []).append(path.stem)
+
+        result: list[dict[str, Any]] = []
+        for path in sorted(profiles_root.glob("profile_*.json")):
+            profile = self._read_model(path, ReferenceProfileV1)
+            if profile is None:
+                continue
+            stale_source_ids: list[str] = []
+            for source_id, expected_sha in profile.source_revisions.items():
+                try:
+                    current_sha = self.require_record(source_id).source_sha256
+                except SourceAnalysisError:
+                    current_sha = ""
+                if current_sha != expected_sha:
+                    stale_source_ids.append(source_id)
+            result.append(
+                {
+                    "profile_id": profile.profile_id,
+                    "source_ids": profile.source_ids,
+                    "source_intents": profile.source_intents,
+                    "generated_at": profile.generated_at,
+                    "status": "stale" if stale_source_ids else "current",
+                    "stale_source_ids": stale_source_ids,
+                    "item_counts": {
+                        "common_methods": len(profile.common_methods),
+                        "differences": len(profile.differences),
+                        "optional_variants": len(profile.optional_variants),
+                        "conflicts": len(profile.conflicts),
+                        "excluded": len(profile.excluded_items),
+                    },
+                    "adoption_ids": adoption_ids.get(profile.profile_id, []),
+                }
+            )
+        return sorted(
+            result,
+            key=lambda item: str(item.get("generated_at") or ""),
+            reverse=True,
+        )
+
     def status(self, source_id: str, *, include_report: bool = True) -> dict[str, Any]:
         clean_id = self._source_id(source_id)
         record = self.require_record(clean_id)

@@ -1,1 +1,1 @@
-import "/js/application.js?v=chapter-delete-1";
+import "/js/application.js?v=agent-activity-1";

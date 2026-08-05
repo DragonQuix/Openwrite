@@ -9,6 +9,7 @@ from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
 import pytest
+import yaml
 
 from tools.agent.book_state import BookStage, BookStateStore
 from tools.cli import _save_chapter
@@ -44,8 +45,8 @@ def test_studio_assets_load_shared_core_as_an_es_module():
     tasks = (assets / "js" / "tasks.js").read_text(encoding="utf-8")
     structured_assets = (assets / "js" / "assets.js").read_text(encoding="utf-8")
 
-    assert '<script type="module" src="/app.js?v=chapter-delete-1"></script>' in html
-    assert 'import "/js/application.js?v=chapter-delete-1"' in app
+    assert '<script type="module" src="/app.js?v=agent-activity-1"></script>' in html
+    assert 'import "/js/application.js?v=agent-activity-1"' in app
     assert 'from "/js/core.js"' in application
     assert "export const state" in core
     assert "export async function api" in core
@@ -63,6 +64,36 @@ def test_studio_assets_load_shared_core_as_an_es_module():
     assert "\\`" not in application
     assert "innerHTML" not in application
     assert "appendSafeChatMarkup" in application
+
+
+def test_studio_advanced_tools_explain_scope_and_support_accessible_help():
+    assets = Path(__file__).parent.parent / "tools" / "studio_assets"
+    html = (assets / "index.html").read_text(encoding="utf-8")
+    application = (assets / "js" / "application.js").read_text(encoding="utf-8")
+    styles = (assets / "styles.css").read_text(encoding="utf-8")
+    tools_view = html.split('<section id="tools-view"', 1)[1].split("</main>", 1)[0]
+
+    help_ids = (
+        "tool-sync-help",
+        "tool-context-help",
+        "tool-asset-help",
+        "tool-run-help",
+        "tool-plan-help",
+        "tool-forecast-help",
+    )
+    assert tools_view.count('class="tool-help-button"') == len(help_ids)
+    assert tools_view.count('data-tool-help aria-expanded="false"') == len(help_ids)
+    for help_id in help_ids:
+        assert f'aria-controls="{help_id}"' in tools_view
+        assert f'id="{help_id}" class="tool-help-panel" hidden' in tools_view
+    assert "只读" in tools_view
+    assert "会写入" in tools_view
+    assert "候选不直接改大纲" in tools_view
+    assert "function toggleToolHelp(button)" in application
+    assert "closeOpenToolHelp(true)" in application
+    assert '.tool-help-button[aria-expanded="true"]' in styles
+    assert ".tool-help-panel[hidden]" in styles
+    assert ".tool-workflow-heading" in styles
 
 
 def test_studio_writer_workspace_keeps_primary_navigation_and_contextual_tools():
@@ -86,6 +117,10 @@ def test_studio_writer_workspace_keeps_primary_navigation_and_contextual_tools()
     assert 'id="revision-hunks-list"' in html
     assert 'id="delete-chapter"' in html
     assert 'id="chapter-delete-dialog"' in html
+    assert 'id="writing-targets-open"' in html
+    assert 'id="writing-targets-dialog"' in html
+    assert 'id="writing-target-chapter"' in html
+    assert 'api("/api/project/writing-targets"' in application
     assert 'id="reference-synthesize"' in html
     assert 'id="reference-structure-confirm"' in html
     assert 'id="reference-send-goethe"' in html
@@ -154,6 +189,8 @@ def test_studio_structured_asset_ui_keeps_raw_mode_and_explicit_import_decisions
     assert ".asset-field-section" in styles
     assert ".asset-relation-options[hidden]" in styles
     assert ".asset-relation-reference-row" in styles
+    assert "@media (max-width: 900px)" in styles
+    assert ".asset-relation-row {\n    position: relative;\n    padding-right: 44px;" in styles
     assert "--asset-label-column: 128px;" in styles
     assert "grid-template-columns: var(--asset-label-column) minmax(0, 1fr);" in styles
     assert ".asset-form-actions .form-status {\n  grid-column: 2;" in styles
@@ -172,6 +209,9 @@ def test_studio_continuity_distinguishes_field_and_registered_relations():
     assert 'line.classList.toggle("annotation", edge.origin === "annotation")' in javascript
     assert 'refreshContinuity: loadContinuity' in javascript
     assert ".relationship-edge.annotation" in styles
+    assert html.index('class="tool-card relationship-card"') < html.index('class="truth-grid"')
+    assert ".relationship-card {\n  margin-top: 26px;\n  padding: 0;\n  border: 0;" in styles
+    assert "height: clamp(620px, 68vh, 760px);" in styles
 
 
 def test_studio_post_route_registry_matches_application_surface():
@@ -471,8 +511,8 @@ def test_agent_chat_ui_supports_sessions_and_collapsible_inspector():
     assert 'id="agent-session-list"' in html
     assert 'id="inspector-collapse"' in html
     assert 'id="inspector-restore"' in html
-    assert 'id="agent-activity"' in html
-    assert 'id="agent-activity-steps"' in html
+    assert 'id="agent-activity-template"' in html
+    assert 'class="agent-activity-events"' in html
     assert "agentSessionId" in javascript
     assert '"/api/agent/session"' in javascript
     assert '"/api/agent/session/delete"' in javascript
@@ -481,6 +521,11 @@ def test_agent_chat_ui_supports_sessions_and_collapsible_inspector():
     assert "session_id" in javascript
     assert "startAgentActivity" in javascript
     assert "pollAgentActivity" in javascript
+    assert "renderAgentActivityEvents" in javascript
+    assert "renderAgentActivityEvent" in javascript
+    assert 'appendAgentActivityDetail(content, "查看参数"' in javascript
+    assert 'appendAgentActivityDetail(content, "查看结果"' in javascript
+    assert "preserveHistory: true" in javascript
     assert "/api/agent/activity" in javascript
     assert "finishAgentActivity" in javascript
     assert "耗时较久" in javascript
@@ -492,6 +537,8 @@ def test_agent_chat_ui_supports_sessions_and_collapsible_inspector():
     assert ".agent-activity" in styles
     assert ".agent-activity.long-running" in styles
     assert ".agent-activity.possibly-stuck" in styles
+    assert ".agent-activity-event-detail" in styles
+    assert ".agent-activity-chevron" in styles
     assert "@keyframes agentPulse" in styles
     assert ".app.inspector-collapsed" in styles
 
@@ -788,6 +835,43 @@ def test_studio_outline_structure_and_smart_chapter_creation(tmp_path: Path, mon
             }
         )
     assert stale.value.status == HTTPStatus.CONFLICT
+
+
+def test_studio_persists_unified_writing_targets_and_applies_them_to_outline(
+    tmp_path: Path,
+):
+    init_project(tmp_path, "demo")
+    novel = tmp_path / "data" / "novels" / "demo"
+    (novel / "src" / "outline.md").write_text(
+        "# 第一卷\n## 第一幕\n### 第一节\n#### 第一章：开门\n脚印。\n",
+        encoding="utf-8",
+    )
+    app = StudioApplication(tmp_path)
+
+    workspace = app.update_writing_targets(
+        {
+            "book_words": 240000,
+            "chapter_words": 3600,
+            "outline_volume_words": 900,
+            "outline_act_words": 600,
+            "outline_section_words": 360,
+            "outline_chapter_words": 220,
+        }
+    )
+
+    assert workspace["project"]["writing_targets"]["chapter_words"] == 3600
+    assert workspace["snapshot"]["target_units"] == 240000
+    stored = yaml.safe_load((tmp_path / "novel_config.yaml").read_text(encoding="utf-8"))
+    assert stored["writing_targets"]["outline_section_words"] == 360
+
+    outline = app.outline_structure()
+    chapter = outline["roots"][0]["children"][0]["children"][0]["children"][0]
+    assert outline["recommendation"]["target_words"] == 3600
+    assert chapter["chapter_target_words"] == 3600
+    assert chapter["detail_target_words"] == 220
+
+    with pytest.raises(StudioError, match="每章正文默认必须在"):
+        app.update_writing_targets({"chapter_words": 100})
 
 
 def test_studio_incrementally_edits_outline_tree_with_revision_guard(tmp_path: Path):
@@ -1647,7 +1731,17 @@ def test_studio_http_exposes_real_agent_activity(tmp_path: Path):
     )
     server.app._record_agent_activity(
         "run-http-activity-01",
-        {"event": "tool_started", "turn": 2, "tool": "get_context"},
+        {
+            "event": "tool_started",
+            "turn": 2,
+            "tool": "get_context",
+            "tool_call_id": "call_context_01",
+            "arguments": {
+                "chapter_id": "ch_007",
+                "api_key": "sk-abcdefghijklmnop",
+                "note": "Authorization: Bearer private-value",
+            },
+        },
     )
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -1660,6 +1754,15 @@ def test_studio_http_exposes_real_agent_activity(tmp_path: Path):
         assert activity["title"] == "Dante 正在调用工具"
         assert activity["note"] == "第 2 轮：组装章节上下文"
         assert activity["tool"] == "get_context"
+        event = activity["events"][0]
+        assert event["sequence"] == 1
+        assert event["tool_label"] == "组装章节上下文"
+        assert event["tool_call_id"] == "call_context_01"
+        assert event["arguments"]
+        assert "chapter_id" in event["arguments"]
+        assert "sk-abcdefghijklmnop" not in event["arguments"]
+        assert "private-value" not in event["arguments"]
+        assert "redacted" in event["arguments"]
     finally:
         server.shutdown()
         server.server_close()

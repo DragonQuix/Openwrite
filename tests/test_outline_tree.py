@@ -92,6 +92,30 @@ def test_outline_tree_recommends_first_planned_chapter_and_recent_word_average(t
     assert recommendation["status"] == "planned"
 
 
+def test_outline_tree_prefers_explicit_chapter_target_over_project_default(tmp_path: Path):
+    outline = tmp_path / "src" / "outline.md"
+    outline.parent.mkdir(parents=True)
+    outline.write_text(
+        "# 第一卷\n## 第一幕\n### 第一节\n"
+        "#### 第一章：开门\n> 预估字数: 4200\n脚印。\n",
+        encoding="utf-8",
+    )
+
+    result = build_outline_structure(
+        tmp_path,
+        writing_targets={
+            "chapter_words": 3200,
+            "outline_chapter_words": 240,
+        },
+    )
+    chapter = result["roots"][0]["children"][0]["children"][0]["children"][0]
+
+    assert result["recommendation"]["target_words"] == 4200
+    assert result["recommendation"]["target_source"] == "outline"
+    assert chapter["chapter_target_words"] == 4200
+    assert chapter["detail_target_words"] == 240
+
+
 def test_outline_tree_can_select_drafted_chapter_without_overwriting_it(tmp_path: Path):
     _write_outline(tmp_path)
     manuscript = tmp_path / "data" / "manuscript" / "arc_001"

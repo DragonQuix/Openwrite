@@ -40,6 +40,9 @@ def test_tool_arguments_are_validated_and_credentials_are_redacted():
         validate_tool_arguments([{"name": "read", "arguments": "{broken"}])
     assert raised.value.code == "MALFORMED_TOOL_ARGUMENTS"
     assert "sk-" not in redact_sensitive_text("authorization: Bearer sk-example123456")
+    assert "private-value" not in redact_sensitive_text(
+        "Authorization: Bearer private-value"
+    )
 
 
 def test_wrapped_provider_timeout_has_stable_code_and_no_secret():

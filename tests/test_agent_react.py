@@ -334,11 +334,12 @@ def test_react_agent_emits_real_model_tool_and_completion_activity():
     client = RecordingClient(
         [
             _tool_response(
+                "我先读取作品状态。",
                 tool_calls=[
                     {
                         "id": "call_1",
                         "name": "get_status",
-                        "arguments": "{}",
+                        "arguments": '{"chapter_id": "ch_007"}',
                     }
                 ]
             ),
@@ -378,7 +379,10 @@ def test_react_agent_emits_real_model_tool_and_completion_activity():
         "run_completed",
     ]
     assert events[3]["tool"] == "get_status"
+    assert events[2]["message"] == "我先读取作品状态。"
+    assert events[3]["arguments"] == {"chapter_id": "ch_007"}
     assert events[4]["ok"] is True
+    assert '"stage": "chapter_preflight"' in events[4]["result"]
 
 
 def test_react_agent_stops_after_repeated_tool_failures():
@@ -480,6 +484,112 @@ def test_react_agent_stops_after_repeated_tool_exceptions():
     assert len(client.calls) == 2
     assert "unstable_tool 连续失败 2 次" in result
     assert "boom" in result
+
+
+def test_react_agent_exposes_only_explicitly_requested_tool():
+    client = RecordingClient([_tool_response("已完成")])
+    agent = ReActAgent(
+        client=client,
+        model="demo",
+        tools=[
+            ToolDefinition(
+                name="promote_source_pack",
+                description="晋升来源包",
+                parameters={"type": "object", "properties": {}},
+            ),
+            ToolDefinition(
+                name="read_project_document",
+                description="读取项目文档",
+                parameters={"type": "object", "properties": {}},
+            ),
+        ],
+        system_prompt="系统提示",
+    )
+
+    result = asyncio.run(
+        agent.run("只调用 promote_source_pack，不要调用任何其他工具。")
+    )
+
+    assert result == "已完成"
+    assert [
+        item["function"]["name"] for item in client.calls[0]["tools"]
+    ] == ["promote_source_pack"]
+
+
+def test_react_agent_keeps_primary_success_when_followup_tool_repeatedly_fails():
+    client = RecordingClient(
+        [
+            _tool_response(
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "name": "promote_source_pack",
+                        "arguments": '{"source_id": "source_a"}',
+                    }
+                ]
+            ),
+            _tool_response(
+                tool_calls=[
+                    {
+                        "id": "call_2",
+                        "name": "read_project_document",
+                        "arguments": '{"path": "novel_config.yaml"}',
+                    }
+                ]
+            ),
+            _tool_response(
+                tool_calls=[
+                    {
+                        "id": "call_3",
+                        "name": "read_project_document",
+                        "arguments": '{"path": "data/style/composed.md"}',
+                    }
+                ]
+            ),
+        ]
+    )
+    events: list[dict] = []
+    agent = ReActAgent(
+        client=client,
+        model="demo",
+        tools=[
+            ToolDefinition(
+                name="promote_source_pack",
+                description="晋升来源包",
+                parameters={"type": "object", "properties": {}},
+            ),
+            ToolDefinition(
+                name="read_project_document",
+                description="读取项目文档",
+                parameters={"type": "object", "properties": {}},
+            ),
+        ],
+        system_prompt="系统提示",
+        activity_callback=events.append,
+    )
+    read_calls: list[dict] = []
+    agent._register_tool_executors(
+        {
+            "promote_source_pack": lambda args: {
+                "ok": True,
+                "source_id": args["source_id"],
+                "promoted": ["style"],
+            },
+            "read_project_document": lambda args: read_calls.append(args)
+            or {"ok": True},
+        }
+    )
+
+    result = asyncio.run(
+        agent.run("只调用 promote_source_pack，晋升后报告结果。")
+    )
+
+    assert "主操作 promote_source_pack 已成功" in result
+    assert '"promoted": ["style"]' in result
+    assert "read_project_document 连续失败 2 次" in result
+    assert read_calls == []
+    assert not any(event["event"] == "run_failed" for event in events)
+    assert events[-1]["event"] == "run_completed"
 
 
 def test_react_agent_does_not_abort_on_confirmation_policy_blocks():

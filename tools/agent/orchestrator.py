@@ -19,6 +19,7 @@ from ..story_planning import StoryPlanningStore
 from ..style_synthesizer import render_style_manifest_summary
 from ..utils import parse_chapter_id
 from ..workflow_scheduler import WorkflowScheduler
+from ..writing_targets import normalize_writing_targets, outline_prompt_constraints
 from .book_state import BookStage, BookState, BookStateStore
 from .toolkits import ORCHESTRATOR_TOOLKIT, WRITING_TOOLKIT
 
@@ -1147,6 +1148,7 @@ class OpenWriteOrchestrator:
     def _generate_outline_draft(self, request_text: str) -> str:
         story_title = self._current_story_title()
         context = self._build_story_context()
+        targets = self._writing_targets()
         system_prompt = f"""你是 OpenWrite 的小说规划师。
 
 请输出一份可直接落盘的四级 Markdown 大纲草案，只输出 Markdown，不要解释，不要代码围栏。
@@ -1157,7 +1159,9 @@ class OpenWriteOrchestrator:
 - 总纲标题下先给 1-2 段故事简介，说明主角、核心冲突和整本书的大方向
 - 输出 2-3 篇，每篇 2-3 节，每节 2-3 章
 - 采用滚动大纲思路，优先保证前半段可写
-- 保持中文网文风格，信息具体，不写空泛套话"""
+- 保持中文网文风格，信息具体，不写空泛套话
+
+{outline_prompt_constraints(targets)}"""
         user_prompt = f"项目名：{story_title}\n用户请求：{request_text}\n\n已有设定：\n{context}"
         return self._strip_code_fences(
             self._chat_text(system_prompt, user_prompt, temperature=0.4, max_tokens=6000)
@@ -1408,6 +1412,15 @@ class OpenWriteOrchestrator:
         if match:
             return match.group(1).strip()
         return self.novel_id
+
+    def _writing_targets(self) -> dict[str, int]:
+        config_path = self.project_root / "novel_config.yaml"
+        try:
+            config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError):
+            config = {}
+        stored = config.get("writing_targets") if isinstance(config, dict) else {}
+        return normalize_writing_targets(stored)
 
     def _strip_code_fences(self, text: str) -> str:
         stripped = text.strip()

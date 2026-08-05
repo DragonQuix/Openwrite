@@ -399,6 +399,7 @@ class TestToolsRegistry:
             "cancel_chapter_run_v2",
             "diagnose_runtime",
             "manage_rolling_plan",
+            "manage_narrative_forecast",
             "manage_manuscript_versions",
             "manage_annotations",
             "get_runtime_state",

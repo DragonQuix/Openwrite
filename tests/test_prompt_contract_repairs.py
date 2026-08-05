@@ -183,6 +183,73 @@ def test_writer_observer_receives_full_chapter_and_length_is_enforced():
     assert raised.value.code == "CHAPTER_LENGTH_OUT_OF_RANGE"
 
 
+def test_writer_rewrites_once_when_first_draft_misses_length_range():
+    writer = WriterAgent.__new__(WriterAgent)
+    responses = iter(
+        [
+            SimpleNamespace(
+                content="# 第一章：钟差\n\n" + "长" * 1300,
+                usage={"total_tokens": 100},
+            ),
+            SimpleNamespace(
+                content="# 第一章：钟差\n\n" + "准" * 1000,
+                usage={"total_tokens": 80},
+            ),
+        ]
+    )
+    calls: list[list] = []
+
+    def chat(*, messages, **kwargs):
+        calls.append(messages)
+        return next(responses)
+
+    writer.chat = chat
+
+    result = asyncio.run(
+        writer._creative_write({}, chapter_number=1, temperature=0.7, target_words=1000)
+    )
+
+    assert len(calls) == 2
+    assert "长度不合格" in calls[1][-1].content
+    assert result["word_count"] == 1000
+    assert result["usage"]["total_tokens"] == 180
+
+
+def test_writer_retries_truncated_state_settlement_with_compact_schema():
+    writer = WriterAgent.__new__(WriterAgent)
+    calls: list[list] = []
+
+    def chat(*, messages, **kwargs):
+        calls.append(messages)
+        if len(calls) == 1:
+            raise ProviderResponseError("MODEL_OUTPUT_TRUNCATED", "模型输出被截断")
+        return SimpleNamespace(
+            content=(
+                "state_updates:\n"
+                '  current_state: "沈烬进入旧港编号门。"\n'
+                'chapter_summary: "沈烬按铜钟节拍进入旧港编号门，并发现房间记录未兑现的承诺。"\n'
+            ),
+            usage={"total_tokens": 40},
+        )
+
+    writer.chat = chat
+
+    result = asyncio.run(
+        writer._settle(
+            {},
+            chapter_number=2,
+            title="编号门",
+            content="沈烬推开门。",
+            observations="- 沈烬进入编号门",
+        )
+    )
+
+    assert len(calls) == 2
+    assert "极简小说状态增量" in calls[1][0].content
+    assert result["state_updates"]["current_state"] == "沈烬进入旧港编号门。"
+    assert result["state_delta"]["chapter_id"] == "ch_002"
+
+
 @pytest.mark.parametrize(
     "collection",
     ["characters", "resources", "relationship_states", "foreshadowing_refs"],

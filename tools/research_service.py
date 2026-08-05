@@ -271,6 +271,11 @@ class ResearchService:
         target_metadata.write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
+        if metadata["status"] == "failed":
+            raise ResearchServiceError(
+                "DeepResearch 未通过内部质量或预算门，失败产物已保留供诊断",
+                code="RESEARCH_EPISODE_FAILED",
+            )
         return {
             "report_id": report_id,
             "episode_id": episode_id,
@@ -293,6 +298,11 @@ class ResearchService:
             raise ResearchServiceError(
                 str(exc), code="RESEARCH_SEARCH_CREDENTIAL_MISSING"
             ) from exc
+        if search != "jina":
+            jina_key = self.settings_store.credential("jina")
+            if jina_key:
+                env["JINA_API_KEY"] = jina_key
+                env.setdefault("FETCH_MODE", "fallback")
         if model_profile is not None:
             profile_provider = str(model_profile.get("provider") or "openai").strip().lower()
             if profile_provider == "anthropic":

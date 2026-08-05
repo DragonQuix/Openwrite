@@ -263,6 +263,7 @@ function suggestProjectPath() {
 
 function renderWorkspace() {
   const { snapshot, model } = state.workspace;
+  $("#writing-targets-open").disabled = !state.workspace.initialized;
   $("#book-title").textContent = snapshot.title;
   $("#book-location").textContent = `${snapshot.current_arc} / ${snapshot.current_chapter}`;
   $("#metric-words").textContent = formatNumber(snapshot.writing_units);
@@ -1107,6 +1108,16 @@ function renderOutlineDetail() {
       status.className = `outline-meta-status ${node.status}`;
       status.textContent = node.status === "drafted" ? "已有正文" : "待写";
       meta.append(status);
+    }
+    if (node.detail_target_words) {
+      const detailTarget = document.createElement("span");
+      detailTarget.textContent = `大纲 ${formatNumber(node.content_units || 0)} / ${formatNumber(node.detail_target_words)} 字`;
+      meta.append(detailTarget);
+    }
+    if (node.kind === "chapter" && node.chapter_target_words) {
+      const bodyTarget = document.createElement("span");
+      bodyTarget.textContent = `正文目标 ${formatNumber(node.chapter_target_words)} 字`;
+      meta.append(bodyTarget);
     }
   }
   renderOutlineSummaryEditor(node);
@@ -2135,6 +2146,56 @@ function openProjectDialog() {
   $("#open-project-path").focus();
 }
 
+function openWritingTargetsDialog() {
+  if (!state.workspace?.initialized) {
+    showToast("请先打开作品", true);
+    return;
+  }
+  const targets = state.workspace.project?.writing_targets || {};
+  $("#writing-target-book").value = String(targets.book_words || 100000);
+  $("#writing-target-chapter").value = String(targets.chapter_words || 3000);
+  $("#writing-target-volume").value = String(targets.outline_volume_words || 800);
+  $("#writing-target-act").value = String(targets.outline_act_words || 500);
+  $("#writing-target-section").value = String(targets.outline_section_words || 300);
+  $("#writing-target-outline-chapter").value = String(targets.outline_chapter_words || 180);
+  $("#writing-targets-status").textContent = "";
+  $("#writing-targets-dialog").showModal();
+  $("#writing-target-chapter").focus();
+  $("#writing-target-chapter").select();
+}
+
+async function saveWritingTargets(event) {
+  event.preventDefault();
+  const submit = $("#writing-targets-submit");
+  const status = $("#writing-targets-status");
+  submit.disabled = true;
+  status.textContent = "正在保存字数规划…";
+  try {
+    state.workspace = await api("/api/project/writing-targets", {
+      method: "POST",
+      body: JSON.stringify({
+        book_words: Number($("#writing-target-book").value),
+        chapter_words: Number($("#writing-target-chapter").value),
+        outline_volume_words: Number($("#writing-target-volume").value),
+        outline_act_words: Number($("#writing-target-act").value),
+        outline_section_words: Number($("#writing-target-section").value),
+        outline_chapter_words: Number($("#writing-target-outline-chapter").value),
+      }),
+    });
+    renderWorkspace();
+    if (state.view === "outline") {
+      const selected = selectedOutlineNode();
+      await loadOutline(selected?.kind === "chapter" ? selected.id : "");
+    }
+    $("#writing-targets-dialog").close();
+    showToast("字数规划已保存");
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
+}
+
 async function openProject(event) {
   event.preventDefault();
   const submit = $("#open-project-submit");
@@ -2279,8 +2340,7 @@ function renderOperations() {
     diagnosticRoot.append(row);
   });
   runtimeFindings.forEach((finding) => {
-    const row = document.createElement("button");
-    row.type = "button";
+    const row = document.createElement("div");
     row.className = `operation-row diagnostic-${finding.severity}`;
     const name = document.createElement("strong");
     name.textContent = finding.summary;
@@ -2300,6 +2360,7 @@ function renderOperations() {
   renderRuntimeSkillStatus(operations);
   renderChapterRuns(operations.chapter_runs_v2 || {});
   renderRollingPlans(operations.rolling_plans || {});
+  renderNarrativeForecasts(operations.narrative_forecasts || {});
 }
 
 let rollingPlanItems = [];
@@ -2342,6 +2403,359 @@ function sendRollingPlanToGoethe() {
   chooseAgent("goethe");
   setView("agents");
   $("#chat-input").value = `请根据滚动规划候选 ${selectedRollingPlan.candidate_id} 形成完整 Markdown 大纲提案。先调用 manage_rolling_plan get 读取候选，完成后调用 manage_rolling_plan stage 暂存提案，不要直接确认覆盖大纲。`;
+  $("#chat-input").focus();
+}
+
+let narrativeForecastItems = [];
+let selectedNarrativeForecast = null;
+let activeNarrativeBranchId = "";
+let narrativeForecastChapterOptions = [];
+let narrativeForecastRecommendedChapterId = "";
+
+function renderNarrativeForecastChapterOptions(payload) {
+  if (Array.isArray(payload.chapter_options)) {
+    narrativeForecastChapterOptions = payload.chapter_options;
+    narrativeForecastRecommendedChapterId = payload.recommended_chapter_id || "";
+  }
+  const select = $("#narrative-forecast-anchor");
+  const previous = select.value;
+  select.replaceChildren();
+  narrativeForecastChapterOptions.forEach((chapter) => {
+    const option = document.createElement("option");
+    const status = chapter.status === "drafted" ? "已有正文" : "待写";
+    option.value = chapter.id;
+    option.textContent = `${chapter.id} · ${chapter.title} · ${status}`;
+    option.title = [...(chapter.path || []), chapter.title].join(" / ");
+    select.append(option);
+  });
+  if (!narrativeForecastChapterOptions.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "大纲中暂无章节";
+    select.append(option);
+  }
+  const preferred = narrativeForecastChapterOptions.find((chapter) => chapter.id === previous)
+    || narrativeForecastChapterOptions.find(
+      (chapter) => chapter.id === narrativeForecastRecommendedChapterId,
+    )
+    || narrativeForecastChapterOptions[0];
+  select.value = preferred?.id || "";
+  $("#narrative-forecast-create").disabled = !preferred;
+}
+
+function renderNarrativeForecasts(payload) {
+  renderNarrativeForecastChapterOptions(payload);
+  narrativeForecastItems = payload.forecasts || [];
+  const select = $("#narrative-forecast-select");
+  const previous = selectedNarrativeForecast?.forecast_id || select.value;
+  select.replaceChildren();
+  narrativeForecastItems.forEach((forecast) => {
+    const option = document.createElement("option");
+    option.value = forecast.forecast_id;
+    const stateLabel = forecast.effective_state === "stale"
+      ? "已过期"
+      : (forecast.state === "active" ? "已完成" : "生成中");
+    const selectedLabel = forecast.selected_branch_id ? ` · 已选 ${forecast.selected_branch_id}` : "";
+    const anchorLabel = forecast.anchor_chapter_id ? ` · ${forecast.anchor_chapter_id}` : "";
+    option.textContent = `${forecast.divergence.slice(0, 42)}${anchorLabel} · ${stateLabel}${selectedLabel}`;
+    select.append(option);
+  });
+  if (!narrativeForecastItems.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "暂无推演";
+    select.append(option);
+  }
+  selectedNarrativeForecast = narrativeForecastItems.find((item) => item.forecast_id === previous)
+    || narrativeForecastItems[0]
+    || null;
+  if (selectedNarrativeForecast) select.value = selectedNarrativeForecast.forecast_id;
+  $("#narrative-forecast-count").textContent = String(narrativeForecastItems.length);
+  renderSelectedNarrativeForecast();
+}
+
+function renderSelectedNarrativeForecast() {
+  const forecast = selectedNarrativeForecast;
+  const result = $("#narrative-forecast-result");
+  result.hidden = !forecast;
+  if (!forecast) {
+    activeNarrativeBranchId = "";
+    return;
+  }
+  const stale = forecast.effective_state === "stale" || forecast.stale;
+  const stateLabel = stale ? "上下文已变" : (forecast.state === "active" ? "推演完成" : "等待 Goethe");
+  $("#narrative-forecast-state").textContent = stateLabel;
+  $("#narrative-forecast-state").classList.toggle("stale", stale);
+  $("#narrative-forecast-question").textContent = forecast.divergence;
+  const anchorLabel = forecast.anchor_chapter_id
+    ? `${forecast.anchor_chapter_id} · ${forecast.anchor_chapter_title}`
+    : `第 ${forecast.base_chapter} 章之后 · 旧推演未记录锚点`;
+  $("#narrative-forecast-meta").textContent = `锚点 ${anchorLabel} · ${forecast.branch_count} 条分支 · 覆盖 ${forecast.horizon} 章`;
+  renderNarrativeForecastComparison(forecast);
+
+  const branches = forecast.branches || [];
+  if (!branches.some((branch) => branch.branch_id === activeNarrativeBranchId)) {
+    activeNarrativeBranchId = forecast.selected_branch_id || branches[0]?.branch_id || "";
+  }
+  renderNarrativeForecastTabs(forecast);
+  renderNarrativeForecastBranch(forecast);
+}
+
+function renderNarrativeForecastComparison(forecast) {
+  const root = $("#narrative-forecast-comparison");
+  root.replaceChildren();
+  const branches = forecast.branches || [];
+  if (!branches.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "上下文已建立，等待 Goethe 返回结构化分支。";
+    root.append(empty);
+    return;
+  }
+  const table = document.createElement("table");
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  const corner = document.createElement("th");
+  corner.scope = "col";
+  corner.textContent = "比较项";
+  headRow.append(corner);
+  branches.forEach((branch) => {
+    const cell = document.createElement("th");
+    cell.scope = "col";
+    cell.textContent = branch.title;
+    headRow.append(cell);
+  });
+  head.append(headRow);
+  table.append(head);
+
+  const body = document.createElement("tbody");
+  const rows = [
+    ["意图匹配", (branch) => `${branch.intent_alignment?.score ?? 0}/100`],
+    ["分支前提", (branch) => branch.premise || "未填写"],
+    ["未来节拍", (branch) => `${(branch.beats || []).length} 个`],
+    ["一致性风险", (branch) => `${(branch.risks || []).length} 项`],
+  ];
+  rows.forEach(([label, valueFor]) => {
+    const row = document.createElement("tr");
+    const heading = document.createElement("th");
+    heading.scope = "row";
+    heading.textContent = label;
+    row.append(heading);
+    branches.forEach((branch) => {
+      const cell = document.createElement("td");
+      cell.textContent = valueFor(branch);
+      row.append(cell);
+    });
+    body.append(row);
+  });
+  table.append(body);
+  root.append(table);
+}
+
+function renderNarrativeForecastTabs(forecast) {
+  const root = $("#narrative-forecast-tabs");
+  root.replaceChildren();
+  (forecast.branches || []).forEach((branch) => {
+    const button = document.createElement("button");
+    const active = branch.branch_id === activeNarrativeBranchId;
+    button.type = "button";
+    button.className = `segment${active ? " active" : ""}`;
+    button.role = "tab";
+    button.setAttribute("aria-selected", String(active));
+    button.textContent = `${branch.branch_id.replace("branch-", "路线 ")} · ${branch.title}`;
+    button.addEventListener("click", () => {
+      activeNarrativeBranchId = branch.branch_id;
+      renderNarrativeForecastTabs(forecast);
+      renderNarrativeForecastBranch(forecast);
+    });
+    root.append(button);
+  });
+  root.hidden = !(forecast.branches || []).length;
+}
+
+function appendForecastListSection(root, title, items, formatter = (item) => item) {
+  const section = document.createElement("section");
+  const heading = document.createElement("h4");
+  heading.textContent = title;
+  section.append(heading);
+  if (items.length) {
+    const list = document.createElement("ul");
+    items.forEach((item) => {
+      const row = document.createElement("li");
+      row.textContent = formatter(item);
+      list.append(row);
+    });
+    section.append(list);
+  } else {
+    const empty = document.createElement("p");
+    empty.textContent = "无";
+    section.append(empty);
+  }
+  root.append(section);
+}
+
+function renderNarrativeForecastBranch(forecast) {
+  const root = $("#narrative-forecast-detail");
+  root.replaceChildren();
+  const branch = (forecast.branches || []).find((item) => item.branch_id === activeNarrativeBranchId);
+  const selectButton = $("#narrative-forecast-select-branch");
+  const continueButton = $("#narrative-forecast-continue");
+  if (!branch) {
+    selectButton.disabled = true;
+    continueButton.disabled = true;
+    return;
+  }
+
+  const header = document.createElement("div");
+  header.className = "narrative-forecast-detail-heading";
+  const heading = document.createElement("h3");
+  heading.textContent = branch.title;
+  const score = document.createElement("strong");
+  score.textContent = `${branch.intent_alignment?.score ?? 0}/100`;
+  header.append(heading, score);
+  const premise = document.createElement("p");
+  premise.className = "narrative-forecast-premise";
+  premise.textContent = branch.premise;
+  root.append(header, premise);
+
+  appendForecastListSection(
+    root,
+    "未来章节节拍",
+    branch.beats || [],
+    (beat) => `第 +${beat.offset} 章${beat.chapter_id ? `（${beat.chapter_id}）` : ""}：${beat.summary}`,
+  );
+  appendForecastListSection(
+    root,
+    "人物决策",
+    branch.character_decisions || [],
+    (item) => `${item.character}：${item.decision}`,
+  );
+  const changes = branch.projected_changes || {};
+  appendForecastListSection(root, "人物与关系变化", [
+    ...(changes.characters || []).map((item) => `人物：${item}`),
+    ...(changes.relationships || []).map((item) => `关系：${item}`),
+    ...(changes.world || []).map((item) => `世界：${item}`),
+    ...(changes.foreshadowing || []).map((item) => `伏笔：${item}`),
+  ]);
+  appendForecastListSection(
+    root,
+    "一致性风险",
+    branch.risks || [],
+    (risk) => `[${forecastRiskLabel(risk.kind)}] ${risk.description}`,
+  );
+  appendForecastListSection(root, "不确定性", branch.uncertainties || []);
+
+  const rationale = document.createElement("p");
+  rationale.className = "narrative-forecast-rationale";
+  rationale.textContent = branch.intent_alignment?.rationale || "";
+  root.append(rationale);
+  const selected = forecast.selected_branch_id === branch.branch_id;
+  selectButton.disabled = selected;
+  selectButton.textContent = selected ? "当前规划分支" : "选为规划分支";
+  continueButton.disabled = !forecast.selected_branch_id;
+}
+
+function forecastRiskLabel(kind) {
+  return {continuity: "连续性", causality: "因果", character: "人物"}[kind] || kind;
+}
+
+async function createNarrativeForecast() {
+  const divergence = $("#narrative-forecast-divergence").value.trim();
+  const anchorChapterId = $("#narrative-forecast-anchor").value;
+  if (!divergence) {
+    $("#narrative-forecast-status").textContent = "请先填写分歧点";
+    $("#narrative-forecast-divergence").focus();
+    return;
+  }
+  if (!anchorChapterId) {
+    $("#narrative-forecast-status").textContent = "请先选择分歧点所在的大纲章节";
+    $("#narrative-forecast-anchor").focus();
+    return;
+  }
+  const button = $("#narrative-forecast-create");
+  button.disabled = true;
+  $("#narrative-forecast-status").textContent = "正在固化当前正典上下文…";
+  try {
+    const forecast = await api("/api/narrative-forecasts", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "create",
+        divergence,
+        anchor_chapter_id: anchorChapterId,
+        branch_count: Number($("#narrative-forecast-branch-count").value || 3),
+        horizon: Number($("#narrative-forecast-horizon").value || 5),
+      }),
+    });
+    narrativeForecastItems.unshift(forecast);
+    selectedNarrativeForecast = forecast;
+    activeNarrativeBranchId = "";
+    renderNarrativeForecasts({forecasts: narrativeForecastItems});
+    $("#narrative-forecast-status").textContent = `已绑定 ${forecast.anchor_chapter_id}，等待发送给 Goethe`;
+    chooseAgent("goethe");
+    setView("agents");
+    $("#chat-input").value = `请执行剧情多线推演 ${forecast.forecast_id}，分歧锚点是 ${forecast.anchor_chapter_id}「${forecast.anchor_chapter_title}」。先调用 manage_narrative_forecast get 读取固化上下文，再严格按 goethe_brief 生成 ${forecast.branch_count} 条相互隔离的路线，并调用 manage_narrative_forecast stage 保存结果。不要替我选择分支，也不要修改大纲或正文。`;
+    $("#chat-input").focus();
+    showToast("推演上下文已建立，请发送给 Goethe");
+  } catch (error) {
+    $("#narrative-forecast-status").textContent = error.message;
+    showToast(error.message, true);
+  } finally {
+    button.disabled = !narrativeForecastChapterOptions.length;
+  }
+}
+
+async function refreshNarrativeForecasts() {
+  const button = $("#narrative-forecast-refresh");
+  button.disabled = true;
+  $("#narrative-forecast-status").textContent = "正在刷新推演结果…";
+  try {
+    const payload = await api("/api/narrative-forecasts", {
+      method: "POST",
+      body: JSON.stringify({action: "list", limit: 20}),
+    });
+    renderNarrativeForecasts(payload);
+    $("#narrative-forecast-status").textContent = payload.forecasts?.length ? "推演结果已刷新" : "暂无推演";
+  } catch (error) {
+    $("#narrative-forecast-status").textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function selectNarrativeForecastBranch() {
+  if (!selectedNarrativeForecast || !activeNarrativeBranchId) return;
+  const button = $("#narrative-forecast-select-branch");
+  button.disabled = true;
+  $("#narrative-forecast-status").textContent = "正在记录分支选择…";
+  try {
+    const updated = await api("/api/narrative-forecasts", {
+      method: "POST",
+      body: JSON.stringify({
+        action: "select",
+        forecast_id: selectedNarrativeForecast.forecast_id,
+        branch_id: activeNarrativeBranchId,
+        revision: selectedNarrativeForecast.revision,
+      }),
+    });
+    narrativeForecastItems = narrativeForecastItems.map((item) => (
+      item.forecast_id === updated.forecast_id ? updated : item
+    ));
+    selectedNarrativeForecast = updated;
+    renderNarrativeForecasts({forecasts: narrativeForecastItems});
+    $("#narrative-forecast-status").textContent = "分支已记录，canonical 大纲与正文未修改";
+  } catch (error) {
+    $("#narrative-forecast-status").textContent = error.message;
+  } finally {
+    renderNarrativeForecastBranch(selectedNarrativeForecast || {});
+  }
+}
+
+function continueSelectedNarrativeForecast() {
+  if (!selectedNarrativeForecast?.selected_branch_id) return;
+  const forecast = selectedNarrativeForecast;
+  chooseAgent("goethe");
+  setView("agents");
+  $("#chat-input").value = `请调用 manage_narrative_forecast get 读取 ${forecast.forecast_id}，围绕锚点 ${forecast.anchor_chapter_id || "（旧推演）"} 和已选的 ${forecast.selected_branch_id} 分析如何映射到现有大纲，并给出最小修改建议。这一轮先讨论，不要修改或确认 canonical 大纲。`;
   $("#chat-input").focus();
 }
 
@@ -3664,46 +4078,52 @@ async function submitChat(event) {
   const input = $("#chat-input");
   const message = input.value.trim();
   if (!message) return;
-  const tourAction = state.agent === "goethe" ? state.productTour.step : "";
-  const sessionId = activeAgentSessionId();
+  const requestAgent = state.agent;
+  const tourAction = requestAgent === "goethe" ? state.productTour.step : "";
+  const sessionId = activeAgentSessionId(requestAgent);
   appendChatMessage("user", "你", message);
   input.value = "";
   $("#chat-submit").disabled = true;
-  $("#chat-status").textContent = `${state.agent === "goethe" ? "Goethe" : "Dante"} 正在读取项目并思考…`;
-  const runId = startAgentActivity(state.agent, message);
+  $$('[data-agent]').forEach((button) => { button.disabled = true; });
+  $$(".agent-session-item").forEach((button) => { button.disabled = true; });
+  $("#chat-status").textContent = `${requestAgent === "goethe" ? "Goethe" : "Dante"} 正在处理…`;
+  const runId = startAgentActivity(requestAgent, message);
   advanceProductTourAfterAction(tourAction);
   try {
     const payload = await api("/api/chat", {
       method: "POST",
       body: JSON.stringify({
-        agent: state.agent,
+        agent: requestAgent,
         session_id: sessionId,
         run_id: runId,
         message,
       }),
     });
-    state.agentSessionId[state.agent] = payload.session_id || sessionId;
+    state.agentSessionId[requestAgent] = payload.session_id || sessionId;
+    await finishAgentActivity("complete");
     appendChatMessage(
       "assistant",
-      state.agent === "goethe" ? "Goethe" : "Dante",
+      requestAgent === "goethe" ? "Goethe" : "Dante",
       payload.content || "本轮已执行完成。",
       payload.content_html || "",
     );
     state.workspace = payload.workspace;
     renderWorkspace();
-    await loadAgentSurface(state.agent, activeAgentSessionId());
-    finishAgentActivity("complete");
+    await loadAgentSurface(requestAgent, activeAgentSessionId(requestAgent), { preserveHistory: true });
   } catch (error) {
+    await finishAgentActivity("error", error.message);
     appendChatMessage("assistant error", "系统", error.message);
-    finishAgentActivity("error", error.message);
   } finally {
     $("#chat-submit").disabled = false;
+    $$('[data-agent]').forEach((button) => { button.disabled = false; });
     $("#chat-status").textContent = "";
     input.focus();
   }
 }
 
 function appendChatMessage(role, author, content, renderedHtml = "") {
+  const log = $("#chat-log");
+  const follow = chatLogNearBottom(log);
   const item = document.createElement("article");
   item.className = `chat-message ${role}`;
   const name = document.createElement("strong");
@@ -3716,88 +4136,100 @@ function appendChatMessage(role, author, content, renderedHtml = "") {
     body.textContent = content;
   }
   item.append(name, body);
-  $("#chat-log").append(item);
-  item.scrollIntoView({ block: "end", behavior: "smooth" });
+  log.append(item);
+  if (follow) item.scrollIntoView({ block: "end", behavior: "smooth" });
+  return item;
 }
 
 function startAgentActivity(agent, message) {
-  const root = $("#agent-activity");
-  if (!root) return "";
-  if (state.agentActivity.hideTimer) {
-    clearTimeout(state.agentActivity.hideTimer);
-    state.agentActivity.hideTimer = null;
-  }
+  const template = $("#agent-activity-template");
+  if (!template) return "";
   if (state.agentActivity.timer) clearInterval(state.agentActivity.timer);
+  const log = $("#chat-log");
+  const follow = chatLogNearBottom(log);
+  const root = template.content.firstElementChild.cloneNode(true);
   state.agentActivity.startedAt = Date.now();
-  state.agentActivity.stepIndex = 0;
   state.agentActivity.agentLabel = agent === "goethe" ? "Goethe" : "Dante";
   state.agentActivity.baseNote = summarizeAgentActivityMessage(message);
   state.agentActivity.runId = createAgentRunId();
-  state.agentActivity.polling = false;
-  state.agentActivity.serverStepIndex = null;
+  state.agentActivity.pollPromise = null;
   state.agentActivity.serverTitle = `${state.agentActivity.agentLabel} 正在读取项目`;
   state.agentActivity.serverNote = "正在恢复会话、作品状态和本轮上下文。";
-  root.hidden = false;
-  root.classList.remove("complete", "error", "long-running", "possibly-stuck");
-  $("#agent-activity-title").textContent = `${state.agentActivity.agentLabel} 正在工作`;
-  $("#agent-activity-note").textContent = state.agentActivity.baseNote;
-  if (state.inspectorCollapsed) toggleInspectorCollapsed(false);
+  state.agentActivity.root = root;
+  state.agentActivity.eventList = root.querySelector(".agent-activity-events");
+  state.agentActivity.lastSequence = 0;
+  state.agentActivity.eventCount = 0;
+  state.agentActivity.lastEventName = "";
+  root.dataset.runId = state.agentActivity.runId;
+  root.querySelector(".agent-activity-title").textContent = `${state.agentActivity.agentLabel} 正在工作`;
+  root.querySelector(".agent-activity-note").textContent = state.agentActivity.baseNote;
+  renderAgentActivityEvent({ event: "connecting", timestamp: Date.now() / 1000 }, { synthetic: true });
+  log.append(root);
+  if (follow) root.scrollIntoView({ block: "end", behavior: "smooth" });
   updateAgentActivity();
   state.agentActivity.timer = setInterval(() => {
     updateAgentActivity();
     pollAgentActivity();
-  }, 1000);
+  }, 700);
+  setTimeout(() => {
+    if (state.agentActivity.runId === root.dataset.runId) pollAgentActivity();
+  }, 120);
   return state.agentActivity.runId;
 }
 
 function updateAgentActivity() {
+  const root = state.agentActivity.root;
+  if (!root) return;
   const elapsed = Math.max(0, Math.floor((Date.now() - state.agentActivity.startedAt) / 1000));
-  const stepIndex = Number.isInteger(state.agentActivity.serverStepIndex)
-    ? Math.min(4, state.agentActivity.serverStepIndex)
-    : Math.min(3, Math.floor(elapsed / 6));
-  state.agentActivity.stepIndex = stepIndex;
-  const root = $("#agent-activity");
   const longRunning = elapsed >= 5 * 60;
   const possiblyStuck = elapsed >= 15 * 60;
   root.classList.toggle("long-running", longRunning && !possiblyStuck);
   root.classList.toggle("possibly-stuck", possiblyStuck);
   if (possiblyStuck) {
-    $("#agent-activity-title").textContent = `${state.agentActivity.agentLabel} 可能异常`;
-    $("#agent-activity-note").textContent = `${state.agentActivity.serverNote || "后台没有返回新状态。"} 已运行超过 15 分钟，请查看 debug 日志。`;
+    root.querySelector(".agent-activity-title").textContent = `${state.agentActivity.agentLabel} 可能异常`;
+    root.querySelector(".agent-activity-note").textContent = `${state.agentActivity.serverNote || "后台没有返回新状态。"} 已运行超过 15 分钟，请查看 debug 日志。`;
   } else if (longRunning) {
-    $("#agent-activity-title").textContent = `${state.agentActivity.agentLabel} 耗时较久`;
-    $("#agent-activity-note").textContent = `${state.agentActivity.serverNote || "正在等待后台返回。"} 已运行超过 5 分钟。`;
+    root.querySelector(".agent-activity-title").textContent = `${state.agentActivity.agentLabel} 耗时较久`;
+    root.querySelector(".agent-activity-note").textContent = `${state.agentActivity.serverNote || "正在等待后台返回。"} 已运行超过 5 分钟。`;
   } else {
-    $("#agent-activity-title").textContent = state.agentActivity.serverTitle
+    root.querySelector(".agent-activity-title").textContent = state.agentActivity.serverTitle
       || `${state.agentActivity.agentLabel} 正在工作`;
-    $("#agent-activity-note").textContent = state.agentActivity.serverNote
+    root.querySelector(".agent-activity-note").textContent = state.agentActivity.serverNote
       || state.agentActivity.baseNote;
   }
-  $("#agent-activity-elapsed").textContent = formatDuration(elapsed);
-  $$("#agent-activity-steps li").forEach((item, index) => {
-    item.classList.toggle("done", index < stepIndex);
-    item.classList.toggle("active", stepIndex < 4 && index === stepIndex);
-  });
+  root.querySelector(".agent-activity-elapsed").textContent = formatDuration(elapsed);
+  root.querySelector(".agent-activity-count").textContent = state.agentActivity.eventCount
+    ? `${state.agentActivity.eventCount} 条动态`
+    : "正在连接";
 }
 
-async function pollAgentActivity() {
+function pollAgentActivity() {
   const runId = state.agentActivity.runId;
-  if (!runId || state.agentActivity.polling) return;
-  state.agentActivity.polling = true;
-  try {
-    const payload = await api(`/api/agent/activity?run_id=${encodeURIComponent(runId)}`);
-    if (payload.run_id !== state.agentActivity.runId) return;
-    state.agentActivity.serverStepIndex = Number(payload.step_index);
-    state.agentActivity.serverTitle = payload.title || "";
-    state.agentActivity.serverNote = payload.note || "";
-    updateAgentActivity();
-  } catch (error) {
-    if (error.status !== 404) {
-      state.agentActivity.serverNote = `活动状态读取失败：${error.message}`;
+  if (!runId) return Promise.resolve(null);
+  if (state.agentActivity.pollPromise) return state.agentActivity.pollPromise;
+  const request = (async () => {
+    try {
+      const payload = await api(`/api/agent/activity?run_id=${encodeURIComponent(runId)}`);
+      if (payload.run_id !== state.agentActivity.runId) return null;
+      state.agentActivity.serverTitle = payload.title || "";
+      state.agentActivity.serverNote = payload.note || "";
+      renderAgentActivityEvents(payload.events || []);
+      updateAgentActivity();
+      return payload;
+    } catch (error) {
+      if (error.status !== 404) {
+        state.agentActivity.serverNote = `活动状态读取失败：${error.message}`;
+        updateAgentActivity();
+      }
+      return null;
+    } finally {
+      if (state.agentActivity.pollPromise === request) {
+        state.agentActivity.pollPromise = null;
+      }
     }
-  } finally {
-    state.agentActivity.polling = false;
-  }
+  })();
+  state.agentActivity.pollPromise = request;
+  return request;
 }
 
 function createAgentRunId() {
@@ -3805,32 +4237,128 @@ function createAgentRunId() {
   return `run-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function finishAgentActivity(status, message = "") {
-  const root = $("#agent-activity");
+async function finishAgentActivity(status, message = "") {
+  const root = state.agentActivity.root;
   if (!root) return;
   if (state.agentActivity.timer) {
     clearInterval(state.agentActivity.timer);
     state.agentActivity.timer = null;
   }
-  state.agentActivity.polling = false;
+  await pollAgentActivity();
   const complete = status === "complete";
   root.classList.toggle("complete", complete);
   root.classList.toggle("error", !complete);
-  $("#agent-activity-title").textContent = complete ? "AI 本轮已完成" : "AI 本轮中断";
-  $("#agent-activity-note").textContent = complete
+  root.classList.remove("long-running", "possibly-stuck");
+  if (!["run_completed", "run_failed"].includes(state.agentActivity.lastEventName)) {
+    renderAgentActivityEvent({
+      event: complete ? "run_completed" : "run_failed",
+      reason: complete ? "" : message,
+      timestamp: Date.now() / 1000,
+    });
+  }
+  root.querySelector(".agent-activity-events .active")?.classList.remove("active");
+  state.agentActivity.serverTitle = complete ? "AI 本轮已完成" : "AI 本轮中断";
+  state.agentActivity.serverNote = complete
     ? "回复已写入当前会话历史。"
     : (message || "请求未完成，请检查模型连接或稍后重试。");
-  $("#agent-activity-elapsed").textContent = formatDuration(
-    Math.max(0, Math.floor((Date.now() - state.agentActivity.startedAt) / 1000)),
-  );
-  $$("#agent-activity-steps li").forEach((item) => {
-    item.classList.toggle("done", complete);
-    item.classList.remove("active");
+  updateAgentActivity();
+}
+
+function renderAgentActivityEvents(events) {
+  const incoming = [...events].sort((left, right) => Number(left.sequence || 0) - Number(right.sequence || 0));
+  incoming.forEach((activityEvent) => {
+    const sequence = Number(activityEvent.sequence || 0);
+    if (sequence <= state.agentActivity.lastSequence) return;
+    state.agentActivity.eventList?.querySelector(".event-connecting")?.remove();
+    renderAgentActivityEvent(activityEvent);
+    state.agentActivity.lastSequence = sequence;
   });
-  state.agentActivity.hideTimer = setTimeout(() => {
-    root.hidden = true;
-    root.classList.remove("complete", "error", "long-running", "possibly-stuck");
-  }, complete ? 2200 : 5200);
+}
+
+function renderAgentActivityEvent(activityEvent, options = {}) {
+  const list = state.agentActivity.eventList;
+  if (!list) return;
+  const follow = chatLogNearBottom($("#chat-log"));
+  list.querySelector(".active")?.classList.remove("active");
+  const item = document.createElement("li");
+  const eventName = String(activityEvent.event || "").replace(/[^a-z_]/g, "") || "unknown";
+  const failed = activityEvent.ok === false || eventName === "run_failed";
+  const terminal = ["run_completed", "run_failed"].includes(eventName);
+  item.className = `agent-activity-event event-${eventName}${failed ? " failed" : ""}${terminal ? " terminal" : " active"}`;
+  const marker = document.createElement("span");
+  marker.className = "agent-activity-event-marker";
+  marker.setAttribute("aria-hidden", "true");
+  const content = document.createElement("div");
+  content.className = "agent-activity-event-content";
+  const heading = document.createElement("div");
+  heading.className = "agent-activity-event-heading";
+  const title = document.createElement("strong");
+  title.textContent = describeAgentActivityEvent(activityEvent);
+  const meta = document.createElement("span");
+  meta.textContent = formatAgentActivityOffset(activityEvent.timestamp);
+  heading.append(title, meta);
+  content.append(heading);
+  if (activityEvent.message) {
+    const modelMessage = document.createElement("p");
+    modelMessage.className = "agent-activity-message";
+    modelMessage.textContent = activityEvent.message;
+    content.append(modelMessage);
+  }
+  if (activityEvent.reason) {
+    const reason = document.createElement("p");
+    reason.className = "agent-activity-reason";
+    reason.textContent = activityEvent.reason;
+    content.append(reason);
+  }
+  appendAgentActivityDetail(content, "查看参数", activityEvent.arguments);
+  appendAgentActivityDetail(content, "查看结果", activityEvent.result);
+  item.append(marker, content);
+  list.append(item);
+  state.agentActivity.lastEventName = eventName;
+  if (!options.synthetic) state.agentActivity.eventCount += 1;
+  if (follow) item.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function describeAgentActivityEvent(activityEvent) {
+  const turn = Number(activityEvent.turn || 0);
+  const toolLabel = activityEvent.tool_label || activityEvent.tool || "项目工具";
+  switch (activityEvent.event) {
+    case "connecting": return "连接 Agent 运行时";
+    case "run_started": return "已载入作品与会话";
+    case "model_started": return turn ? `分析第 ${turn} 轮` : "分析本轮目标";
+    case "model_completed": return Number(activityEvent.tool_count || 0)
+      ? `决定调用 ${Number(activityEvent.tool_count)} 个工具`
+      : "本轮分析完成";
+    case "tool_started": return `调用 ${toolLabel}`;
+    case "tool_completed": return `${toolLabel}${activityEvent.ok === false ? "失败" : "返回结果"}`;
+    case "response_ready": return "整理最终回复";
+    case "run_completed": return "本轮执行完成";
+    case "run_failed": return "本轮执行停止";
+    default: return "Agent 状态已更新";
+  }
+}
+
+function appendAgentActivityDetail(container, label, value) {
+  if (!value) return;
+  const details = document.createElement("details");
+  details.className = "agent-activity-event-detail";
+  const summary = document.createElement("summary");
+  summary.textContent = label;
+  const body = document.createElement("pre");
+  body.textContent = value;
+  details.append(summary, body);
+  container.append(details);
+}
+
+function formatAgentActivityOffset(timestamp) {
+  const eventTime = Number(timestamp || 0) * 1000;
+  if (!eventTime) return "";
+  return `+${formatDuration(Math.max(0, Math.floor((eventTime - state.agentActivity.startedAt) / 1000)))}`;
+}
+
+function chatLogNearBottom(log) {
+  if (!log) return false;
+  return log.scrollHeight - log.scrollTop - log.clientHeight < 96;
 }
 
 function summarizeAgentActivityMessage(message) {
@@ -3917,7 +4445,7 @@ function activeAgentSessionId(agent = state.agent) {
   return state.agentSessionId[agent] || "default";
 }
 
-async function loadAgentSurface(agent, sessionId = activeAgentSessionId(agent)) {
+async function loadAgentSurface(agent, sessionId = activeAgentSessionId(agent), options = {}) {
   $("#agent-history-title").textContent = `${agent === "goethe" ? "Goethe" : "Dante"} 历史对话`;
   $("#agent-history-status").textContent = "正在恢复…";
   $("#agent-tools-summary").textContent = `${agent === "goethe" ? "Goethe" : "Dante"} Tools · 载入中`;
@@ -3928,7 +4456,11 @@ async function loadAgentSurface(agent, sessionId = activeAgentSessionId(agent)) 
     state.agentSessions[payload.agent] = payload.sessions || [];
     renderAgentSessions(payload.agent, state.agentSessions[payload.agent], state.agentSessionId[payload.agent]);
     renderAgentTools(payload.agent, payload.tools || []);
-    renderAgentHistory(payload.agent, payload.history || {}, state.agentSessionId[payload.agent]);
+    if (options.preserveHistory) {
+      renderAgentHistoryStatus(payload.agent, payload.history || {}, state.agentSessionId[payload.agent]);
+    } else {
+      renderAgentHistory(payload.agent, payload.history || {}, state.agentSessionId[payload.agent]);
+    }
   } catch (error) {
     $("#agent-history-status").textContent = error.message;
     $("#agent-tools-summary").textContent = `${agent === "goethe" ? "Goethe" : "Dante"} Tools · 载入失败`;
@@ -4077,12 +4609,7 @@ function renderAgentTools(agent, tools) {
 
 function renderAgentHistory(agent, history, sessionId = "default") {
   const messages = history.messages || [];
-  const label = agent === "goethe" ? "Goethe" : "Dante";
-  const sessionName = sessionId === "default" ? "初始会话" : "当前会话";
-  $("#agent-history-title").textContent = `${label} 历史对话`;
-  $("#agent-history-status").textContent = messages.length
-    ? `${sessionName} · 显示 ${history.shown || messages.length} / ${history.total || messages.length}`
-    : `${sessionName} · 暂无历史`;
+  renderAgentHistoryStatus(agent, history, sessionId);
   $("#chat-log").replaceChildren();
   if (!messages.length) {
     appendChatMessage("assistant", "OpenWrite", agentEmptyGuidance(agent));
@@ -4096,6 +4623,16 @@ function renderAgentHistory(agent, history, sessionId = "default") {
       message.content_html || "",
     );
   });
+}
+
+function renderAgentHistoryStatus(agent, history, sessionId = "default") {
+  const messages = history.messages || [];
+  const label = agent === "goethe" ? "Goethe" : "Dante";
+  const sessionName = sessionId === "default" ? "初始会话" : "当前会话";
+  $("#agent-history-title").textContent = `${label} 历史对话`;
+  $("#agent-history-status").textContent = messages.length
+    ? `${sessionName} · 显示 ${history.shown || messages.length} / ${history.total || messages.length}`
+    : `${sessionName} · 暂无历史`;
 }
 
 async function loadContinuity() {
@@ -5240,6 +5777,27 @@ function applyTheme(theme) {
   localStorage.setItem("openwrite-theme", theme);
 }
 
+function setToolHelpExpanded(button, expanded) {
+  const panel = document.getElementById(button.getAttribute("aria-controls") || "");
+  if (!panel) return;
+  button.setAttribute("aria-expanded", String(expanded));
+  button.title = expanded ? "收起工具说明" : "查看工具说明";
+  panel.hidden = !expanded;
+}
+
+function toggleToolHelp(button) {
+  const shouldExpand = button.getAttribute("aria-expanded") !== "true";
+  $$('[data-tool-help]').forEach((item) => setToolHelpExpanded(item, item === button && shouldExpand));
+}
+
+function closeOpenToolHelp(restoreFocus = false) {
+  const button = $('[data-tool-help][aria-expanded="true"]');
+  if (!button) return false;
+  setToolHelpExpanded(button, false);
+  if (restoreFocus) button.focus();
+  return true;
+}
+
 function toggleMobileNavigation(open, restoreFocus = true) {
   const active = Boolean(open && window.matchMedia("(max-width: 700px)").matches);
   const sidebar = $("#studio-sidebar");
@@ -5274,6 +5832,9 @@ function bindEvents() {
   });
   $$('[data-switch-view]').forEach((button) => {
     button.addEventListener("click", () => setView(button.dataset.switchView));
+  });
+  $$('[data-tool-help]').forEach((button) => {
+    button.addEventListener("click", () => toggleToolHelp(button));
   });
   $$('[data-library-view]').forEach((button) => {
     button.addEventListener("click", () => setView(button.dataset.libraryView));
@@ -5320,6 +5881,10 @@ function bindEvents() {
   $("#model-state").addEventListener("click", () => openModelProfilesDialog());
   $("#model-settings-open").addEventListener("click", () => openModelProfilesDialog());
   $("#project-settings-open").addEventListener("click", openProjectDialog);
+  $("#writing-targets-open").addEventListener("click", openWritingTargetsDialog);
+  $("#writing-targets-form").addEventListener("submit", saveWritingTargets);
+  $("#writing-targets-close").addEventListener("click", () => $("#writing-targets-dialog").close());
+  $("#writing-targets-cancel").addEventListener("click", () => $("#writing-targets-dialog").close());
   bindModelProfilesUI();
   $("#project-form").addEventListener("submit", initializeProject);
   $("#open-project-form").addEventListener("submit", openProject);
@@ -5450,6 +6015,17 @@ function bindEvents() {
   });
   $("#rolling-plan-create").addEventListener("click", createRollingPlan);
   $("#rolling-plan-goethe").addEventListener("click", sendRollingPlanToGoethe);
+  $("#narrative-forecast-select").addEventListener("change", (event) => {
+    selectedNarrativeForecast = narrativeForecastItems.find(
+      (item) => item.forecast_id === event.target.value,
+    ) || null;
+    activeNarrativeBranchId = selectedNarrativeForecast?.selected_branch_id || "";
+    renderSelectedNarrativeForecast();
+  });
+  $("#narrative-forecast-create").addEventListener("click", createNarrativeForecast);
+  $("#narrative-forecast-refresh").addEventListener("click", refreshNarrativeForecasts);
+  $("#narrative-forecast-select-branch").addEventListener("click", selectNarrativeForecastBranch);
+  $("#narrative-forecast-continue").addEventListener("click", continueSelectedNarrativeForecast);
   $("#reference-file").addEventListener("change", async (event) => {
     const file = event.target.files[0];
     if (file) {
@@ -5515,6 +6091,7 @@ function bindEvents() {
       toggleEditorFind(true);
     }
     if (event.key === "Escape") {
+      if (closeOpenToolHelp(true)) return;
       if (state.editorFocusMode) {
         toggleEditorFocusMode(false);
         return;

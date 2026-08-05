@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -107,7 +108,6 @@ class GoethePlanningRuntime:
     def generate_foundation_draft(self, request_text: str) -> dict[str, Any]:
         brief = str(request_text or "").strip()
         title, genre = self._load_title_and_genre()
-        architect = self._get_architect()
         confirmed_sections = [
             ("已确认构思摘要", self.story_planning_store.read_ideation_summary(max_chars=2200)),
             (
@@ -133,18 +133,40 @@ class GoethePlanningRuntime:
                 f"{confirmed_context}"
             ).strip()
 
-        foundation = architect.generate_foundation(
-            title=title,
-            genre=genre,
-            brief=generation_brief,
-        )
+        state = self.book_state_store.load_or_create()
+        can_promote = state.stage in {BookStage.DISCOVERY, BookStage.FOUNDATION}
+        warnings: list[str] = []
+        if can_promote:
+            foundation = self._get_architect().generate_foundation(
+                title=title,
+                genre=genre,
+                brief=generation_brief,
+                include_foreshadowing=True,
+            )
+            story_bible = foundation.story_bible
+            book_rules = foundation.book_rules
+            volume_outline = foundation.volume_outline
+            current_state = foundation.current_state
+            foreshadowing_seed = foundation.foreshadowing_seed
+            warnings.extend(foundation.warnings)
+        else:
+            story_bible = self.story_planning_store.read_story_document("background")
+            book_rules = self.story_planning_store.read_story_document("foundation")
+            volume_outline = self.story_planning_store.read_outline_source()
+            current_state = self.truth_manager.load_truth_files().current_state
+            foreshadowing_seed = ""
+            warnings.append("mature_project_reused_canonical_foundation")
+        if not foreshadowing_seed and self.story_planning_store.foreshadowing_draft_path.is_file():
+            foreshadowing_seed = self.story_planning_store.foreshadowing_draft_path.read_text(
+                encoding="utf-8"
+            )
         try:
             self.story_planning_store.save_foundation_draft(
-                background=foundation.story_bible,
-                foundation=foundation.book_rules,
-                volume_outline=foundation.volume_outline,
-                current_state=foundation.current_state,
-                foreshadowing=foundation.foreshadowing_seed,
+                background=story_bible,
+                foundation=book_rules,
+                volume_outline=volume_outline,
+                current_state=current_state,
+                foreshadowing=foreshadowing_seed,
             )
         except (OSError, ValueError, yaml.YAMLError) as exc:
             return {
@@ -155,8 +177,6 @@ class GoethePlanningRuntime:
                 "next_action": "generate_foundation_draft",
             }
 
-        state = self.book_state_store.load_or_create()
-        can_promote = state.stage in {BookStage.DISCOVERY, BookStage.FOUNDATION}
         if can_promote:
             state.stage = BookStage.FOUNDATION
             state.pending_confirmation = "foundation"
@@ -182,11 +202,12 @@ class GoethePlanningRuntime:
                 else ""
             ),
             "foreshadowing_generated": self.story_planning_store.foreshadowing_draft_path.is_file(),
-            "story_bible": foundation.story_bible,
-            "book_rules": foundation.book_rules,
-            "current_state": foundation.current_state,
-            "outline_seed": foundation.volume_outline,
-            "foreshadowing_seed": foundation.foreshadowing_seed,
+            "warnings": warnings,
+            "story_bible": story_bible,
+            "book_rules": book_rules,
+            "current_state": current_state,
+            "outline_seed": volume_outline,
+            "foreshadowing_seed": foreshadowing_seed,
             "message": (
                 "基础设定辅助草案已写入 planning；确认前未修改 canonical 资产。"
                 if can_promote
@@ -418,6 +439,7 @@ class GoethePlanningRuntime:
         return {
             "ok": True,
             "references": service.list(),
+            "profiles": service.list_profiles(),
             "project_style": service.project_style_surface(),
         }
 
@@ -551,6 +573,7 @@ class GoethePlanningRuntime:
             "outline_path": str(self.story_planning_store.outline_src_path),
             "persona_paths": readiness["persona_paths"],
             "character_paths": readiness["persona_paths"],
+            "compatibility_warnings": readiness.get("compatibility_warnings", []),
             "current_arc": book_state.current_arc,
             "current_section": book_state.current_section,
             "current_chapter": book_state.current_chapter,
@@ -581,6 +604,7 @@ class GoethePlanningRuntime:
             "handoff_yaml_path": str(handoff_yaml_path),
             "book_state": manifest["book_state"],
             "persona_paths": readiness["persona_paths"],
+            "compatibility_warnings": readiness.get("compatibility_warnings", []),
         }
 
     def _get_architect(self) -> ArchitectAgent:
@@ -656,10 +680,33 @@ class GoethePlanningRuntime:
         focus: str,
     ) -> dict[str, Any]:
         source_id = str(source_id or "").strip()
-        source_file = Path(str(source or "").strip())
+        raw_source = str(source or "").strip()
         if not source_id:
             return self._missing_source_pack(action, source_id)
-        if not source_file.exists():
+        if not raw_source:
+            return {
+                "ok": False,
+                "blocked": True,
+                "next_action": "provide_source",
+                "error": "missing_source",
+                "message": "请提供来源文本或文件路径。",
+                "source_id": source_id,
+            }
+
+        source_file = Path(raw_source).expanduser()
+        try:
+            is_file = source_file.is_file()
+        except OSError:
+            is_file = False
+        if is_file:
+            return self._extract_source_file(
+                action=action,
+                source_id=source_id,
+                source_file=source_file,
+                focus=focus,
+            )
+
+        if self._looks_like_source_path(raw_source):
             return {
                 "ok": False,
                 "blocked": True,
@@ -669,6 +716,36 @@ class GoethePlanningRuntime:
                 "source_id": source_id,
                 "source_file": str(source_file),
             }
+
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix="openwrite-source-",
+                suffix=".txt",
+                delete=False,
+            ) as handle:
+                handle.write(raw_source)
+                temporary_path = Path(handle.name)
+            return self._extract_source_file(
+                action=action,
+                source_id=source_id,
+                source_file=temporary_path,
+                focus=focus,
+            )
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+    def _extract_source_file(
+        self,
+        *,
+        action: str,
+        source_id: str,
+        source_file: Path,
+        focus: str,
+    ) -> dict[str, Any]:
         try:
             return self.novel_service.extract_source(
                 source_id=source_id,
@@ -677,12 +754,22 @@ class GoethePlanningRuntime:
             )
         except NovelServiceError as exc:
             return {
+                "action": action,
                 "ok": False,
                 "blocked": True,
                 "error": exc.code,
                 "message": str(exc),
                 "source_id": source_id,
             }
+
+    @staticmethod
+    def _looks_like_source_path(source: str) -> bool:
+        if "\n" in source or "\r" in source:
+            return False
+        candidate = source.strip()
+        if candidate.startswith(("/", "~/", "./", "../")):
+            return True
+        return bool(re.fullmatch(r"[^\s]+\.(?:txt|md|markdown|rst|text)", candidate, re.I))
 
     def _source_root(self, source_id: str) -> Path:
         return (
@@ -719,7 +806,6 @@ class GoethePlanningRuntime:
         foundation_ready = bool(background_body and foundation_body)
         outline_text = self.story_planning_store.read_outline_source()
         outline_errors = self._outline_readiness_errors(outline_text)
-        outline_ready = not outline_errors
         outline_pending = self.story_planning_store.outline_edit_state_path.exists()
         persona_documents = self.story_planning_store.list_character_documents()
         persona_paths = [item["path"] for item in persona_documents]
@@ -728,7 +814,30 @@ class GoethePlanningRuntime:
             for item in persona_documents
             for error in self._character_readiness_errors(Path(item["path"]))
         ]
-        persona_ready = bool(persona_paths) and not persona_errors
+        novel_root = self.project_root / "data" / "novels" / self.novel_id
+        manuscript_root = novel_root / "data" / "manuscript"
+        has_manuscript = manuscript_root.is_dir() and any(
+            manuscript_root.rglob("*.md")
+        )
+        legacy_outline_accepted = bool(
+            has_manuscript
+            and outline_text.strip()
+            and not self.story_planning_store.outline_source_is_placeholder()
+        )
+        legacy_persona_accepted = bool(has_manuscript and persona_paths)
+        outline_ready = not outline_errors or legacy_outline_accepted
+        persona_ready = bool(persona_paths) and (
+            not persona_errors or legacy_persona_accepted
+        )
+        compatibility_warnings: list[str] = []
+        if outline_errors and legacy_outline_accepted:
+            compatibility_warnings.append(
+                "项目已有正文，沿用 legacy canonical 大纲；建议后续增量补齐章节字段。"
+            )
+        if persona_errors and legacy_persona_accepted:
+            compatibility_warnings.append(
+                "项目已有正文，沿用 legacy canonical 角色卡；建议后续按需补齐结构字段。"
+            )
 
         if not ideation_ready:
             missing_items.append("ideation_summary")
@@ -747,6 +856,7 @@ class GoethePlanningRuntime:
             "persona_paths": persona_paths,
             "outline_errors": outline_errors,
             "persona_errors": persona_errors,
+            "compatibility_warnings": compatibility_warnings,
         }
 
     def _outline_readiness_errors(self, outline_text: str) -> list[str]:
@@ -796,6 +906,9 @@ class GoethePlanningRuntime:
         ]
         if persona_paths:
             summary_lines.append("主要人物文件: " + "；".join(str(item) for item in persona_paths))
+        warnings = readiness.get("compatibility_warnings", [])
+        if warnings:
+            summary_lines.append("兼容提示: " + "；".join(str(item) for item in warnings))
         return "\n".join(summary_lines)
 
     def _missing_source_pack(self, action: str, source_id: str) -> dict[str, Any]:

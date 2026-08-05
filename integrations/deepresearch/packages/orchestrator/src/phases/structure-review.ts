@@ -188,6 +188,7 @@ Allowed patch ops: add_aspect_node, add_hypothesis_node, rename_report_node, mov
     },
     ...llmCfg,
     historyMaxChars: evidenceRuntimeHistoryMaxChars(),
+    outputRepairAttempts: agentCfg?.outputRepairAttempts ?? 1,
     signal: ctx.signal,
     chat: (request) => tracedLlmChat(ctx, "structure-review.react", request, { agentRunId }),
     onVisualEvent: (event) => ctx.emit({

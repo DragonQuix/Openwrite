@@ -539,6 +539,7 @@ Finish when no more citation sources need to be opened.`,
     ...reportLlm,
     maxTokens: Math.min(reportLlm.maxTokens, 1024),
     historyMaxChars: evidenceRuntimeHistoryMaxChars(),
+    outputRepairAttempts: writerCfg?.outputRepairAttempts ?? 1,
     signal: ctx.signal,
     chat: async (request) => adaptWriterInspectionResponse(
       await tracedLlmChat(ctx, "report.leaf.inspect", request, { reportNodeId: leaf.node.nodeId, agentRunId: `A_writer_inspect_${leaf.node.nodeId}` }),
@@ -590,6 +591,7 @@ Return a finish action whose finish.markdown contains the requested Markdown dra
     outputSchema: { markdown: "string" },
     ...llmCfg,
     historyMaxChars: evidenceRuntimeHistoryMaxChars(),
+    outputRepairAttempts: writerCfg?.outputRepairAttempts ?? 1,
     signal: ctx.signal,
     chat: async (request) => adaptWriterMarkdownResponse(
       await tracedLlmChat(ctx, opts.phase, request, { reportNodeId: opts.reportNodeId, agentRunId: `A_${opts.phase.replace(/\W+/g, "_")}_${opts.reportNodeId}` }),
@@ -653,6 +655,10 @@ function adaptWriterMarkdownResponse(
       }),
     };
   }
+  // A malformed AgentRuntime envelope must reach the runtime's compact JSON
+  // repair path. Wrapping it as Markdown would make the outer decision valid
+  // while leaking thoughtSummary/action/finish protocol JSON into the report.
+  if (!parsed && resemblesWriterFinishEnvelope(response.content)) return response;
   return {
     ...response,
     content: JSON.stringify({
@@ -661,6 +667,10 @@ function adaptWriterMarkdownResponse(
       finish: { markdown: response.content },
     }),
   };
+}
+
+function resemblesWriterFinishEnvelope(value: string): boolean {
+  return /^\s*(?:```(?:json)?\s*)?\{[\s\S]*["']action["']\s*:\s*["']finish["'][\s\S]*["']finish["']\s*:/iu.test(value);
 }
 
 function fallbackWriterMarkdown(opts: {

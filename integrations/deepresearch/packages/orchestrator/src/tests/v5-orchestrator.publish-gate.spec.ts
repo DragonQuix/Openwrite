@@ -843,23 +843,42 @@ This report reaches a complete conclusion.
     expect(result.status).toBe("succeeded");
   });
 
-  it("publish semantic review creates repair tasks for overclaim and hidden gaps", async () => {
+  it("publish semantic review rewrites an overclaim before dispatching an evidence repair", async () => {
     const dir = await artifactDir();
     const runtimeProfile = loadDefaultRuntimeProfile();
     runtimeProfile.artifactDir = dir;
     runtimeProfile.traceLevel = "full";
+    runtimeProfile.evidenceQuality.mode = "advisory";
     let primarySemanticReviewCalled = false;
+    let rewriteCalled = false;
     const llm: LlmChat = {
       name: "primary-writer-model",
       async chat(req) {
         if (req.user.includes("Semantic publish review")) primarySemanticReviewCalled = true;
+        if (req.user.includes("Publish issues to resolve")) {
+          rewriteCalled = true;
+          return { content: `# Report
+
+## Analysis
+
+${"The report presents a qualified conclusion with adequate prose depth. ".repeat(25)}
+
+## 结论
+
+This report reaches a complete, qualified conclusion.` };
+        }
         return { content: "{}" };
       },
     };
+    let semanticReviewCalls = 0;
     const reviewLlm: LlmChat = {
       name: "independent-publish-reviewer",
       async chat(req) {
         if (req.user.includes("Semantic publish review")) {
+          semanticReviewCalls += 1;
+          if (semanticReviewCalls > 1) {
+            return { content: JSON.stringify({ decision: "pass", reasoningSummary: "The revised draft is appropriately qualified.", issues: [] }) };
+          }
           return { content: JSON.stringify({
             decision: "needs_repair",
             reasoningSummary: "The draft overstates one weakly grounded claim.",
@@ -913,19 +932,20 @@ This report reaches a complete conclusion.`;
 
     const result = await publishGatePhase(ctx, draftPath);
 
-    expect(result.status).toBe("needs_human_review");
+    expect(result.status).toBe("succeeded");
     expect(primarySemanticReviewCalled).toBe(false);
+    expect(rewriteCalled).toBe(true);
     const queued = await ctx.stack.ledger.listByStatus("queued");
     const repair = queued.find((task) => task.taskId.startsWith("T_publish_repair_overclaim"));
-    expect(repair?.reportNodeId).toBe("R_hyp_overclaim");
-    expect(repair?.objective).toContain("downscope the conclusion");
+    expect(repair).toBeUndefined();
     const events = await ctx.stack.memory.listEvents({ episodeId: ctx.state.episodeId });
     expect(events.some((event) => event.eventType === "publish_gate_review_started"
       && event.payload?.reviewerProvider === "independent-publish-reviewer"
       && event.payload?.independentReviewer === true)).toBe(true);
     expect(events.some((event) => event.eventType === "publish_gate_review_finished" && event.payload?.decision === "needs_repair")).toBe(true);
+    expect(events.some((event) => event.eventType === "publish_gate_draft_revised")).toBe(true);
     expect(events.some((event) => event.eventType === "full.llm.request" && event.payload?.provider === "independent-publish-reviewer")).toBe(true);
-    expect(events.some((event) => event.eventType === "full.ledger.upsert" && event.payload?.source === "publish_gate_repair" && event.taskId === repair?.taskId)).toBe(true);
+    expect(events.some((event) => event.eventType === "full.ledger.upsert" && event.payload?.source === "publish_gate_repair")).toBe(false);
   });
 
   it("publish semantic review does not queue non-dispatchable root coverage repairs", async () => {

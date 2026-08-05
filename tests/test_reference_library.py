@@ -412,6 +412,63 @@ def test_writer_excludes_fingerprint_while_reviewer_keeps_it():
     assert "dialogue_ratio" in reviewer
 
 
+def test_reference_library_lists_profile_ids_and_adoption_status(tmp_path: Path):
+    project = tmp_path / "project"
+    library = tmp_path / "private-library"
+    init_project(project, "demo", "画像导航测试")
+    service = ReferenceLibraryService(library, project_root=project, novel_id="demo")
+
+    for source_id in ("reference_a", "reference_b"):
+        service.prepare(
+            source_id,
+            _text(source_id),
+            title=source_id,
+            relative_name=f"{source_id}.txt",
+            input_budget_tokens=500,
+        )
+        service.confirm_structure(source_id)
+        service.analyze(source_id, analyzer=_analyzer)
+
+    profile = service.synthesize(["reference_a", "reference_b"])
+    preview = service.preview_adoption(
+        profile.profile_id,
+        [
+            {
+                "item_id": profile.common_methods[0].item_id,
+                "target": "style",
+                "dimension": "narration",
+                "role": "primary",
+                "scope": "project",
+            }
+        ],
+    )
+    service.apply_adoption(preview.preview_id, confirm=True)
+
+    profiles = service.list_profiles()
+
+    assert profiles == [
+        {
+            "profile_id": profile.profile_id,
+            "source_ids": ["reference_a", "reference_b"],
+            "source_intents": {
+                "reference_a": "reference",
+                "reference_b": "reference",
+            },
+            "generated_at": profile.generated_at,
+            "status": "current",
+            "stale_source_ids": [],
+            "item_counts": {
+                "common_methods": 1,
+                "differences": 0,
+                "optional_variants": 0,
+                "conflicts": 0,
+                "excluded": 0,
+            },
+            "adoption_ids": [preview.adoption.adoption_id],
+        }
+    ]
+
+
 def test_style_recipe_compiles_project_rules_and_resolves_scoped_overrides(
     tmp_path: Path,
 ):

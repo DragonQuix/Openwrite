@@ -21,18 +21,25 @@
 </p>
 
 <p align="center">
-  <a href="#快速开始">快速开始</a> ·
-  <a href="#推荐工作流">推荐工作流</a> ·
   <a href="#studio-工作台">Studio</a> ·
-  <a href="#命令行速查">CLI</a> ·
-  <a href="#工作原理">工作原理</a>
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#工作原理">工作原理</a> ·
+  <a href="#致谢">致谢</a>
+</p>
+
+<p align="center">
+  <a href="assets/screenshots/studio-overview.jpg">
+    <img src="assets/screenshots/studio-overview.jpg" width="100%" alt="OpenWrite Studio 小说总览">
+  </a>
+  <br>
+  <sub><b>一本书，一个工作台</b> · 进度、创作资产、近期章节与 Dante 助手保持在同一视野</sub>
 </p>
 
 ## OpenWrite 是什么
 
 OpenWrite 专注于一件事：**让一本长篇小说在几十章、几百章之后仍然写得下去，而且不轻易丢失作者意图和故事事实。**
 
-它不是只负责生成下一段文字的聊天壳，而是一套本地优先的小说创作系统：Goethe 负责把想法整理成可写资产，Dante 负责持续写作与审查；Studio、CLI 和两个 Agent 共用同一个小说内核，最终状态以真实工具结果和落盘文件为准。
+它不是只负责生成下一段文字的聊天壳，而是一套本地优先的小说创作系统：Goethe 负责把想法整理成可写资产，Dante 负责持续写作与审查；Studio 和两个 Agent 共用同一个小说内核，可选 CLI 也复用相同能力。最终状态以真实工具结果和落盘文件为准。
 
 ```text
 灵感与素材
@@ -44,10 +51,18 @@ Dante：组装上下文 → 写章 → 审稿 → 修订 → 状态结算
 Markdown / TXT / EPUB
 ```
 
+| 适合这样的创作 | 它不承诺什么 |
+|---|---|
+| 正在写中长篇，需要长期维护人物、设定、伏笔和章节状态 | 输入一句话后，无需作者参与就自动生成一整本小说 |
+| 已有旧稿或复杂设定，希望平稳接入 AI 协作流程 | 用聊天记录代替可检查、可版本化的作品资产 |
+| 希望自己掌握方向，让 Agent 承担规划、检索、初稿、审稿和修订执行 | 让参考作品、模型判断或自动修订绕过作者确认 |
+| 看重本地文件、明确写入边界和失败恢复 | 把所有正文与正典长期锁在某个云端平台中 |
+
 ## 核心能力
 
 | 能力 | OpenWrite 如何处理 |
 |---|---|
+| **完整 Studio 工作台** | 从建书、模型配置、规划和资料编辑，到正文、审稿、检索、参考库、导入导出与诊断，都可以在一个本地 Web 界面中完成。 |
 | **Goethe / Dante 双 Agent** | Goethe 长期整理创意与正典资产，Dante 持续推进正文、审稿和运行态；两者通过明确 handoff 衔接。 |
 | **创作罗盘与单一真源** | `author_intent.md` 保存全书承诺，`current_focus.md` 保存近期目标；人物、世界和大纲以 `src/` 为确认版真源。 |
 | **面向长篇的上下文** | 最近正文、滚动大纲、相关人物、世界规则、伏笔、真相文件、精确人物时态和语义召回共同组成 canonical packet。 |
@@ -56,12 +71,11 @@ Markdown / TXT / EPUB
 | **37 维审稿闭环** | 审稿读取作者意图、正典、关系、风格和章节目标；问题可在 Studio 中定位、筛选并生成可审阅的修订提案。 |
 | **私有参考库与风格采纳** | 对小说、旧稿和 Canon 做证据化拆解；只有人工明确选中的风格、规则或设定候选才会进入当前项目。 |
 | **本地与云端检索** | 默认可使用本机 FastEmbed 完成向量检索，也支持 OpenAI-compatible embedding；需要关系遍历时再启用 LightRAG 图谱模式。 |
-| **完整创作工作台** | Studio 覆盖建书、模型配置、资产编辑、AI 协作、搜索、连续性、参考库、Skills、导入、导出和诊断。 |
 | **标准 SKILL.md 扩展** | Goethe / Dante 可按轮次启用标准 Skill；Skill 只提供有界指令和静态参考资料，不能绕过原有权限与写入确认。 |
 
 ## 快速开始
 
-### 方式一：双击启动
+### 推荐：双击打开 Studio
 
 下载或克隆完整仓库后，直接双击根目录中的启动文件：
 
@@ -70,7 +84,7 @@ Markdown / TXT / EPUB
 
 启动器会检查 Python 3.10+，在 `.openwrite-runtime/` 中创建隔离环境，安装或更新依赖并打开 Studio。它不会静默安装 Python；首次安装依赖需要联网。
 
-### 方式二：从源码安装
+### 从源码打开 Studio
 
 ```bash
 git clone https://github.com/LiPu-jpg/Openwrite.git
@@ -81,18 +95,7 @@ python -m pip install -e .
 openwrite studio
 ```
 
-Studio 默认只绑定 `127.0.0.1`。首次打开会引导你配置模型、创建作品、完善故事资产并开始写作。从框架仓库创建作品时，默认目录为仓库同级的 `OpenWriteNovels/<书名>`（仓库位于用户目录时即 `~/OpenWriteNovels/<书名>`），也可以在创建对话框中指定其他位置。
-
-### 快速体验示范项目
-
-如果想跳过规划，先体验完整写章流程：
-
-```bash
-openwrite init demo_novel --title "雾城来信" --template demo_short
-openwrite studio
-```
-
-`demo_short` 只是一套三章练习资产；正式长篇建议从 Goethe 开始建立自己的作者意图、人物、设定和滚动大纲。
+Studio 默认只绑定 `127.0.0.1`。首次打开会通过界面引导你配置模型、创建作品、完善故事资产并开始写作。从框架仓库创建作品时，默认目录为仓库同级的 `OpenWriteNovels/<书名>`（仓库位于用户目录时即 `~/OpenWriteNovels/<书名>`），也可以在创建对话框中指定其他位置。
 
 ### 配置模型
 
@@ -100,102 +103,84 @@ openwrite studio
 
 API Key 默认只保存在当前 Studio 进程。选择“重启后自动恢复”后，密钥会写入本机用户私有目录的 `0600` 凭据文件，不会进入小说项目、Git 或浏览器存储。
 
-CLI 和服务器环境也可以使用环境变量：
-
-```bash
-export LLM_API_KEY=your-key
-export LLM_MODEL=your-model
-
-# 自定义 OpenAI-compatible 端点时再设置
-export LLM_BASE_URL=https://api.example.com/v1
-```
-
-## 推荐工作流
-
-日常创作只需要先记住两个入口：
-
-```bash
-openwrite goethe   # 把灵感整理成可写资产
-openwrite dante    # 持续写作、审稿和推进状态
-```
-
-### 1. 先和 Goethe 把书聊清楚
-
-Goethe 适合处理题材、基调、核心卖点、人物关系、世界规则、想避免的套路和当前可写范围。它会先汇总，再通过可预览的 diff 修改正式资产。
-
-```text
-$ openwrite goethe
-
-我想写一本都市职场异能小说。
-主角白天是普通上班族，晚上能看到异常术式。
-先汇总卖点和风险，再整理人物草案；暂时不要直接写正文。
-```
-
-### 2. 资产可写后交给 Dante
-
-当人物、设定和近期大纲已经成型，让 Goethe 明确 handoff，再进入 Dante：
-
-```text
-$ openwrite dante
-
-写第六章，目标 3500 字。
-保留师徒关系的信任裂缝，不要靠新能力强行解围。
-写完后审查设定与人物动机。
-```
-
-Dante 会自行完成写前检查、上下文组装、写章、事实提取和状态结算；需要修改正典资产时，仍然先展示变更并等待本轮明确确认。
-
-### 3. 用创作罗盘固定近期目标
-
-```bash
-openwrite focus set "完成第一卷中段反转，让主角主动承担代价" \
-  --keep "克制的叙述视角" \
-  --keep "师徒关系的信任裂缝" \
-  --avoid "靠新能力强行解围"
-```
-
-创作罗盘会进入章节上下文，并作为近期最高优先级约束。整本书更长期的承诺则保存在 `author_intent.md`。
-
-### 4. 已有正文可以直接接入
-
-```bash
-openwrite import existing-novel.txt
-openwrite desk
-openwrite dante
-```
-
-TXT 和 Markdown 旧稿可以按章节导入；写完后可导出 Markdown、TXT 或 EPUB。
-
 ## Studio 工作台
 
 ```bash
 openwrite studio
 ```
 
-| 工作区 | 可以完成的流程 |
-|---|---|
-| **总览** | 查看写作进度、资产就绪度、审稿均分、token 使用和下一步建议。 |
-| **大纲 / 故事 / 人物 / 世界** | 管理卷、节、章纲，编辑作者意图、人物档案、关系与世界规则。 |
-| **正文 / 审稿** | 编辑章节、自动保存、检查版本冲突，管理 checkpoint、批注、审稿问题和 AI 修订提案。 |
-| **AI 协作** | 使用持久化 Goethe / Dante 会话，并查看真实模型调用、工具执行、校验和落盘阶段。 |
-| **搜索 / 连续性** | 跨正典、正文和参考资料检索，检查人物状态、关系、时间线和伏笔。 |
-| **参考库** | 导入参考作品或旧稿，确认卷章覆盖，生成证据报告、对照画像并显式采纳。 |
-| **Skills** | 查看已发现的标准 Skill 与 Runtime Skill，检查来源和权限，并交给 Goethe 或 Dante 使用。 |
-| **工具箱** | 检查 canonical packet，执行项目迁移、同步、诊断、整书导入与 Markdown / TXT / EPUB 导出。 |
+**Studio 是 OpenWrite 首推的日常入口。** 建书、规划、资料维护、正文写作、审稿修订和成书导出都可以在这里完成；CLI 只是同一套能力面向脚本化与调试场景的补充。
 
-浏览器中的文档保存带有 revision 冲突检查，避免覆盖外部编辑器刚写入的内容。使用 `openwrite studio --debug` 可把脱敏后的后台日志写入当前作品的 `data/logs/studio-debug.log`。
+<table>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <a href="assets/screenshots/studio-outline.jpg"><img src="assets/screenshots/studio-outline.jpg" alt="OpenWrite 滚动大纲工作区"></a>
+      <br><sub><b>滚动大纲</b> · 卷、幕、节、章分层管理，已写状态与正文目标直接可见</sub>
+    </td>
+    <td width="50%" align="center" valign="top">
+      <a href="assets/screenshots/studio-editor.jpg"><img src="assets/screenshots/studio-editor.jpg" alt="OpenWrite 正文编辑器与 Dante 助手"></a>
+      <br><sub><b>正文编辑</b> · Markdown 即时渲染、自动保存、版本保护与 Dante 侧栏协作</sub>
+    </td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center" valign="top">
+      <a href="assets/screenshots/studio-review.jpg"><img src="assets/screenshots/studio-review.jpg" width="76%" alt="OpenWrite 审稿工作区"></a>
+      <br><sub><b>审稿闭环</b> · 按严重度与维度筛选问题，定位原文并生成可审阅的修订提案</sub>
+    </td>
+  </tr>
+</table>
+
+<p align="center"><sub>所有截图均来自本地 Studio 实测；截图中的短篇正文为演示内容。</sub></p>
+
+### 从灵感到成书，都在 Studio 里完成
+
+1. **创建或打开作品**：首次引导会检查模型配置和创作资产；顶栏可以随时切换作品、设置全书与分卷字数目标、查看后台任务，并为不同环节选择模型档案。
+2. **和 Goethe 规划**：在 **AI 协作** 中持续讨论题材、卖点、人物关系、世界规则和想避免的套路。Goethe 会先汇总与提出候选，再展示 diff；只有本轮明确确认后才写入正式资产。
+3. **整理可写资产**：在 **大纲** 中按卷、幕、节、章管理结构，筛选待写或已写节点，设置章节目标并从章纲创建正文；在 **资料库** 中维护作者意图、故事基础、人物档案和世界设定。
+4. **用罗盘锁定近期方向**：右侧创作助手可随时查看创作罗盘和本章上下文，把阶段目标、必须保留与必须避免的内容固定进后续写作 packet。
+5. **交给 Dante 推进正文**：从顶栏或大纲节点开始写下一章，填写本章指导和字数目标。Dante 会完成写前检查、上下文组装、初稿、事实提取与状态结算；正文落盘后仍可在 Markdown 编辑器中手改、批注或创建 checkpoint。
+6. **审稿、修订并导出**：审稿工作区汇总 37 个维度的问题，支持按严重度和维度筛选、定位原文、生成修订提案并审阅 diff。完成后在 **项目迁移** 中导出 Markdown、TXT 或 EPUB。
+
+已有 TXT 或 Markdown 正文也不需要重来：在 **工具与设置 → 项目迁移** 中先解析卷章预览，确认无冲突后导入，再让 Dante 从现有进度继续。
+
+### Studio 工作区一览
+
+| 工作区 | 主要功能 |
+|---|---|
+| **总览** | 集中查看正文与章节进度、人物数量、待处理伏笔、资产就绪度、审稿均分、token 使用、最近章节和系统建议的下一步。 |
+| **大纲** | 卷、幕、节、章树形编辑；搜索节点；筛选待写/已写；设置章纲与字数目标；从大纲直接创建正文。 |
+| **资料库** | 分类编辑作者意图、创作重点、故事基础、人物和世界设定；支持 Markdown 即时渲染、自动保存、导入导出与 revision 冲突检查。 |
+| **正文** | 章节目录、字数目标、即时渲染编辑器、阅读宽度、专注模式、选区操作、批注、checkpoint、历史版本和修订记录。 |
+| **创作助手** | 在当前页面直接与 Dante 对话，携带选区或正文上下文；快速执行选区分析、续写建议与节奏检查，并查看罗盘、上下文、审稿和修订状态。 |
+| **审稿** | 汇总已审章节、阻断问题和待处理项；按严重度/维度筛选；定位证据；比较复审变化；为可修订问题生成提案。 |
+| **AI 协作** | 保存 Goethe / Dante 长期会话，展示真实模型调用、工具执行、确认请求、校验、失败原因和落盘阶段，而不是只显示一段聊天结果。 |
+| **项目搜索与连续性** | 跨正典、正文和参考资料进行精确与语义检索；检查人物位置、伤势、认知、时间线和伏笔，浏览可搜索、筛选、缩放与拖拽的实体关系拓扑。 |
+| **深度研究** | 围绕创作问题启动有证据约束的多轮研究，可选择搜索提供方、证据策略和研究轮次，并在 Studio 中浏览归档报告。 |
+| **参考库** | 导入参考作品、旧稿或同人 Canon，确认卷章覆盖，生成证据报告与多作品对照画像，再由用户逐条决定是否采纳。 |
+| **Skills** | 查看标准 `SKILL.md` 与 Runtime Skill 的来源、适用 Agent、任务范围和权限，并在本轮 Goethe / Dante 对话中按需启用。 |
+| **工具与设置** | 管理模型与作品、字数规划和任务中心；在高级工具中检查 canonical packet、同步诊断与章节运行；在项目迁移中完成正文导入和整书导出。 |
+
+### 看得见的安全边界
+
+- 正典、关系、世界和参考采纳等重要写入会先展示差异，并等待本轮确认。
+- 浏览器保存带有 revision 冲突检查，避免覆盖外部编辑器刚写入的内容；正文自动保存同时保留 checkpoint、版本和修订记录。
+- 作品级锁与事务回滚覆盖写章流程，任务中心会展示运行阶段和失败原因，不会把模型口头宣称当作完成状态。
+- API Key 默认只存在于当前 Studio 进程；选择自动恢复后也只写入本机用户私有凭据文件。
+
+需要排查问题时，可用 `openwrite studio --debug` 启动 Studio；脱敏日志会写入当前作品的 `data/logs/studio-debug.log`。
 
 ## 工作原理
 
-### 一个小说内核，四个入口
+### 一个小说内核，Studio 统一呈现
 
-CLI、Studio、Goethe 和 Dante 不各自维护一套写章逻辑。它们共用同一个 action surface 和小说应用服务：
+Studio、Goethe、Dante 和可选 CLI 不各自维护一套写章逻辑。Studio 把完整能力组织成可操作界面，底层入口共用同一个 action surface 和小说应用服务：
 
 ```text
-CLI ─────┐
-Studio ──┼─> Novel action surface ─> NovelApplicationService
-Goethe ──┤                              ├─ canonical packet
-Dante ───┘                              ├─ write / review / revision
+Studio ──┐
+Goethe ──┤
+Dante ───┼─> Novel action surface ─> NovelApplicationService
+CLI ─────┘                              ├─ canonical packet
+                                        ├─ write / review / revision
                                         ├─ source and reference lifecycle
                                         └─ workflow / truth / memory / BookState
 ```
@@ -229,7 +214,7 @@ data/novels/{novel_id}/
 - `src/story/author_intent.md` 保存全书长期承诺。
 - `src/story/current_focus.md` 保存当前阶段最高优先级目标。
 - `data/` 保存正文、会话、章节记忆、审稿、状态、缓存和 workflow；通常不需要手工维护。
-- 手改 `src/` 后运行 `openwrite sync`，让派生数据与真源重新对齐。
+- 手改 `src/` 后，在 Studio 的 **工具与设置 → 高级工具** 中检查并同步，让派生数据与真源重新对齐。
 
 ### 长篇上下文与人物时态
 
@@ -259,12 +244,7 @@ data/novels/{novel_id}/
 
 当输入压力升高时，系统按稳定优先级渐进压缩：先处理可从正文重建的旧章节记忆，再处理大纲摘要，然后收缩真相状态、人物数量和精确上文，最后才启用提供商级硬适配。作者意图、创作罗盘和当前章在前几级不会被删除；原文、JSONL 会话历史和 `src/` 真源也不会因发送前压缩而被改写。
 
-可用以下命令检查 Writer 或 Reviewer 实际收到的首轮消息、来源 revision、token 估算和截断报告：
-
-```bash
-openwrite context ch_007 --agent writer --show
-openwrite context ch_006 --agent reviewer --show
-```
+在 Studio 的 **工具与设置 → 高级工具** 中，可以检查某章的 canonical packet；正文右侧的 **上下文** 面板则用于查看当前章节信息。
 
 </details>
 
@@ -275,6 +255,11 @@ openwrite context ch_006 --agent reviewer --show
 默认的“向量 + 精确”策略只生成向量，不调用聊天模型；使用本机 FastEmbed 时，即使没有聊天 API Key 也可以搜索。需要实体关系遍历时，可切换为“图谱 + 向量”，由 LightRAG 额外调用 Chat Completions-compatible 模型提取实体与关系。
 
 索引保存在作品私有目录 `.openwrite/lightrag/`，不会进入 Git。正典、人物、世界设定、正文、风格资料和已采用的参考资料会增量入库，未变化的文档不会重复生成向量。
+
+日常使用直接在 Studio 的 **模型设置** 中选择本地 FastEmbed 或 OpenAI-compatible embedding，并在 **搜索** 工作区更新索引即可。以下环境变量只用于无界面服务器或自动化环境：
+
+<details>
+<summary><strong>服务器环境的检索配置</strong></summary>
 
 ```bash
 # 本地 embedding
@@ -289,6 +274,8 @@ export OPENWRITE_LIGHTRAG_EMBEDDING_API_KEY=your-embedding-key
 export OPENWRITE_LIGHTRAG_EMBEDDING_MODEL=text-embedding-3-small
 export OPENWRITE_LIGHTRAG_EMBEDDING_DIM=1536
 ```
+
+</details>
 
 ### 参考作品不会自动污染项目
 
@@ -319,53 +306,20 @@ Skill 默认不会进入所有写作上下文。在 Goethe 或 Dante 的本轮�
 @scene-causality 检查 ch_007 的场景因果链，只给诊断和优先建议。
 ```
 
-下一轮未再次指定时会恢复默认上下文。Skill 中的脚本不会自动执行，工具权限只能被收窄，不能借 Skill 扩权或绕过写入确认。
+下一轮未再次指定时会恢复默认上下文。Skill 中的脚本不会自动执行，工具权限只能被收窄，不能借 Skill 扩权或绕过写入确认。Studio 的 **Skills** 工作区可以查看发现结果、解析后的规则、适用 Agent 和诊断信息。
+
+## CLI 与自动化（可选）
+
+日常创作不需要记命令；Studio 已覆盖完整流程。CLI 保留给无界面服务器、脚本化批处理和精确调试，使用 `openwrite --help` 查看全部子命令。所有顶层命令都支持 `--project`，不需要先切换到作品目录：
 
 ```bash
-openwrite skill list
-openwrite skill resolve --agent dante --task chapter.write --skill scene-causality
-openwrite skill diagnose
-```
-
-## 命令行速查
-
-### 日常入口
-
-| 目标 | 命令 |
-|---|---|
-| 查看进度与下一步建议 | `openwrite` 或 `openwrite desk` |
-| 持续规划小说资产 | `openwrite goethe` |
-| 持续写作与审查 | `openwrite dante` |
-| 打开本地 Web 工作台 | `openwrite studio` |
-| 写下一章 / 指定章节 | `openwrite write next` / `openwrite write ch_006` |
-| 使用 Director、Writer、Reviewer 子流程 | `openwrite multi-write ch_006` |
-| 单独审查章节 | `openwrite review ch_006` |
-| 查看进度和运行态 | `openwrite status` |
-
-### 诊断与交付
-
-| 目标 | 命令 |
-|---|---|
-| 查看 canonical packet | `openwrite context ch_006 --show` |
-| 检查实际 Agent 输入 | `openwrite context ch_006 --agent writer --show` |
-| 导出上下文包 | `openwrite assemble ch_006 --output-dir out` |
-| 检查环境与项目 | `openwrite doctor` / `openwrite diagnose` |
-| 检查或刷新派生数据 | `openwrite sync --check` / `openwrite sync` |
-| 导入已有正文 | `openwrite import existing-novel.txt` |
-| 导出整书 | `openwrite export --format md` / `txt` / `epub` |
-| 管理正文版本 | `openwrite version list ch_006` |
-| 管理正文批注 | `openwrite annotation list ch_006` |
-
-所有顶层命令都支持 `--project`，不需要先切换到作品目录：
-
-```bash
-openwrite status --project ~/my_novel
 openwrite studio --project ~/my_novel --debug
+openwrite status --project ~/my_novel
 ```
 
-`openwrite agent` 已退役；长期主编排入口是 `openwrite dante`。原子命令适合精确控制、调试和自动化，不是日常使用的前置负担。
+## 高级配置（可选）
 
-## 常用环境变量
+Studio 用户通常不需要设置环境变量；下表用于服务器部署、自动化和特殊模型路由。
 
 | 变量 | 用途 | 默认值 |
 |---|---|---|
@@ -383,11 +337,11 @@ openwrite studio --project ~/my_novel --debug
 
 ### 应该先用 Goethe 还是 Dante？
 
-只有灵感、人物或设定还没有形成可写大纲时，先用 Goethe。已有可写资产或正在连载时，直接用 Dante。
+在 Studio 的 **AI 协作** 中选择即可：只有灵感、人物或设定还没有形成可写大纲时，先和 Goethe 规划；已有可写资产或正在连载时，直接交给 Dante。
 
 ### 修改 `src/` 后为什么没有立即生效？
 
-`src/` 是确认版真源，`data/` 中存在为运行效率生成的派生数据。手工修改后运行 `openwrite sync`；可先用 `openwrite sync --check` 只检查差异。
+`src/` 是确认版真源，`data/` 中存在为运行效率生成的派生数据。手工修改后，在 Studio 的 **工具与设置** 中检查并执行同步，让派生数据重新对齐。
 
 ### `outline_draft.md` 是另一份大纲吗？
 
@@ -422,7 +376,14 @@ pytest
 
 ## 致谢
 
-项目搜索使用 MIT 许可的 [HKUDS/LightRAG](https://github.com/HKUDS/LightRAG)。也感谢所有推动 AI 写作、长上下文、知识检索和创作工作流发展的开源项目与贡献者。
+OpenWrite 建立在许多可靠的开源项目之上，特别感谢：
+
+- **检索与长期记忆**：[LightRAG](https://github.com/HKUDS/LightRAG) 提供图谱与向量检索能力，[FastEmbed](https://github.com/qdrant/fastembed) 提供本地 embedding 推理。
+- **LLM 接入**：[LiteLLM](https://github.com/BerriAI/litellm) 提供统一模型网关与模型元数据；[OpenAI Python SDK](https://github.com/openai/openai-python) 和 [Anthropic Python SDK](https://github.com/anthropics/anthropic-sdk-python) 支撑官方协议接入。
+- **编辑与渲染**：[Vditor](https://github.com/Vanessa219/vditor) 提供 Studio 的 Markdown 编辑与即时渲染，[markdown-it-py](https://github.com/executablebooks/markdown-it-py) 用于安全渲染对话和 EPUB 内容。
+- **Python 基础设施**：[Pydantic](https://github.com/pydantic/pydantic) 负责结构化数据校验，[PyYAML](https://github.com/yaml/pyyaml) 承载项目配置与运行态，[prompt_toolkit](https://github.com/prompt-toolkit/python-prompt-toolkit) 提供 Goethe / Dante 的交互式终端体验。
+
+也感谢所有推动 AI 写作、长上下文、知识检索和创作工作流发展的开源项目与贡献者。
 
 特别感谢真诚、友善、团结、专业的 [Linux DO 社区（L 站）](https://linux.do/)，这里汇集了大量关于 AI、开发与开源实践的高质量讨论。
 

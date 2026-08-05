@@ -243,6 +243,7 @@ Finish with the reflection scheduler JSON: continueDispatch, taskUpdates, newTas
     },
     ...llmCfg,
     historyMaxChars: evidenceRuntimeHistoryMaxChars(),
+    outputRepairAttempts: agentCfg?.outputRepairAttempts ?? 1,
     signal: ctx.signal,
     chat: (request) => tracedLlmChat(ctx, "cycle-reflection.react", request, { agentRunId }),
     onVisualEvent: (event) => ctx.emit({

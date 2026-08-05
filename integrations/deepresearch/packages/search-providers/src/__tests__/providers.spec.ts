@@ -100,6 +100,16 @@ describe("parseBingHtml", () => {
     ]);
   });
 
+  it("does not mistake Chinese research-instruction words for topic relevance", async () => {
+    const html = `
+<li class="b_algo"><h2><a href="https://wenku.baidu.com/generic">探究的意思解释</a></h2><p>探究是一种研究和分析问题的方法。</p></li>
+<li class="b_algo"><h2><a href="https://example.com/mystery-craft">悬疑小说剧情设计指南</a></h2><p>用线索、误导和人物动机构建悬疑剧情。</p></li>`;
+    const provider = new BingSearchProvider({ fetchImpl: async () => new Response(html) });
+    await expect(provider.search("探究并解释悬疑小说剧情设计的基本原则和核心要素", 5)).resolves.toEqual([
+      expect.objectContaining({ url: "https://example.com/mystery-craft" }),
+    ]);
+  });
+
   it("rejects an oversized Bing response while streaming", async () => {
     const provider = new BingSearchProvider({
       maxResponseBytes: 32,

@@ -36,6 +36,7 @@ from tools.library_catalog import (
     describe_document,
     iter_library_paths,
 )
+from tools.llm.response import redact_sensitive_text
 from tools.model_profiles import (
     ModelProfileError,
     ModelProfileStore,
@@ -89,6 +90,7 @@ from tools.studio_runtime import (
     AGENT_TOOL_LABELS,
     DEBUG_ENV,
     render_chat_markdown,
+    sanitize_debug_payload,
 )
 from tools.studio_runtime import (
     configure_debug_logging as _configure_debug_logging,
@@ -105,6 +107,7 @@ from tools.studio_runtime import (
 from tools.task_runner import PersistentTaskRunner, TaskCancelled, TaskContext
 from tools.task_store import TaskStoreError
 from tools.version import __version__
+from tools.writing_targets import normalize_writing_targets
 
 logger = logging.getLogger("tools.studio")
 
@@ -289,6 +292,7 @@ class StudioApplication:
             "started_at": now,
             "updated_at": now,
             "finished_at": 0.0,
+            "event_sequence": 0,
             "events": [],
         }
         with self._agent_activity_lock:
@@ -318,6 +322,7 @@ class StudioApplication:
             activity["updated_at"] = now
             activity["turn"] = turn
             activity["tool"] = tool
+            tool_label = AGENT_TOOL_LABELS.get(tool, tool or "项目工具")
 
             if event_name == "run_started":
                 activity.update(
@@ -350,7 +355,6 @@ class StudioApplication:
                     ),
                 )
             elif event_name == "tool_started":
-                tool_label = AGENT_TOOL_LABELS.get(tool, tool or "项目工具")
                 activity.update(
                     phase="tool_running",
                     step_index=2,
@@ -358,7 +362,6 @@ class StudioApplication:
                     note=f"第 {turn} 轮：{tool_label}",
                 )
             elif event_name == "tool_completed":
-                tool_label = AGENT_TOOL_LABELS.get(tool, tool or "项目工具")
                 ok = bool(event.get("ok", True))
                 reason = str(event.get("reason") or "")
                 activity.update(
@@ -394,17 +397,53 @@ class StudioApplication:
                 )
 
             events = activity.setdefault("events", [])
+            sequence = int(activity.get("event_sequence") or 0) + 1
+            activity["event_sequence"] = sequence
             events.append(
                 {
+                    "sequence": sequence,
                     "event": event_name,
                     "turn": turn,
                     "tool": tool,
+                    "tool_label": tool_label if tool else "",
+                    "tool_call_id": str(event.get("tool_call_id") or "")[:120],
+                    "tool_count": int(event.get("tool_count") or 0),
+                    "has_content": bool(event.get("has_content")),
                     "ok": event.get("ok"),
-                    "reason": str(event.get("reason") or ""),
+                    "message": self._agent_activity_detail(
+                        event.get("message"), limit=900
+                    ),
+                    "arguments": self._agent_activity_detail(
+                        event.get("arguments"), limit=1800
+                    ),
+                    "result": self._agent_activity_detail(
+                        event.get("result"), limit=2400
+                    ),
+                    "reason": self._agent_activity_detail(
+                        event.get("reason"), limit=900
+                    ),
                     "timestamp": now,
                 }
             )
-            del events[:-12]
+            del events[:-80]
+
+    @staticmethod
+    def _agent_activity_detail(value: Any, *, limit: int) -> str:
+        if value in (None, "", [], {}):
+            return ""
+        if isinstance(value, (dict, list, tuple)):
+            text = json.dumps(
+                sanitize_debug_payload(value),
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            )
+        else:
+            text = str(value)
+        text = redact_sensitive_text(text).strip()
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit].rstrip()}\n...（已截断）"
 
     def _finish_agent_activity(
         self,
@@ -674,6 +713,9 @@ class StudioApplication:
                 not self.initialized and is_framework_root(self.project_root)
             ),
             "recent": recent,
+            "writing_targets": normalize_writing_targets(
+                self.config.get("writing_targets") if self.initialized else {}
+            ),
         }
 
     def require_project(self) -> None:
@@ -893,6 +935,9 @@ class StudioApplication:
             ),
             "runtime_diagnostics": self.runtime_diagnostics(),
             "rolling_plans": self.rolling_plan_action({"action": "list", "limit": 10}),
+            "narrative_forecasts": self.narrative_forecast_action(
+                {"action": "list", "limit": 10}
+            ),
         }
 
     def chapter_run_v2_action(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -939,6 +984,23 @@ class StudioApplication:
             status = (
                 HTTPStatus.NOT_FOUND
                 if exc.code == "CANDIDATE_NOT_FOUND"
+                else HTTPStatus.CONFLICT
+            )
+            raise StudioError(str(exc), status, code=exc.code) from exc
+
+    def narrative_forecast_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        from tools.narrative_forecast import (
+            NarrativeForecastError,
+            narrative_forecast_action,
+        )
+
+        self.require_project()
+        try:
+            return narrative_forecast_action(self.project_root, self.novel_id, payload)
+        except NarrativeForecastError as exc:
+            status = (
+                HTTPStatus.NOT_FOUND
+                if exc.code in {"FORECAST_NOT_FOUND", "BRANCH_NOT_FOUND"}
                 else HTTPStatus.CONFLICT
             )
             raise StudioError(str(exc), status, code=exc.code) from exc
@@ -1268,6 +1330,43 @@ class StudioApplication:
             )
         except NovelServiceError as exc:
             raise self._translate_service_error(exc) from exc
+        return self.workspace()
+
+    def update_writing_targets(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.require_project()
+        current = normalize_writing_targets(self.config.get("writing_targets"))
+        try:
+            targets = normalize_writing_targets(
+                payload,
+                base=current,
+                strict=True,
+            )
+        except ValueError as exc:
+            raise StudioError(str(exc), HTTPStatus.BAD_REQUEST) from exc
+
+        with self._write_lock:
+            config = self._load_config()
+            config["writing_targets"] = targets
+            content = yaml.safe_dump(config, allow_unicode=True, sort_keys=False)
+            descriptor, temp_name = tempfile.mkstemp(
+                prefix=".novel_config.",
+                suffix=".yaml.tmp",
+                dir=str(self.config_path.parent),
+            )
+            temp_path = Path(temp_name)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp_path, self.config_path)
+            finally:
+                temp_path.unlink(missing_ok=True)
+            self.config = config
+            if self._novel_service is not None:
+                self._novel_service.refresh()
+
+        self._debug_event("writing_targets_updated", **targets)
         return self.workspace()
 
     def configure_model(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1778,7 +1877,13 @@ class StudioApplication:
     def outline_structure(self, chapter_id: str = "") -> dict[str, Any]:
         """Return the live outline tree and an optional chapter recommendation."""
         self.require_project()
-        return build_outline_structure(self.novel_root, chapter_id=chapter_id)
+        return build_outline_structure(
+            self.novel_root,
+            chapter_id=chapter_id,
+            writing_targets=normalize_writing_targets(
+                self.config.get("writing_targets")
+            ),
+        )
 
     def edit_outline_structure(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Apply one atomic tree edit while preserving the Markdown source of truth."""
@@ -3779,6 +3884,9 @@ class LegacyStudioRequestHandler(SimpleHTTPRequestHandler):
                 return
             if route == "/api/project/delete":
                 self._json(self.app.delete_project(payload))
+                return
+            if route == "/api/project/writing-targets":
+                self._json(self.app.update_writing_targets(payload))
                 return
             self.app.require_project()
             if route == "/api/write":

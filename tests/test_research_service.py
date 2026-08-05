@@ -102,6 +102,23 @@ def test_research_environment_uses_routed_model_and_saved_search_key(tmp_path: P
     assert "jina-secret" not in store.credentials_path.read_text(encoding="utf-8")
 
 
+def test_research_environment_uses_saved_jina_key_as_bing_fetch_fallback(tmp_path: Path):
+    store = StudioResearchSettingsStore(tmp_path / "preferences")
+    store.save(
+        {
+            "search_provider": "jina",
+            "search_api_key": "jina-reader-secret",
+            "remember_api_key": True,
+        }
+    )
+    service = ResearchService(tmp_path / "novel", settings_store=store)
+
+    env = service._research_environment({"search": "bing"})
+
+    assert env["JINA_API_KEY"] == "jina-reader-secret"
+    assert env["FETCH_MODE"] == "fallback"
+
+
 def test_research_environment_reports_missing_search_key(tmp_path: Path):
     service = ResearchService(
         tmp_path / "novel",
@@ -151,6 +168,53 @@ def test_research_service_parses_pretty_summary():
         '{\n  "status": "succeeded",\n  "episodeId": "ep_1",\n  "report": "/tmp/report.md"\n}'
     )
     assert summary["episodeId"] == "ep_1"
+
+
+def test_research_service_rejects_failed_internal_episode_after_archiving(
+    tmp_path: Path, monkeypatch
+):
+    framework = tmp_path / "framework"
+    (framework / "node_modules").mkdir(parents=True)
+    (framework / "package.json").write_text("{}", encoding="utf-8")
+    service = ResearchService(tmp_path / "novel", framework_root=framework)
+    source_report = service.artifact_root / "EP_failed" / "final-report.md"
+    source_report.parent.mkdir(parents=True)
+    source_report.write_text("# 失败研究产物\n\n预算门未通过。", encoding="utf-8")
+
+    class FakeContext:
+        def phase(self, phase: str, note: str = "") -> None:
+            del phase, note
+
+        def checkpoint(self) -> None:
+            return None
+
+        def cancellation_requested(self) -> bool:
+            return False
+
+    monkeypatch.setattr(service, "status", lambda: {"available": True})
+    monkeypatch.setattr("tools.research_service.shutil.which", lambda name: "/bin/echo")
+    monkeypatch.setattr(
+        service,
+        "_parse_summary",
+        lambda output: {
+            "status": "failed",
+            "episodeId": "EP_failed",
+            "report": str(source_report),
+            "metrics": {"publishGatePassed": False},
+        },
+    )
+
+    with pytest.raises(ResearchServiceError) as exc_info:
+        service.run(
+            {"prompt": "研究悬疑小说剧情设计", "search": "none"},
+            FakeContext(),
+        )
+
+    assert exc_info.value.code == "RESEARCH_EPISODE_FAILED"
+    archived = service.report_root / "EP_failed.json"
+    assert archived.is_file()
+    assert json.loads(archived.read_text(encoding="utf-8"))["status"] == "failed"
+    assert (service.report_root / "EP_failed.md").is_file()
 
 
 def test_studio_exposes_research_status_and_report_route(tmp_path: Path):
