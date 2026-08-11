@@ -702,6 +702,47 @@ summary = "沈烛在回响中逐渐掌握的感知能力。"
     assert stale["error"] == "document_revision_conflict"
     assert 'role = "主角"' in hero.read_text(encoding="utf-8")
 
+    quote_document = novel_root / "src" / "world" / "quote_rules.md"
+    quote_document.write_text(
+        '守门人说：“门后的名字不能写错。”\n下一条规则保持不变。\n',
+        encoding="utf-8",
+    )
+    normalized_preview = executors["edit_project_document"](
+        {
+            "path": "src/world/quote_rules.md",
+            "edits": [
+                {
+                    "old_text": '守门人说：  "门后的名字不能写错。"',
+                    "new_text": "守门人要求逐字核对门后的名字。",
+                }
+            ],
+        }
+    )
+    assert normalized_preview["ok"] is True
+    assert normalized_preview["edits"][0]["mode"] == "normalized_text"
+    assert normalized_preview["edits"][0]["automatic"] is True
+    assert "+守门人要求逐字核对门后的名字。" in normalized_preview["diff"]
+
+    ambiguous_quotes = novel_root / "src" / "world" / "ambiguous_quotes.md"
+    ambiguous_quotes.write_text(
+        '“这句话足够长且出现两次。”\n“这句话足够长且出现两次。”\n',
+        encoding="utf-8",
+    )
+    ambiguous_normalized = executors["edit_project_document"](
+        {
+            "path": "src/world/ambiguous_quotes.md",
+            "edits": [
+                {
+                    "old_text": '"这句话足够长且出现两次。"',
+                    "new_text": "不应自动写入",
+                }
+            ],
+        }
+    )
+    assert ambiguous_normalized["error"] == "ambiguous_old_text"
+    assert ambiguous_normalized["details"]["normalized_occurrences"] == 2
+    assert "不应自动写入" not in ambiguous_quotes.read_text(encoding="utf-8")
+
     range_document = novel_root / "src" / "world" / "range_rules.md"
     range_document.write_text(
         "# 范围规则\n\n"
@@ -972,6 +1013,50 @@ def test_build_dante_tool_layers_exposes_callable_action_executors(
         actions["run_chapter_preflight"]({"chapter_id": "ch_001"})["action"]
         == "run_chapter_preflight"
     )
+
+
+def test_dante_write_action_preserves_generation_parameters(monkeypatch, tmp_path: Path):
+    from tools.agent.orchestrator import OpenWriteOrchestrator
+    from tools.init_project import init_project
+
+    init_project(tmp_path, "demo")
+    captured: dict[str, object] = {}
+
+    def fake_delegate(
+        self,
+        chapter_id: str,
+        preflight_result=None,
+        guidance: str = "",
+        target_words: int = 0,
+        temperature: float = 0.7,
+    ):
+        captured.update(
+            chapter_id=chapter_id,
+            guidance=guidance,
+            target_words=target_words,
+            temperature=temperature,
+        )
+        return {"ok": True, "chapter_id": chapter_id}
+
+    monkeypatch.setattr(OpenWriteOrchestrator, "delegate_writing", fake_delegate)
+    layers = tool_layers_module.build_dante_tool_layers(tmp_path)
+
+    result = layers["action_tool_executors"]["delegate_chapter_write"](
+        {
+            "chapter_id": "ch_008",
+            "guidance": "保持克制",
+            "target_words": 3200,
+            "temperature": 0.15,
+        }
+    )
+
+    assert result["ok"] is True
+    assert captured == {
+        "chapter_id": "ch_008",
+        "guidance": "保持克制",
+        "target_words": 3200,
+        "temperature": 0.15,
+    }
 
 
 def test_dante_preflight_action_requires_explicit_chapter_id(

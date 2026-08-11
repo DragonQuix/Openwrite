@@ -622,7 +622,9 @@ class TestDynamicCompression:
         assert result.compression["target_tokens"] == builder.MAX_TOKENS
         assert result.compression["reserved_output_tokens"] == min(
             builder.MAX_OUTPUT_TOKENS,
-            builder.CONTEXT_WINDOW_TOKENS // 2,
+            builder.CONTEXT_WINDOW_TOKENS
+            - result.compression["safety_tokens"]
+            - 1024,
         )
         assert result.compression["within_budget"] is True
         assert (

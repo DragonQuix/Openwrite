@@ -2,9 +2,98 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 FOLDED_RANGE_ANCHOR_LENGTHS = (96, 48, 24, 12)
+NORMALIZED_TEXT_MIN_CHARS = 12
+
+_QUOTE_EQUIVALENTS = str.maketrans(
+    {
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u201f": '"',
+        "\uff02": '"',
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201b": "'",
+        "\uff07": "'",
+    }
+)
+
+
+def normalized_text_spans(source: str, submitted: str) -> list[tuple[int, int]]:
+    """Return source spans matching text after quote and whitespace normalization."""
+
+    normalized_source, positions = _normalize_with_positions(str(source or ""))
+    normalized_submitted, _ = _normalize_with_positions(str(submitted or "").strip())
+    if not normalized_submitted:
+        return []
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(re.escape(normalized_submitted), normalized_source):
+        normalized_end = match.end() - 1
+        spans.append((positions[match.start()], positions[normalized_end] + 1))
+    return spans
+
+
+def select_normalized_text_span(
+    source: str,
+    submitted: str,
+    *,
+    min_text_chars: int = NORMALIZED_TEXT_MIN_CHARS,
+) -> dict[str, Any]:
+    """Select one exact source span when only quotes or whitespace differ."""
+
+    text = str(submitted or "").strip()
+    if len(text) < min_text_chars:
+        return {
+            "ok": False,
+            "error": "text_too_short_for_normalized_match",
+            "message": "文本未达到安全规范化匹配阈值。",
+            "details": {"submitted_chars": len(text)},
+        }
+    spans = normalized_text_spans(source, text)
+    details = {
+        "submitted_chars": len(text),
+        "normalized_occurrences": len(spans),
+        "normalizations": ["quote_style", "whitespace"],
+    }
+    if len(spans) > 1:
+        return {
+            "ok": False,
+            "error": "ambiguous_normalized_text",
+            "message": f"规范化后匹配到 {len(spans)} 处，已停止以避免误改。",
+            "details": details,
+        }
+    if not spans:
+        return {
+            "ok": False,
+            "error": "normalized_text_not_found",
+            "message": "规范化引号与空白后仍未找到匹配。",
+            "details": details,
+        }
+    start, end = spans[0]
+    return {
+        "ok": True,
+        "start": start,
+        "end": end,
+        "source_text": source[start:end],
+        "details": details,
+    }
+
+
+def _normalize_with_positions(value: str) -> tuple[str, list[int]]:
+    normalized: list[str] = []
+    positions: list[int] = []
+    for index, raw_character in enumerate(value):
+        character = raw_character.translate(_QUOTE_EQUIVALENTS)
+        if character.isspace():
+            continue
+        normalized.append(character)
+        positions.append(index)
+    return "".join(normalized), positions
 
 
 def select_folded_range_anchors(
@@ -48,8 +137,10 @@ def select_folded_range_anchors(
         last_start = start_anchor
         last_end = end_anchor
 
-        start_occurrences = source.count(start_anchor)
-        end_occurrences = source.count(end_anchor)
+        start_spans = normalized_text_spans(source, start_anchor)
+        end_spans = normalized_text_spans(source, end_anchor)
+        start_occurrences = len(start_spans)
+        end_occurrences = len(end_spans)
         details = {
             "anchor_chars": anchor_chars,
             "attempted_anchor_chars": list(attempted_lengths),
@@ -71,9 +162,9 @@ def select_folded_range_anchors(
         if start_occurrences == 0 or end_occurrences == 0:
             continue
 
-        start = source.find(start_anchor)
-        end = source.find(end_anchor)
-        if end < start + len(start_anchor):
+        start, start_end = start_spans[0]
+        end, end_end = end_spans[0]
+        if end < start_end:
             return {
                 "ok": False,
                 "error": "text_range_not_found",
@@ -82,8 +173,8 @@ def select_folded_range_anchors(
             }
         return {
             "ok": True,
-            "start_text": start_anchor,
-            "end_text": end_anchor,
+            "start_text": source[start:start_end],
+            "end_text": source[end:end_end],
             "details": details,
         }
 

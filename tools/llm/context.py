@@ -80,8 +80,14 @@ class ContextBudgetPolicy:
     def reserved_output_tokens(self) -> int:
         if self.input_budget_override is not None:
             return 0
-        # A bad profile must not reserve the entire window for output.
-        return min(self.max_output_tokens, self.context_window_tokens // 2)
+        # Reserve the configured output ceiling while always leaving a minimal
+        # input budget. Otherwise large-output profiles do not compress enough
+        # input for the request they actually send to the provider.
+        maximum_reservation = max(
+            0,
+            self.context_window_tokens - self.safety_tokens - 1024,
+        )
+        return min(self.max_output_tokens, maximum_reservation)
 
     @property
     def safety_tokens(self) -> int:

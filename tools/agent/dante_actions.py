@@ -69,11 +69,13 @@ class DanteActionAdapter:
         *,
         guidance: str = "",
         target_words: int = 0,
+        temperature: float = 0.7,
     ) -> dict[str, Any]:
         result = self.orchestrator.delegate_writing(
             chapter_id,
             guidance=guidance,
             target_words=target_words,
+            temperature=temperature,
         )
         payload = self._wrap("delegate_chapter_write", result)
         payload.update(result if isinstance(result, dict) else {})

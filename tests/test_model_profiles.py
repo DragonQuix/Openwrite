@@ -221,6 +221,7 @@ def test_active_profile_drives_llm_config_and_context_budget(tmp_path: Path):
         (2_000_000, 131_072),
         (10_000_000, 32_768),
         (1_000_000, 384_000),
+        (2_000_000, 750_000),
     ),
 )
 def test_long_context_profiles_are_valid_and_drive_context_budget(
@@ -247,6 +248,19 @@ def test_long_context_profiles_are_valid_and_drive_context_budget(
     assert builder.MAX_OUTPUT_TOKENS == max_output_tokens
     assert builder.MAX_TOKENS < context_tokens
     assert builder.MAX_TOKENS > context_tokens // 2
+
+
+def test_model_profile_rejects_output_that_leaves_no_input_budget(tmp_path: Path):
+    store = ModelProfileStore(tmp_path)
+
+    with pytest.raises(ModelProfileError, match="最大输出必须小于上下文预算"):
+        store.save_profile(
+            {
+                **profile("invalid-output", "custom-model"),
+                "context_tokens": 500_000,
+                "max_output_tokens": 500_000,
+            }
+        )
 
 
 def test_model_profile_surface_exposes_presets_without_credentials(tmp_path: Path):

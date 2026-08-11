@@ -254,7 +254,7 @@ def test_studio_model_form_uses_valid_output_step_and_interface_presets():
     styles = (assets / "styles.css").read_text(encoding="utf-8")
 
     assert (
-        'id="model-max-tokens" type="number" min="256" max="384000" step="1" value="24000"'
+        'id="model-max-tokens" type="number" min="256" max="10000000" step="1" value="24000"'
     ) in html
     assert (
         'id="model-context-tokens" type="number" min="12000" max="10000000" '
@@ -1089,6 +1089,30 @@ def test_studio_rejects_invalid_live_model_budgets(tmp_path: Path, monkeypatch):
                 "context_tokens": 1000,
             }
         )
+
+
+def test_studio_accepts_output_above_the_legacy_cap(tmp_path: Path, monkeypatch):
+    init_project(tmp_path, "demo")
+    monkeypatch.setenv("LLM_API_KEY", "active-secret")
+    app = StudioApplication(
+        tmp_path,
+        project_registry=ProjectRegistry(
+            tmp_path / "registry" / "recent.yaml", allow_ephemeral=True
+        ),
+        model_settings_store=StudioModelSettingsStore(tmp_path / "studio-settings"),
+    )
+
+    settings = app._validated_model_settings(
+        {
+            "model": "future-long-output-model",
+            "base_url": "https://example.com/v1",
+            "context_tokens": 2_000_000,
+            "max_tokens": 750_000,
+        }
+    )
+
+    assert settings["context_tokens"] == 2_000_000
+    assert settings["max_tokens"] == 750_000
 
 
 def test_studio_model_connection_errors_never_echo_provider_key_fragments(tmp_path: Path):

@@ -22,6 +22,20 @@ def test_react_never_exposes_model_credentials_as_tools():
     assert "Studio 会安全渲染" in OPENWRITE_SYSTEM_PROMPT
 
 
+def test_writing_tool_schemas_expose_all_supported_generation_parameters():
+    write_tool = next(tool for tool in OPENWRITE_TOOLS if tool.name == "write_chapter")
+    delegate_tool = next(
+        tool
+        for tool in _build_dante_tool_definitions()
+        if tool.name == "delegate_chapter_write"
+    )
+
+    assert {"target_words", "temperature"} <= set(write_tool.parameters["properties"])
+    assert {"target_words", "temperature"} <= set(delegate_tool.parameters["properties"])
+    assert write_tool.parameters["properties"]["temperature"]["default"] == 0.7
+    assert delegate_tool.parameters["properties"]["temperature"]["default"] == 0.7
+
+
 def test_update_truth_file_tool_schema_uses_canonical_names():
     tool = next(t for t in OPENWRITE_TOOLS if t.name == "update_truth_file")
     desc = tool.parameters["properties"]["file_name"]["description"]

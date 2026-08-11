@@ -383,7 +383,10 @@ class NovelApplicationService:
         args.setdefault("context_packet", self.assemble_packet(chapter_id))
         args["guidance"] = str(args.get("guidance") or "").strip()
         args["target_words"] = self._positive_int(args.get("target_words"))
-        args["temperature"] = float(args.get("temperature") or 0.7)
+        temperature = args.get("temperature")
+        args["temperature"] = float(
+            0.7 if temperature is None or temperature == "" else temperature
+        )
         executor = self._writer_executor or self._default_writer_executor
         if not self._task_lock.acquire(blocking=False):
             raise NovelServiceError("已有写作或审稿任务正在运行", code="PROJECT_BUSY")

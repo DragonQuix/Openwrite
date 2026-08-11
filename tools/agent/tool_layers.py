@@ -42,6 +42,15 @@ def _positive_int(value: Any) -> int:
     return parsed if parsed > 0 else 0
 
 
+def _float_value(value: Any, *, default: float) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _missing_required(action: str, field_name: str) -> dict[str, object]:
     return {
         "action": action,
@@ -88,6 +97,7 @@ def build_dante_tool_layers(project_root: Path) -> dict[str, object]:
                 _read_text_arg(args, "chapter_id", "chapter"),
                 guidance=_read_text_arg(args, "guidance", "text"),
                 target_words=_positive_int(args.get("target_words")),
+                temperature=_float_value(args.get("temperature"), default=0.7),
             )
             if _read_text_arg(args, "chapter_id", "chapter")
             else _missing_required("delegate_chapter_write", "chapter_id")

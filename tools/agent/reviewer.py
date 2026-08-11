@@ -16,8 +16,14 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
+
+import yaml
+
+from models.context_package import estimate_text_tokens
 
 from ..llm import Message
+from ..llm.context import ContextBudgetPolicy
 from .base import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -102,6 +108,65 @@ class ReviewerAgent(BaseAgent):
         36: "关系动态",
         37: "正典事件一致性",
     }
+    LLM_AUDIT_BATCH_SIZE = 8
+    LLM_AUDIT_INPUT_CEILING = 32_000
+    LLM_AUDIT_OUTPUT_TOKENS_PER_DIMENSION = 1024
+    _AUDIT_CONTEXT_SPECS = (
+        ("author_intent", "作者意图", 6.0, None),
+        ("creative_focus", "当前创作罗盘", 6.0, None),
+        ("outline", "本章大纲与目标", 7.0, None),
+        ("target_words", "目标字数", 2.0, None),
+        (
+            "character_profiles",
+            "角色设定",
+            6.0,
+            frozenset({1, 3, 9, 13, 14, 16, 18, 28, 29, 30, 31, 33, 34, 35, 36, 37}),
+        ),
+        (
+            "current_state",
+            "当前世界状态",
+            6.0,
+            frozenset({2, 3, 4, 5, 6, 9, 11, 18, 28, 29, 30, 31, 33, 35, 37}),
+        ),
+        (
+            "relationships",
+            "当前人物关系",
+            5.0,
+            frozenset({1, 9, 11, 13, 14, 16, 18, 28, 29, 30, 31, 34, 36, 37}),
+        ),
+        (
+            "ledger",
+            "当前资源账本",
+            4.0,
+            frozenset({4, 5, 11, 18, 28, 30, 35, 37}),
+        ),
+        (
+            "foreshadowing_summary",
+            "本章相关伏笔",
+            5.0,
+            frozenset({6, 9, 15, 24, 25, 28, 29, 31, 32, 33, 37}),
+        ),
+        (
+            "emotion_arc",
+            "章内情感弧线",
+            4.0,
+            frozenset({7, 15, 24, 25, 26, 32, 33}),
+        ),
+        (
+            "style_profile",
+            "风格约束",
+            5.0,
+            frozenset({7, 8, 10, 12, 16, 17, 19, 20, 21, 22, 23, 26, 27, 32, 34}),
+        ),
+        (
+            "recent_chapters",
+            "上一章衔接",
+            5.0,
+            frozenset(
+                {1, 2, 3, 4, 5, 6, 9, 11, 13, 14, 15, 16, 18, 19, 24, 25} | set(range(28, 38))
+            ),
+        ),
+    )
 
     def get_name(self) -> str:
         return "reviewer"
@@ -164,11 +229,10 @@ class ReviewerAgent(BaseAgent):
             issues=all_issues,
             summary=self._generate_summary(all_issues, score),
             score=score,
+            token_usage=self._audit_usage_summary(),
         )
 
-    def _rule_based_check(
-        self, content: str, target_words: int = 0
-    ) -> list[ReviewIssue]:
+    def _rule_based_check(self, content: str, target_words: int = 0) -> list[ReviewIssue]:
         """基于规则的检查（零 LLM 成本）"""
         issues = []
 
@@ -182,8 +246,7 @@ class ReviewerAgent(BaseAgent):
                         severity="warning",
                         category="目标字数偏差",
                         description=(
-                            f"正文约{actual_words}个中文字符，目标为{target_words}，"
-                            "偏差超过30%"
+                            f"正文约{actual_words}个中文字符，目标为{target_words}，偏差超过30%"
                         ),
                         suggestion="删减重复动作与支线，或补足关键场景，使篇幅回到目标区间",
                         dimension=7,
@@ -196,7 +259,7 @@ class ReviewerAgent(BaseAgent):
             lengths = [len(p) for p in paragraphs]
             mean = sum(lengths) / len(lengths)
             if mean > 0:
-                variance = sum((l - mean) ** 2 for l in lengths) / len(lengths)
+                variance = sum((length - mean) ** 2 for length in lengths) / len(lengths)
                 std_dev = variance**0.5
                 cv = std_dev / mean
                 if cv < 0.15:
@@ -290,12 +353,9 @@ class ReviewerAgent(BaseAgent):
         issues = []
 
         try:
-            import yaml
-            from pathlib import Path
-
             yaml_path = Path(__file__).parent.parent.parent / "craft" / "ai_patterns.yaml"
             if yaml_path.exists():
-                with open(yaml_path, "r", encoding="utf-8") as f:
+                with yaml_path.open(encoding="utf-8") as f:
                     data = yaml.safe_load(f)
 
                 # 检查禁用词
@@ -309,7 +369,9 @@ class ReviewerAgent(BaseAgent):
                                 severity=severity,
                                 category=item.get("category", "AI套路"),
                                 description=f"发现禁用表达：{pattern}",
-                                suggestion=f"建议替换为：{' / '.join(item.get('replacements', [])[:3])}",
+                                suggestion=(
+                                    "建议替换为：" + " / ".join(item.get("replacements", [])[:3])
+                                ),
                                 dimension=None,
                             )
                         )
@@ -339,12 +401,32 @@ class ReviewerAgent(BaseAgent):
         context: dict,
         dimensions: list[int] | None = None,
     ) -> list[ReviewIssue]:
-        """LLM 驱动的深度审计"""
+        """Run deep review in bounded batches so one report cannot be truncated."""
+
         requested = [
             item
             for item in (dimensions or self.DIMENSION_MAP.keys())
             if isinstance(item, int) and item in self.DIMENSION_MAP
         ]
+        self._audit_context_reports: list[dict] = []
+        issues: list[ReviewIssue] = []
+        for start in range(0, len(requested), self.LLM_AUDIT_BATCH_SIZE):
+            batch = requested[start : start + self.LLM_AUDIT_BATCH_SIZE]
+            issues.extend(self._llm_audit_batch(content, context, batch))
+        return issues
+
+    def _llm_audit_batch(
+        self,
+        content: str,
+        context: dict,
+        requested: list[int],
+        *,
+        output_budget: int | None = None,
+    ) -> list[ReviewIssue]:
+        """Review one dimension batch, bisecting it if the provider truncates output."""
+
+        from ..llm.response import ProviderResponseError
+
         dimension_contract = "\n".join(
             f"{number}. {self.DIMENSION_MAP[number]}" for number in requested
         )
@@ -374,61 +456,263 @@ class ReviewerAgent(BaseAgent):
 ```
 
 每个对象必须包含全部六个字段；severity 只能是 critical/warning/info；dimension 必须来自上述列表。
+不要逐维复述“通过”结论，只返回有正文证据的问题；每个维度最多返回 2 个最重要问题。
+description 和 suggestion 各不超过 80 字，evidence 不超过 60 字。
 如果没有问题，返回空数组 []。只输出 JSON 数组。"""
 
-        user_prompt = f"""请审核以下章节：
-
-章节内容：
-{content}
-
-作者意图：
-{context.get("author_intent", "无")}
-
-当前创作罗盘：
-{context.get("creative_focus", "无")}
-
-本章大纲与目标：
-{context.get("outline", "无")}
-
-目标字数：
-{context.get("target_words", "未指定")}
-
-角色设定：
-{context.get("character_profiles", "无")}
-
-当前世界状态：
-{context.get("current_state", "无")}
-
-当前人物关系：
-{context.get("relationships", "无")}
-
-当前资源账本：
-{context.get("ledger", "无")}
-
-本章相关伏笔：
-{context.get("foreshadowing_summary", "无")}
-
-章内情感弧线：
-{context.get("emotion_arc", "无")}
-
-风格约束：
-{context.get("style_profile", "无")}
-
-上一章衔接：
-{context.get("recent_chapters", "无")}
-
-请进行审核："""
-
-        response = self.chat(
-            messages=[
-                Message("system", system_prompt),
-                Message("user", user_prompt),
-            ],
-            temperature=0.3,
-            max_tokens=4096,
+        effective_output_budget = output_budget or self._audit_output_budget(requested)
+        user_prompt, context_report = self._build_audit_user_prompt(
+            content,
+            context,
+            requested,
+            system_prompt=system_prompt,
+            output_budget=effective_output_budget,
         )
+        if not hasattr(self, "_audit_context_reports"):
+            self._audit_context_reports = []
+        self._audit_context_reports.append(context_report)
 
+        try:
+            response = self.chat(
+                messages=[
+                    Message("system", system_prompt),
+                    Message("user", user_prompt),
+                ],
+                temperature=0.3,
+                max_tokens=effective_output_budget,
+            )
+        except ProviderResponseError as exc:
+            if exc.code != "MODEL_OUTPUT_TRUNCATED" or len(requested) <= 1:
+                raise
+            midpoint = len(requested) // 2
+            return self._llm_audit_batch(
+                content,
+                context,
+                requested[:midpoint],
+                output_budget=effective_output_budget,
+            ) + self._llm_audit_batch(
+                content,
+                context,
+                requested[midpoint:],
+                output_budget=effective_output_budget,
+            )
+
+        usage = dict(getattr(response, "usage", {}) or {})
+        if usage:
+            context_report["provider_usage"] = usage
         return self._parse_llm_issues(response.content, allowed_dimensions=set(requested))
+
+    def _audit_output_budget(self, requested: list[int]) -> int:
+        config = getattr(getattr(getattr(self, "ctx", None), "client", None), "config", None)
+        configured = self._positive_int(getattr(config, "max_tokens", None), 4096)
+        context_window = self._positive_int(getattr(config, "context_tokens", None), 64_000)
+        desired = max(
+            4096,
+            len(requested) * self.LLM_AUDIT_OUTPUT_TOKENS_PER_DIMENSION,
+        )
+        return max(256, min(configured, desired, max(256, context_window - 1024)))
+
+    @staticmethod
+    def _positive_int(value: object, default: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            parsed = default
+        return max(1, parsed)
+
+    def _build_audit_user_prompt(
+        self,
+        content: str,
+        context: dict,
+        requested: list[int],
+        *,
+        system_prompt: str,
+        output_budget: int,
+    ) -> tuple[str, dict]:
+        selected = set(requested)
+        all_entries: list[tuple[str, str, float]] = []
+        entries: list[tuple[str, str, float]] = []
+        omitted_fields: list[str] = []
+        for key, label, priority, dimensions in self._AUDIT_CONTEXT_SPECS:
+            value = str(context.get(key) or "").strip()
+            if not value:
+                continue
+            entry = (key, f"{label}：\n{value}", priority)
+            all_entries.append(entry)
+            if dimensions is not None and not selected.intersection(dimensions):
+                omitted_fields.append(key)
+                continue
+            entries.append(entry)
+
+        full_user_prompt = self._render_audit_user_prompt(content, all_entries)
+        original_user_prompt = self._render_audit_user_prompt(content, entries)
+        original_tokens = estimate_text_tokens(system_prompt) + estimate_text_tokens(
+            full_user_prompt
+        )
+        selected_tokens = estimate_text_tokens(system_prompt) + estimate_text_tokens(
+            original_user_prompt
+        )
+        config = getattr(getattr(getattr(self, "ctx", None), "client", None), "config", None)
+        context_window = self._positive_int(getattr(config, "context_tokens", None), 64_000)
+        policy = ContextBudgetPolicy(context_window, output_budget)
+        proactive_target = min(
+            self.LLM_AUDIT_INPUT_CEILING,
+            max(1024, int(policy.input_budget_tokens * 0.70)),
+        )
+        if selected_tokens <= proactive_target:
+            return original_user_prompt, {
+                "dimensions": list(requested),
+                "context_window_tokens": context_window,
+                "max_output_tokens": output_budget,
+                "input_budget_tokens": policy.input_budget_tokens,
+                "target_input_tokens": proactive_target,
+                "original_estimated_tokens": original_tokens,
+                "selection_estimated_tokens": selected_tokens,
+                "final_estimated_tokens": selected_tokens,
+                "compressed": bool(omitted_fields),
+                "omitted_fields": omitted_fields,
+                "truncated_fields": [],
+            }
+
+        system_tokens = estimate_text_tokens(system_prompt)
+        available = max(256, proactive_target - system_tokens - 1024)
+        content_tokens = estimate_text_tokens(content)
+        context_tokens = sum(estimate_text_tokens(value) for _, value, _ in entries)
+        reserved_context = min(context_tokens, max(256, int(available * 0.45))) if entries else 0
+        content_budget = min(content_tokens, max(0, available - reserved_context))
+        context_budget = min(context_tokens, max(0, available - content_budget))
+        remaining = max(0, available - content_budget - context_budget)
+        if remaining and content_budget < content_tokens:
+            added = min(remaining, content_tokens - content_budget)
+            content_budget += added
+            remaining -= added
+        if remaining:
+            context_budget += remaining
+
+        fitted_content = self._fit_audit_text(content, content_budget)
+        allocations = self._weighted_context_allocations(entries, context_budget)
+        fitted_entries: list[tuple[str, str, float]] = []
+        truncated_fields: list[str] = []
+        for (key, value, priority), allocation in zip(entries, allocations, strict=True):
+            fitted = self._fit_audit_text(value, allocation)
+            if fitted != value:
+                truncated_fields.append(key)
+            if fitted:
+                fitted_entries.append((key, fitted, priority))
+
+        user_prompt = self._render_audit_user_prompt(fitted_content, fitted_entries)
+        final_tokens = estimate_text_tokens(system_prompt) + estimate_text_tokens(user_prompt)
+        return user_prompt, {
+            "dimensions": list(requested),
+            "context_window_tokens": context_window,
+            "max_output_tokens": output_budget,
+            "input_budget_tokens": policy.input_budget_tokens,
+            "target_input_tokens": proactive_target,
+            "original_estimated_tokens": original_tokens,
+            "selection_estimated_tokens": selected_tokens,
+            "final_estimated_tokens": final_tokens,
+            "compressed": True,
+            "content_truncated": fitted_content != content,
+            "omitted_fields": omitted_fields,
+            "truncated_fields": truncated_fields,
+        }
+
+    @staticmethod
+    def _render_audit_user_prompt(
+        content: str,
+        entries: list[tuple[str, str, float]],
+    ) -> str:
+        parts = ["请审核以下章节：", f"章节内容：\n{content}"]
+        parts.extend(value for _, value, _ in entries)
+        parts.append("请进行审核：")
+        return "\n\n".join(parts)
+
+    @classmethod
+    def _weighted_context_allocations(
+        cls,
+        entries: list[tuple[str, str, float]],
+        budget: int,
+    ) -> list[int]:
+        counts = [estimate_text_tokens(value) for _, value, _ in entries]
+        if sum(counts) <= budget:
+            return counts
+        allocations = [0] * len(entries)
+        remaining = max(0, budget)
+        active = {index for index, count in enumerate(counts) if count > 0}
+        if active and remaining:
+            floor = min(96, remaining // len(active))
+            for index in active:
+                allocations[index] = min(counts[index], floor)
+            remaining -= sum(allocations)
+            active = {index for index in active if allocations[index] < counts[index]}
+        while active and remaining > 0:
+            denominator = sum(entries[index][2] for index in active)
+            if denominator <= 0:
+                break
+            shares = {
+                index: max(1, int(remaining * entries[index][2] / denominator)) for index in active
+            }
+            progressed = 0
+            for index in list(active):
+                added = min(shares[index], counts[index] - allocations[index], remaining)
+                allocations[index] += added
+                remaining -= added
+                progressed += added
+                if allocations[index] >= counts[index]:
+                    active.remove(index)
+                if remaining <= 0:
+                    break
+            if progressed == 0:
+                break
+        return allocations
+
+    @staticmethod
+    def _fit_audit_text(text: str, max_tokens: int) -> str:
+        value = str(text or "")
+        current = estimate_text_tokens(value)
+        if not value or current <= max_tokens:
+            return value
+        if max_tokens <= 0:
+            return ""
+        marker = "\n...[审稿上下文已按 Token 预算压缩]...\n"
+        max_chars = max(1, int(len(value) * max_tokens / max(1, current)))
+        fitted = value
+        for _ in range(8):
+            head = max(1, int(max_chars * 0.55))
+            tail = max(0, max_chars - head)
+            fitted = value[:head] + marker + (value[-tail:] if tail else "")
+            actual = estimate_text_tokens(fitted)
+            if actual <= max_tokens:
+                return fitted
+            max_chars = max(1, int(max_chars * max_tokens / actual * 0.95))
+        return fitted
+
+    def _audit_usage_summary(self) -> dict:
+        reports = list(getattr(self, "_audit_context_reports", []) or [])
+        if not reports:
+            return {}
+        provider_usage = [dict(report.get("provider_usage") or {}) for report in reports]
+        prompt_tokens = sum(
+            int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+            for usage in provider_usage
+        )
+        completion_tokens = sum(
+            int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+            for usage in provider_usage
+        )
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "audit_calls": len(reports),
+            "compressed_calls": sum(bool(report.get("compressed")) for report in reports),
+            "original_estimated_tokens": sum(
+                int(report.get("original_estimated_tokens") or 0) for report in reports
+            ),
+            "final_estimated_tokens": sum(
+                int(report.get("final_estimated_tokens") or 0) for report in reports
+            ),
+        }
 
     @staticmethod
     def _parse_llm_issues(

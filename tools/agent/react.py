@@ -1135,6 +1135,18 @@ OPENWRITE_TOOLS = [
             "properties": {
                 "chapter_id": {"type": "string", "description": "章节 ID（如 ch_005）"},
                 "guidance": {"type": "string", "description": "创作指导（可选，自然语言）"},
+                "target_words": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "目标字数；省略时使用大纲或项目默认值",
+                },
+                "temperature": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 2,
+                    "default": 0.7,
+                    "description": "生成温度，默认 0.7",
+                },
             },
             "required": [],
         },

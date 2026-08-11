@@ -488,6 +488,11 @@ class ModelProfileStore:
             int,
             "最大输出",
         )
+        if max_output_tokens >= context_tokens:
+            raise ModelProfileError(
+                "最大输出必须小于上下文预算，以便为输入保留空间",
+                code="INVALID_MODEL_PROFILE",
+            )
         temperature = ModelProfileStore._bounded_number(
             value.get("temperature"), 0.7, 0, 2, float, "温度"
         )

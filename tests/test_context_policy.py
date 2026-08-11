@@ -12,8 +12,8 @@ def test_policy_reserves_output_and_provider_safety_margin():
 def test_bad_output_configuration_cannot_consume_the_whole_window():
     policy = ContextBudgetPolicy(12000, 50000)
 
-    assert policy.reserved_output_tokens == 6000
-    assert policy.input_budget_tokens == 5488
+    assert policy.reserved_output_tokens == 10464
+    assert policy.input_budget_tokens == 1024
 
 
 def test_staircase_boundaries_and_proportional_targets_are_stable():

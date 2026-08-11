@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ from tools.agent.writer import WriterAgent
 from tools.chapter_memory import ChapterMemoryStore
 from tools.context_builder import ContextBuilder
 from tools.init_project import init_project
+from tools.llm.response import ProviderResponseError
 from tools.project_lock import ProjectBusyError, ProjectWriteLock
 from tools.truth_manager import TruthFiles, TruthFilesManager
 
@@ -276,6 +278,94 @@ def test_reviewer_context_keeps_author_compass_and_quality_constraints():
     assert "避免突然升级" in payload["creative_focus"]
     assert "进入地下室" in payload["outline"]
     assert payload["relationships"].startswith("陈默")
+
+
+def test_reviewer_batches_full_dimension_audit_to_bound_each_output():
+    reviewer = ReviewerAgent.__new__(ReviewerAgent)
+    calls: list[str] = []
+
+    def fake_chat(**kwargs):
+        calls.append(kwargs["messages"][0].content)
+        return SimpleNamespace(content="[]")
+
+    reviewer.chat = fake_chat
+
+    issues = asyncio.run(reviewer._llm_audit("正文", {}))
+
+    assert issues == []
+    assert len(calls) == 5
+    assert "1. OOC检查" in calls[0]
+    assert "8. 文风检查" in calls[0]
+    assert "9. 信息越界" in calls[1]
+    assert "33. 大纲偏离检测" in calls[-1]
+    assert "37. 正典事件一致性" in calls[-1]
+
+
+def test_reviewer_bisects_a_dimension_batch_after_output_truncation():
+    reviewer = ReviewerAgent.__new__(ReviewerAgent)
+    calls: list[list[int]] = []
+
+    def fake_chat(**kwargs):
+        system_prompt = kwargs["messages"][0].content
+        requested = [
+            number
+            for number, name in reviewer.DIMENSION_MAP.items()
+            if f"{number}. {name}" in system_prompt
+        ]
+        calls.append(requested)
+        if len(requested) > 1:
+            raise ProviderResponseError(
+                "MODEL_OUTPUT_TRUNCATED",
+                "模型输出因长度限制被截断",
+            )
+        return SimpleNamespace(content="[]")
+
+    reviewer.chat = fake_chat
+
+    issues = asyncio.run(reviewer._llm_audit("正文", {}, dimensions=[1, 2, 3, 4]))
+
+    assert issues == []
+    assert calls == [[1, 2, 3, 4], [1, 2], [1], [2], [3, 4], [3], [4]]
+
+
+def test_reviewer_uses_profile_ceiling_and_structured_context_compression():
+    reviewer = ReviewerAgent.__new__(ReviewerAgent)
+    reviewer.ctx = SimpleNamespace(
+        client=SimpleNamespace(
+            config=SimpleNamespace(max_tokens=12_000, context_tokens=64_000)
+        )
+    )
+    calls: list[dict] = []
+
+    def fake_chat(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(content="[]", usage={})
+
+    reviewer.chat = fake_chat
+    context = {
+        "author_intent": "人物选择必须付出代价",
+        "creative_focus": "保持克制",
+        "outline": "主角进入地下室",
+        "character_profiles": "角色正典" * 20_000,
+        "style_profile": "风格约束" * 20_000,
+    }
+
+    issues = asyncio.run(
+        reviewer._llm_audit(
+            "章节正文" * 1000,
+            context,
+            dimensions=[17, 19, 20, 21, 22, 23, 24, 26],
+        )
+    )
+
+    assert issues == []
+    assert calls[0]["max_tokens"] == 8192
+    assert "角色设定" not in calls[0]["messages"][1].content
+    assert "审稿上下文已按 Token 预算压缩" in calls[0]["messages"][1].content
+    report = reviewer._audit_context_reports[0]
+    assert report["compressed"] is True
+    assert report["final_estimated_tokens"] <= report["target_input_tokens"]
+    assert report["final_estimated_tokens"] < report["original_estimated_tokens"]
 
 
 def test_write_commit_rolls_back_truth_and_draft_when_memory_fails(

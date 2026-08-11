@@ -311,6 +311,33 @@ def test_stage_outline_edits_replaces_range_between_short_anchors(tmp_path: Path
     assert "相邻内容保留" in draft
 
 
+def test_stage_outline_edits_normalizes_quote_style_and_whitespace_for_unique_old_text(
+    tmp_path: Path,
+):
+    store = StoryPlanningStore(tmp_path, "demo")
+    original = '# 大纲\n\n守门人说：“门后的名字不能写错。”\n\n相邻内容保留。\n'
+    store.outline_src_path.parent.mkdir(parents=True)
+    store.outline_src_path.write_text(original, encoding="utf-8")
+
+    result = store.stage_outline_edits(
+        base_revision=store.outline_source_revision(),
+        edits=[
+            {
+                "old_text": '守门人说：  "门后的名字不能写错。"',
+                "new_text": "守门人要求逐字核对门后的名字。",
+            }
+        ],
+        final_batch=False,
+    )
+
+    assert result["ok"] is True
+    assert result["applied"][0]["mode"] == "normalized_text"
+    assert result["applied"][0]["automatic"] is True
+    draft = store.outline_draft_path.read_text(encoding="utf-8")
+    assert "守门人要求逐字核对门后的名字。" in draft
+    assert "相邻内容保留。" in draft
+
+
 def test_long_old_text_mismatch_automatically_falls_back_to_range_anchors(
     tmp_path: Path,
 ):

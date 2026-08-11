@@ -36,6 +36,7 @@ from tools.library_catalog import (
     describe_document,
     iter_library_paths,
 )
+from tools.llm.model_catalog import MAX_CONTEXT_TOKENS, MAX_OUTPUT_TOKENS
 from tools.llm.response import redact_sensitive_text
 from tools.model_profiles import (
     ModelProfileError,
@@ -1571,16 +1572,18 @@ class StudioApplication:
             payload.get("context_tokens"),
             default=self._env_int("OPENWRITE_CONTEXT_TOKENS", 64000),
             minimum=12000,
-            maximum=2000000,
+            maximum=MAX_CONTEXT_TOKENS,
             label="上下文预算",
         )
         max_tokens = self._bounded_int(
             payload.get("max_tokens"),
             default=self._env_int("LLM_MAX_TOKENS", 24000),
             minimum=256,
-            maximum=131072,
+            maximum=MAX_OUTPUT_TOKENS,
             label="最大输出",
         )
+        if max_tokens >= context_tokens:
+            raise StudioError("最大输出必须小于上下文预算，以便为输入保留空间")
         return {
             "provider": provider,
             "model": model,

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 import yaml
 
@@ -52,9 +53,9 @@ class OpenWriteOrchestrator:
         self,
         project_root: Path,
         novel_id: str,
-        state_store: Optional[BookStateStore] = None,
-        planning_store: Optional[StoryPlanningStore] = None,
-        tool_executors: Optional[dict[str, Callable[[dict[str, Any]], dict[str, Any]]]] = None,
+        state_store: BookStateStore | None = None,
+        planning_store: StoryPlanningStore | None = None,
+        tool_executors: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.novel_id = novel_id
@@ -70,10 +71,10 @@ class OpenWriteOrchestrator:
         cls,
         project_root: Path,
         novel_id: str,
-        state_store: Optional[BookStateStore] = None,
-        planning_store: Optional[StoryPlanningStore] = None,
-        tool_executors: Optional[dict[str, Callable[[dict[str, Any]], dict[str, Any]]]] = None,
-    ) -> "OpenWriteOrchestrator":
+        state_store: BookStateStore | None = None,
+        planning_store: StoryPlanningStore | None = None,
+        tool_executors: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
+    ) -> OpenWriteOrchestrator:
         return cls(
             project_root=project_root,
             novel_id=novel_id,
@@ -188,29 +189,43 @@ class OpenWriteOrchestrator:
 
     def confirm_outline_scope(self) -> OrchestratorResult:
         self.state = self.state_store.load_or_create()
-        if self.state.pending_confirmation == "outline_scope":
+        if (
+            self.state.pending_confirmation == "outline_scope"
+            and self.story_planning_store.outline_edit_state_path.exists()
+        ):
             return self._handle_outline_confirmation()
         if (
             self.state.stage
-            in {BookStage.DISCOVERY, BookStage.FOUNDATION, BookStage.ROLLING_OUTLINE}
+            in {
+                BookStage.DISCOVERY,
+                BookStage.FOUNDATION,
+                BookStage.ROLLING_OUTLINE,
+                BookStage.CHAPTER_PREFLIGHT,
+                BookStage.REVIEW_AND_REVISE,
+            }
             and self.story_planning_store.outline_src_path.exists()
             and not self.story_planning_store.outline_source_is_placeholder()
         ):
-            self._sync_runtime_caches(sync_outline=True, sync_characters=False)
-            self.state.stage = BookStage.CHAPTER_PREFLIGHT
-            self.state.pending_confirmation = ""
-            self.state.blocking_reason = ""
-            self.state.last_agent_action = "confirmed_existing_outline_scope"
-            self.state_store.save(self.state)
-            return OrchestratorResult(
-                message="已确认当前 src/outline.md 可作为写作大纲。下一步进入章节预检。",
-                stage=self.state.stage,
-                blocked=False,
-                next_action="chapter_preflight",
-            )
+            return self._confirm_existing_outline_scope()
+        if self.state.pending_confirmation == "outline_scope":
+            return self._handle_outline_confirmation()
         return self._stage_blocked_result(
             "当前没有可确认的大纲范围。请先生成或补全 src/outline.md。",
             next_action="prepare_outline_document",
+        )
+
+    def _confirm_existing_outline_scope(self) -> OrchestratorResult:
+        self._sync_runtime_caches(sync_outline=True, sync_characters=False)
+        self.state.stage = BookStage.CHAPTER_PREFLIGHT
+        self.state.pending_confirmation = ""
+        self.state.blocking_reason = ""
+        self.state.last_agent_action = "confirmed_existing_outline_scope"
+        self.state_store.save(self.state)
+        return OrchestratorResult(
+            message="已确认当前 src/outline.md 可作为写作大纲。下一步进入章节预检。",
+            stage=self.state.stage,
+            blocked=False,
+            next_action="chapter_preflight",
         )
 
     def run_chapter_preflight(self, chapter_id: str) -> dict[str, Any]:
@@ -260,9 +275,10 @@ class OpenWriteOrchestrator:
     def delegate_writing(
         self,
         chapter_id: str,
-        preflight_result: Optional[dict[str, Any]] = None,
+        preflight_result: dict[str, Any] | None = None,
         guidance: str = "",
         target_words: int = 0,
+        temperature: float = 0.7,
     ) -> dict[str, Any]:
         self.state = self.state_store.load_or_create()
         packet_result = preflight_result or self.run_preflight(chapter_id)
@@ -299,6 +315,7 @@ class OpenWriteOrchestrator:
                     "prompt_sections": packet["prompt_sections"],
                     "guidance": guidance,
                     "target_words": target_words,
+                    "temperature": temperature,
                 }
             )
             result = self._normalize_write_result(raw_result)
@@ -641,6 +658,7 @@ class OpenWriteOrchestrator:
             BookStage.DISCOVERY,
             BookStage.FOUNDATION,
             BookStage.ROLLING_OUTLINE,
+            BookStage.REVIEW_AND_REVISE,
         }
         if advanced_to_preflight:
             self.state.stage = BookStage.CHAPTER_PREFLIGHT
@@ -826,7 +844,7 @@ class OpenWriteOrchestrator:
             next_action="chapter_preflight",
         )
 
-    def _extract_write_request(self, text: str) -> Optional[WriteRequest]:
+    def _extract_write_request(self, text: str) -> WriteRequest | None:
         match = re.search(
             r"(?:开始写|写一下|写出|帮我写|请写|我要写|写)\s*"
             r"(?P<chapter>ch\s*_\s*\d{3}|第\s*[零一二三四五六七八九十百千万\d]+\s*章)",
@@ -846,11 +864,11 @@ class OpenWriteOrchestrator:
                 )
         return None
 
-    def _extract_chapter_request(self, text: str) -> Optional[str]:
+    def _extract_chapter_request(self, text: str) -> str | None:
         request = self._extract_write_request(text)
         return request.chapter_id if request else None
 
-    def _extract_review_request(self, text: str) -> Optional[ReviewRequest]:
+    def _extract_review_request(self, text: str) -> ReviewRequest | None:
         match = re.search(
             r"(?:审查|复检|review)\s*"
             r"(?P<chapter>latest|最新章节|ch\s*_\s*\d{3}|第\s*[零一二三四五六七八九十百千万\d]+\s*章)",
@@ -991,7 +1009,7 @@ class OpenWriteOrchestrator:
 
     def _get_optional_orchestrator_executor(
         self, tool_name: str
-    ) -> Optional[Callable[[dict[str, Any]], dict[str, Any]]]:
+    ) -> Callable[[dict[str, Any]], dict[str, Any]] | None:
         if tool_name not in ORCHESTRATOR_TOOLKIT:
             return None
         return self.tool_executors.get(tool_name)

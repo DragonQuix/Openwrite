@@ -91,6 +91,11 @@ def _load_config(project_root: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _generation_temperature(args: dict[str, Any]) -> float:
+    value = args.get("temperature")
+    return float(0.7 if value is None or value == "" else value)
+
+
 def _chapter_number(chapter_id: Any) -> int:
     text = str(chapter_id or "").strip()
     if not text:
@@ -880,7 +885,7 @@ def execute_write_chapter(project_root: Path, args: dict[str, Any]) -> dict[str,
                     writer.write_chapter(
                         context=writer_payload,
                         chapter_number=_chapter_number(chapter_id) or 1,
-                        temperature=float(args.get("temperature") or 0.7),
+                        temperature=_generation_temperature(args),
                         target_words=writer_payload.get("target_words") or None,
                     )
                 )
@@ -1272,6 +1277,7 @@ def execute_review_chapter(project_root: Path, args: dict[str, Any]) -> dict[str
                 "run_id": run_manifest.run_id if run_manifest else "",
                 "run_id_v2": run_v2_manifest.run_id if run_v2_manifest else "",
                 "effective_target_words": int(review_context.get("target_words") or 0),
+                "token_usage": dict(getattr(result, "token_usage", {}) or {}),
                 "strict": strict,
                 "dimensions": dimensions,
             }
@@ -1444,7 +1450,7 @@ def execute_multi_agent_chapter(
             result = asyncio.run(
                 director.run(
                     chapter_id=chapter_id,
-                    temperature=float(args.get("temperature") or 0.7),
+                    temperature=_generation_temperature(args),
                     run_review=not bool(args.get("no_review")),
                     **director_options,
                 )

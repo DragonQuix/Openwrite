@@ -8,7 +8,8 @@ from functools import lru_cache
 from typing import Any
 
 MAX_CONTEXT_TOKENS = 10_000_000
-MAX_OUTPUT_TOKENS = 384_000
+# Application validation ceiling; provider presets retain their verified caps.
+MAX_OUTPUT_TOKENS = MAX_CONTEXT_TOKENS
 
 
 @dataclass(frozen=True)

@@ -15,7 +15,11 @@ from typing import Any, cast
 import yaml
 
 from tools.novel_service import NovelApplicationService, NovelServiceError
-from tools.text_range import select_folded_range_anchors
+from tools.text_range import (
+    normalized_text_spans,
+    select_folded_range_anchors,
+    select_normalized_text_span,
+)
 
 ToolExecutor = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -764,6 +768,39 @@ def _edit_project_document(
             }
         occurrences = revised.count(old_text)
         if occurrences == 0:
+            normalized_selection = select_normalized_text_span(revised, old_text)
+            if normalized_selection["ok"]:
+                start = int(normalized_selection["start"])
+                end = int(normalized_selection["end"])
+                revised = revised[:start] + new_text + revised[end:]
+                applied.append(
+                    {
+                        "index": index + 1,
+                        "mode": "normalized_text",
+                        "automatic": True,
+                        "normalizations": normalized_selection["details"][
+                            "normalizations"
+                        ],
+                        "replacements": 1,
+                        "replace_all": False,
+                    }
+                )
+                continue
+            if normalized_selection["error"] == "ambiguous_normalized_text":
+                return {
+                    "ok": False,
+                    "error": "ambiguous_old_text",
+                    "message": (
+                        f"第 {index + 1} 个 old_text 规范化引号与空白后匹配到多处；"
+                        "请改用唯一的 start_text/end_text。"
+                    ),
+                    "revision": revision,
+                    "details": {
+                        "field_path": f"$.edits[{index}].old_text",
+                        "retry_revision": revision,
+                        **dict(normalized_selection.get("details") or {}),
+                    },
+                }
             long_text = len(old_text) >= DOCUMENT_LONG_OLD_TEXT_CHARS
             anchor_selection = (
                 select_folded_range_anchors(
@@ -938,17 +975,13 @@ def _replace_document_text_range(
             "message": "范围替换需要同时提供 start_text 和 end_text。",
             "details": {},
         }
-    start_positions = [
-        match.start() for match in re.finditer(re.escape(start_anchor), source)
-    ]
-    end_positions = [
-        match.start() for match in re.finditer(re.escape(end_anchor), source)
-    ]
-    if not start_positions or not end_positions:
+    start_spans = normalized_text_spans(source, start_anchor)
+    end_spans = normalized_text_spans(source, end_anchor)
+    if not start_spans or not end_spans:
         missing = []
-        if not start_positions:
+        if not start_spans:
             missing.append("start_text")
-        if not end_positions:
+        if not end_spans:
             missing.append("end_text")
         return {
             "ok": False,
@@ -956,30 +989,27 @@ def _replace_document_text_range(
             "message": f"找不到{'和'.join(missing)}锚点。",
             "details": {
                 "missing_anchors": missing,
-                "start_occurrences": len(start_positions),
-                "end_occurrences": len(end_positions),
+                "start_occurrences": len(start_spans),
+                "end_occurrences": len(end_spans),
             },
         }
 
     ranges: list[tuple[int, int]] = []
     if start_anchor == end_anchor:
-        ranges = [
-            (position, position + len(end_anchor)) for position in start_positions
-        ]
+        ranges = list(start_spans)
     else:
-        for start in start_positions:
-            minimum_end = start + len(start_anchor)
-            for end in end_positions:
-                if end >= minimum_end:
-                    ranges.append((start, end + len(end_anchor)))
+        for start, start_end in start_spans:
+            for end, end_end in end_spans:
+                if end >= start_end:
+                    ranges.append((start, end_end))
     if not ranges:
         return {
             "ok": False,
             "error": "text_range_not_found",
             "message": "找到了首尾锚点，但它们的顺序不成立。",
             "details": {
-                "start_occurrences": len(start_positions),
-                "end_occurrences": len(end_positions),
+                "start_occurrences": len(start_spans),
+                "end_occurrences": len(end_spans),
             },
         }
     if len(ranges) > 1:
@@ -992,8 +1022,8 @@ def _replace_document_text_range(
             ),
             "details": {
                 "range_count": len(ranges),
-                "start_occurrences": len(start_positions),
-                "end_occurrences": len(end_positions),
+                "start_occurrences": len(start_spans),
+                "end_occurrences": len(end_spans),
             },
         }
 

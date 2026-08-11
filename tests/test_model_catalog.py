@@ -83,7 +83,7 @@ def test_catalog_exposes_current_frontier_context_and_output_capacities():
     catalog = {preset["id"]: preset for preset in build_model_preset_catalog({})}
 
     assert MAX_CONTEXT_TOKENS == 10_000_000
-    assert MAX_OUTPUT_TOKENS == 384_000
+    assert MAX_OUTPUT_TOKENS == 10_000_000
     assert catalog["deepseek-v4-flash"]["context_tokens"] == 1_000_000
     assert catalog["deepseek-v4-flash"]["max_tokens"] == 384_000
     assert catalog["volcengine-doubao-seed-2.1-pro"]["max_tokens"] == 262_144

@@ -1041,6 +1041,37 @@ def test_dante_can_confirm_current_outline_scope_before_preflight(tmp_path: Path
     assert preflight["reason"] == ""
 
 
+def test_dante_can_confirm_canonical_outline_from_review_stage_without_pending_draft(
+    tmp_path: Path,
+):
+    _bootstrap_novel(tmp_path)
+    state_store = BookStateStore(tmp_path, "demo")
+    planning_store = StoryPlanningStore(tmp_path, "demo")
+    planning_store.outline_edit_state_path.unlink(missing_ok=True)
+    planning_store.outline_draft_path.unlink(missing_ok=True)
+    state = state_store.load_or_create()
+    state.stage = BookStage.REVIEW_AND_REVISE
+    state.pending_confirmation = "outline_scope"
+    state.blocking_reason = "outline_not_confirmed"
+    state_store.save(state)
+    orchestrator = OpenWriteOrchestrator.for_testing(
+        tmp_path,
+        "demo",
+        state_store=state_store,
+        planning_store=planning_store,
+    )
+
+    result = orchestrator.confirm_outline_scope()
+
+    persisted = state_store.load_or_create()
+    assert result.blocked is False
+    assert result.next_action == "chapter_preflight"
+    assert persisted.stage == BookStage.CHAPTER_PREFLIGHT
+    assert persisted.pending_confirmation == ""
+    assert persisted.blocking_reason == ""
+    assert persisted.last_agent_action == "confirmed_existing_outline_scope"
+
+
 def test_goethe_handoff_accepts_legacy_canonical_assets_after_writing_started(
     tmp_path: Path,
 ):
@@ -1401,6 +1432,8 @@ def test_delegate_writing_runs_review_when_executor_available(
     def write_chapter(args: dict) -> dict:
         calls["write_chapter"] += 1
         assert args["chapter_id"] == "ch_001"
+        assert args["target_words"] == 2800
+        assert args["temperature"] == 0.25
         return {
             "ok": True,
             "chapter_id": "ch_001",
@@ -1423,7 +1456,11 @@ def test_delegate_writing_runs_review_when_executor_available(
         tool_executors=executors,
     )
 
-    result = orchestrator.delegate_writing("ch_001")
+    result = orchestrator.delegate_writing(
+        "ch_001",
+        target_words=2800,
+        temperature=0.25,
+    )
 
     loaded_state = state_store.load_or_create()
 

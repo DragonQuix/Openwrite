@@ -118,6 +118,13 @@ _DANTE_ACTION_TOOL_DEFINITIONS = [
                 "chapter_id": {"type": "string", "description": "章节 ID"},
                 "guidance": {"type": "string", "description": "额外写作要求"},
                 "target_words": {"type": "integer", "description": "目标字数"},
+                "temperature": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 2,
+                    "default": 0.7,
+                    "description": "生成温度，默认 0.7",
+                },
             },
             "required": ["chapter_id"],
         },
